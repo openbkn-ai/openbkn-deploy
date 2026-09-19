@@ -1,10 +1,10 @@
-# BKN Foundry Deploy
+# OpenBKN Deploy
 
 [中文](README.zh.md) | English
 
-One-click deployment of **BKN Foundry** onto a single-node Kubernetes cluster.
+One-click deployment of **OpenBKN** onto a single-node Kubernetes cluster.
 
-This `deploy` directory provides scripts to install BKN Foundry along with its dependencies including Kubernetes, infrastructure services, and data services.
+This repository provides scripts to install OpenBKN along with its dependencies including Kubernetes, infrastructure services, and data services.
 
 **Platforms:** **Linux** is the recommended and fully documented install target (`preflight.sh`, k3s or kubeadm, data services). **macOS** is **optional** for **local development only** (Docker + kind + `dev/mac.sh`); see **[Mac install (dev)](dev/README.md)** ([中文](dev/README.zh.md)) — not a substitute for Linux production installs.
 
@@ -30,7 +30,7 @@ bash ./deploy.sh openbkn install
 Uses the upstream k3s installer (Traefik disabled; this stack still installs **ingress-nginx** for a consistent chart/accessAddress setup). Override `K3S_INSTALL_URL`, `INSTALL_K3S_VERSION`, or `INSTALL_K3S_MIRROR` if you need a mirror or air-gapped tuning.
 
 ```bash
-cd bkn-foundry/deploy
+cd openbkn-deploy
 
 bash ./deploy.sh k3s install
 
@@ -52,13 +52,13 @@ On the **same Linux host as k3s**, use the file **`/etc/rancher/k3s/k3s.yaml`** 
 **Use this only for Mac validation; for real installs use Linux above.** Local Kubernetes via **kind** — no `preflight.sh` / `k3s` on the Mac host. **`mac.sh` sets `OPENBKN_SKIP_PLATFORM_BOOTSTRAP`** (no host k3s/kubeadm bootstrap). **`openbkn install` now runs `ensure_data_services` first** — same Helm layer as **`data-services install`** (MariaDB, Redis, Kafka, OpenSearch); **`mac.sh` defaults `AUTO_INSTALL_INGRESS_NGINX=false`** so kind’s existing ingress is not duplicated. Set **`OPENBKN_SKIP_DATA_SERVICES_BUNDLE=true`** to skip bundled data installs (advanced / external infra). **`data-services install`** alone remains useful to pre-stage or refresh the data layer. **Apple Silicon:** kind nodes are **arm64**; use arm64/multi-arch images (see `dev/conf/mac-config.yaml`). **Step order:** [dev/README.md](dev/README.md).
 
 ```bash
-cd deploy   # repository deploy/ directory
+cd openbkn-deploy   # repository root
 bash ./dev/mac.sh doctor
 # optional: install missing tools via Homebrew — bash ./dev/mac.sh doctor --fix (or -y doctor --fix to skip confirm)
 bash ./dev/mac.sh cluster up
-bash ./dev/mac.sh bkn-foundry install   # full stack incl. mandatory bkn-safe (auth on); bundled data-services first (same as data-services install)
+bash ./dev/mac.sh openbkn install       # full stack incl. mandatory bkn-safe (auth on); bundled data-services first (same as data-services install)
 # optional: bash ./dev/mac.sh data-services install   # only if you want the data layer without Core, or to refresh it
-# optional: bash ./dev/mac.sh bkn-foundry download
+# optional: bash ./dev/mac.sh openbkn download
 # optional: bash ./dev/mac.sh onboard
 # add leading -y for non-interactive (deploy.sh / onboard)
 ```
@@ -85,12 +85,12 @@ setenforce 0
 dnf install containerd.io
 ```
 
-### Install BKN Foundry
+### Install OpenBKN
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/openbkn-ai/bkn-foundry.git
-cd bkn-foundry/deploy
+git clone https://github.com/openbkn-ai/deploy.git openbkn-deploy
+cd openbkn-deploy
 
 # 2. (Recommended) Pre-install host check / fix
 sudo bash ./preflight.sh                # check-only (default)
@@ -101,16 +101,16 @@ sudo bash ./preflight.sh --help         # all flags (--role, --skip, --report, -
 # Default checks match k8s/kubeadm; for single-node k3s use: sudo bash ./preflight.sh --distro=k3s
 # (same as env KUBE_DISTRO=k3s — shared with deploy.sh)
 
-# 3. Install BKN Foundry
-# Install BKN Foundry full stack
+# 3. Install OpenBKN
+# Install the OpenBKN full stack
 bash ./deploy.sh openbkn install
-# Default is kubeadm (k8s). For single-node k3s instead (--distro must be BEFORE bkn-foundry):
+# Default is kubeadm (k8s). For single-node k3s instead (--distro must appear before openbkn):
 # bash ./deploy.sh --distro=k3s openbkn install
 # or: export KUBE_DISTRO=k3s && bash ./deploy.sh openbkn install
 # The script will interactively prompt for the access address and auto-detect the API server address.
 
 # Or specify addresses explicitly (skips interactive prompts):
-#   --access_address       Address for clients to reach BKN Foundry services (can be IP or domain)
+#   --access_address       Address for clients to reach OpenBKN services (can be IP or domain)
 #   --api_server_address   IP bound to a local network interface for K8s API server (must be a real NIC IP)
 bash ./deploy.sh openbkn install \
   --access_address=<your-ip> \
@@ -136,7 +136,7 @@ sudo bash ./onboard.sh -y     # non-interactive (uses defaults)
 sudo bash ./onboard.sh --help # all flags (--config=models.yaml, --enable-bkn-search, …)
 ```
 
-> **Why `sudo`?** `onboard.sh` reads `$HOME/.openbkn-ai/config.yaml` (written by `sudo deploy.sh` into `/root/.openbkn-ai/`) and writes the `bkn` auth token to `$HOME/.bkn`. Running it without `sudo` falls back to the in-repo template `deploy/conf/config.yaml` and may resolve a different access URL. **macOS dev path** (`bash ./dev/mac.sh onboard`) does **not** need `sudo`. The script also prints this hint at startup; silence with `ONBOARD_SUDO_HINT_DISABLED=1`.
+> **Why `sudo`?** `onboard.sh` reads `$HOME/.openbkn-ai/config.yaml` (written by `sudo deploy.sh` into `/root/.openbkn-ai/`) and writes the `bkn` auth token to `$HOME/.bkn`. Running it without `sudo` falls back to the in-repo template `conf/config.yaml` and may resolve a different access URL. **macOS dev path** (`bash ./dev/mac.sh onboard`) does **not** need `sudo`. The script also prints this hint at startup; silence with `ONBOARD_SUDO_HINT_DISABLED=1`.
 
 > Full preflight / onboard flow and Mermaid diagrams: see [help/en/install.md — Post-install: `onboard.sh`](../help/en/install.md#post-install-onboardsh).
 
@@ -145,7 +145,7 @@ sudo bash ./onboard.sh --help # all flags (--config=models.yaml, --enable-bkn-se
 ### Dev/test: pick chart versions (`--version_file`)
 
 Release installs pin exact chart versions in a committed manifest
-(`release-manifests/<version>/bkn-bkn-foundry.yaml`) — a lockfile, reproducible.
+(`release-manifests/0.1.5/openbkn.yaml`) — a lockfile, reproducible.
 
 For **dev/test** you usually want the newest builds, and CI only republishes the
 components a branch actually changed. `scripts/gen-dev-manifest.sh` resolves each
@@ -265,18 +265,18 @@ The deployment scripts need access to these domains:
 | `mirrors.aliyun.com` | RPM package mirrors |
 | `mirrors.tuna.tsinghua.edu.cn` | `containerd.io` RPM mirror |
 | `registry.aliyuncs.com` | Kubernetes component images |
-| `swr.cn-east-3.myhuaweicloud.com` | BKN Foundry application image registry |
+| `swr.cn-east-3.myhuaweicloud.com` | OpenBKN application image registry |
 | `repo.huaweicloud.com` | Helm binary download |
 | `openbkn-ai.github.io` | OPenbkn Helm chart repository |
 | `rancher-mirror.rancher.cn` | k3s install script / binary (k3s quickstart path; override with `K3S_INSTALL_URL`) |
 
 ## 📦 Deployment Model
 
-`bkn-foundry` is the product-level entrypoint in this repository. The install flow is:
+`openbkn` is the OpenBKN product-level entrypoint in this repository. The install flow is:
 
 1. Install or repair single-node Kubernetes, local-path storage, and ingress-nginx.
 2. Install or repair data services: MariaDB, Redis, Kafka, and OpenSearch.
-3. Deploy the BKN Foundry application charts.
+3. Deploy the OpenBKN application charts.
 
 The Core application layer includes charts for data services management, application deployment, and task orchestration.
 
@@ -285,7 +285,7 @@ The Core application layer includes charts for data services management, applica
 ### Recommended commands
 
 ```bash
-# Install BKN Foundry
+# Install OpenBKN
 ./deploy.sh openbkn install
 
 # Show Core status

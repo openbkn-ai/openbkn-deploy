@@ -7,7 +7,7 @@ metadata:
 
 # OpenBKN deployment
 
-Use this skill when a customer asks to install, upgrade, verify, or diagnose an OpenBKN deployment using this repository's `deploy/` directory.
+Use this skill when a customer asks to install, upgrade, verify, or diagnose an OpenBKN deployment using this repository. The deployment root is the repository root, which contains `deploy.sh`.
 
 ## Scope and authorization
 
@@ -21,11 +21,11 @@ Use this skill when a customer asks to install, upgrade, verify, or diagnose an 
 
 1. Collect only the required deployment inputs: target host, SSH method, sudo/root access, access address, Kubernetes distribution (`k8s` or `k3s`), requested version, registry, whether this is a new install or upgrade, the delivery source (release package or repository URL), and the deployment directory if it already exists.
 2. Inspect the target without changing it: OS, CPU, memory, disk, hostname, time sync, open ports, container runtime, Kubernetes context, `kubectl`, and `helm` availability.
-3. Locate and verify the deployment directory. Prefer the directory supplied by the customer. If absent, do a limited read-only search for a directory containing `deploy/deploy.sh`; if there are zero or multiple candidates, stop and ask the customer to identify the intended directory. Verify the selected directory's source and version before using it.
+3. Locate and verify the deployment directory. Prefer the directory supplied by the customer. If absent, do a limited read-only search for a directory containing `deploy.sh`; if there are zero or multiple candidates, stop and ask the customer to identify the intended directory. Verify the selected directory's source and version before using it.
    - Establish one canonical deployment root for the entire operation. Once selected or created, reuse it for every preflight, manifest, download, and deploy command.
-   - Never create a parallel directory such as `/opt/bkn-foundry-<version>` to resolve a version mismatch. If the selected root's source, commit/tag, `VERSION`, or release manifest does not match the requested release, stop and report the mismatch; replace it only with explicit customer approval or use an explicitly supplied release package in the same approved root.
+   - Never create a parallel directory such as `/opt/openbkn-<version>` to resolve a version mismatch. If the selected root's source, commit/tag, `VERSION`, or release manifest does not match the requested release, stop and report the mismatch; replace it only with explicit customer approval or use an explicitly supplied release package in the same approved root.
    - The deployment script, `VERSION`, release manifest, and charts must come from the same verified source/tag. Record the canonical root, source URL, commit/tag, script version, and manifest path before mutation.
-4. If no verified deployment directory exists, obtain the customer-approved release package or clone the approved repository at the requested tag/commit. If Git is unavailable, use the release package; do not install Git or download an unapproved package without confirmation. Work from the resulting `deploy/` directory.
+4. If no verified deployment directory exists, obtain the customer-approved release package or clone the approved deployment repository at the requested tag/commit. If Git is unavailable, use the release package; do not install Git or download an unapproved package without confirmation. Work from the resulting repository root.
 5. Run the repository preflight in check-only mode first. When the customer confirms host preparation, the default deployment policy is to disable the host firewall; state this explicitly in the confirmation, identify the detected firewall implementation, and report the change after it is made. Do not change cloud security groups or external network firewalls without separate authorization.
 6. For a new install, use the pinned release manifest when one is requested or available. Prefer the repository's documented version entrypoint (for example, `--version=<version>`) when it resolves the same verified manifest; use `--version_file` only when needed and record why. Do not use `--latest` in production unless explicitly authorized. Do not mix a script from one source/tag with a manifest or charts from another.
    - If the target has less than 8 GiB total memory or fewer than 8 logical CPU cores, append both `--set resources.requests.cpu=0m` and `--set resources.requests.memory=0Mi` to the `openbkn install` command, unless the customer explicitly supplied different resource overrides. Report this low-resource override as a lab-only warning; it does not make the host meet the recommended production capacity.
@@ -47,7 +47,7 @@ Use this skill when a customer asks to install, upgrade, verify, or diagnose an 
 ## Upgrade rules
 
 - Treat `git pull` as a code/config change: inspect the diff and identify the target version before installing.
-- Use `--version_file=./release-manifests/<version>/bkn-foundry.yaml` for reproducible production upgrades.
+- Use `--version_file=./release-manifests/0.1.5/openbkn.yaml` for a reproducible 0.1.5 production upgrade.
 - Do not run legacy Trace cleanup merely because the document mentions it; confirm that the target upgrade requires it, take a backup, quiesce writes, and obtain explicit confirmation.
 - Do not assume changing a ConfigMap or `OPENSEARCH_INITIAL_ADMIN_PASSWORD` changes an already-initialized OpenSearch password on an existing PVC. Distinguish application connection settings from the OpenSearch internal admin credential.
 - Do not run `onboard.sh` unless the customer separately requests post-install initialization such as model registration, business-user provisioning, or CLI login setup.

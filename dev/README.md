@@ -1,6 +1,6 @@
 # macOS dev path (`dev/mac.sh`, kind)
 
-**Audience:** Optional for **macOS developers** doing quick validation. **Production deployments and all primary documentation assume Linux** — start with [`deploy/README.md`](../README.md) and [`help/en/install.md`](../../help/en/install.md) / [`help/zh/install.md`](../../help/zh/install.md).
+**Audience:** Optional for **macOS developers** doing quick validation. **Production deployments and all primary documentation assume Linux** — start with the repository [README](../README.md).
 
 English | [中文](README.zh.md)
 
@@ -10,11 +10,11 @@ Local Kubernetes with **kind** plus the same Helm charts as Linux `deploy.sh`. N
 
 ### Repository (clone first)
 
-Scripts and vendored manifests live in the repo tree — **`mac.sh` is not a standalone installer.** Clone **[openbkn-ai/bkn-foundry](https://github.com/openbkn-ai/bkn-foundry)** (check out the branch you deploy from), then **`cd`** into **`deploy/`** before any command below:
+Scripts and vendored manifests live in the repo tree — **`mac.sh` is not a standalone installer.** Clone **[openbkn-ai/deploy](https://github.com/openbkn-ai/deploy)** (check out the branch you deploy from), then run commands from the repository root:
 
 ```bash
-git clone https://github.com/openbkn-ai/bkn-foundry.git
-cd bkn-foundry/deploy   # always run bash ./dev/mac.sh ... from this directory
+git clone https://github.com/openbkn-ai/deploy.git openbkn-deploy
+cd openbkn-deploy   # always run bash ./dev/mac.sh ... from this directory
 ```
 
 Same layout applies if your product tarball extracts to a **`bkn-core/`** root with a **`deploy/`** subdirectory.
@@ -26,25 +26,25 @@ On **Apple Silicon** Macs, kind nodes are **linux/arm64** by default. Charts pul
 ### Access URL (HTTP and automatic host)
 
 - **HTTP vs HTTPS:** HTTPS uses TLS to encrypt traffic and verify the server identity; HTTP is unencrypted. On a trusted LAN, HTTP avoids dealing with local TLS certs and is typical for dev. Browsers may still show “Not secure” for HTTP — expected.
-- **Automatic IP:** Your `mac-config.yaml` uses `accessAddress.scheme: http` and may **omit** `host` (see the example file). On `bkn-foundry install`, the flow detects your LAN IP (on macOS, usually the default-route interface) and writes it into values so other devices on the network can open the UI. Set `accessAddress.host` yourself (for example `localhost`) if you want same-machine-only URLs.
+- **Automatic IP:** Your `mac-config.yaml` uses `accessAddress.scheme: http` and may **omit** `host` (see the example file). On `openbkn install`, the flow detects your LAN IP (on macOS, usually the default-route interface) and writes it into values so other devices on the network can open the UI. Set `accessAddress.host` yourself (for example `localhost`) if you want same-machine-only URLs.
 
 ## Order of operations
 
-Run from the **`deploy/`** directory (`cd deploy` in this repo). Invoke **`mac.sh` with bash** (e.g. `bash ./dev/mac.sh ...`). **`openbkn` / `bkn-foundry`:** the wrapper installs the **full stack including bkn-safe** (auth is mandatory now).
+Run from the repository root. Invoke **`mac.sh` with bash** (e.g. `bash ./dev/mac.sh ...`). **`openbkn`:** the wrapper installs the **full stack including bkn-safe** (auth is mandatory now).
 
 | Step | Command | Required? |
 |------|---------|-----------|
 | 1 | `bash ./dev/mac.sh doctor` | Recommended |
 | 2 | `bash ./dev/mac.sh doctor --fix` (or `-y doctor --fix`) | If something is missing |
 | 3 | `bash ./dev/mac.sh cluster up` | **Yes** before install |
-| 4 | `bash ./dev/mac.sh data-services install` | Optional — only to install/refresh **data layer alone**; **`bkn-foundry install` invokes the same bundled install first** (`OPENBKN_SKIP_DATA_SERVICES_BUNDLE=true` skips it). |
-| 5 | `bash ./dev/mac.sh bkn-foundry download` | Optional (local chart cache) |
-| 6 | `bash ./dev/mac.sh bkn-foundry install` | **Yes** — deploy Core (full stack incl. bkn-safe); runs bundled data-services beforehand unless skipped |
+| 4 | `bash ./dev/mac.sh data-services install` | Optional — only to install/refresh **data layer alone**; **`openbkn install` invokes the same bundled install first** (`OPENBKN_SKIP_DATA_SERVICES_BUNDLE=true` skips it). |
+| 5 | `bash ./dev/mac.sh openbkn download` | Optional (local chart cache) |
+| 6 | `bash ./dev/mac.sh openbkn install` | **Yes** — deploy Core (full stack incl. bkn-safe); runs bundled data-services beforehand unless skipped |
 | 7 | `bash ./dev/mac.sh onboard` | Optional (models/BKN; needs `bkn` CLI; add `-y` to skip prompts) |
 
 Optional (same `deploy.sh` Helm paths as Linux; you need a working cluster + values that match your dependencies): `bash ./dev/mac.sh isf install|download|uninstall|status`. ISF may require DB/config beyond the minimal mac sample—see Linux `deploy.sh` help and your `CONFIG_YAML_PATH`.
 
-**Minimal path:** `cluster up` → `bkn-foundry install` (runs **data-services** first). If you skip that bundle (`OPENBKN_SKIP_DATA_SERVICES_BUNDLE=true`), you must provide reachable DB/Kafka/etc. yourself or run **`data-services install`** beforehand.
+**Minimal path:** `cluster up` → `openbkn install` (runs **data-services** first). If you skip that bundle (`OPENBKN_SKIP_DATA_SERVICES_BUNDLE=true`), you must provide reachable DB/Kafka/etc. yourself or run **`data-services install`** beforehand.
 
 **Pause to save resources (keep the cluster):** Quit **Docker Desktop**. Kind uses Docker, so that stops the cluster without `kind delete`. Open Docker again when you want to keep working.
 
@@ -97,7 +97,7 @@ See also: top-of-file comments in [`mac.sh`](mac.sh), `bash ./dev/mac.sh -h`.
   kind load docker-image <img:tag> --name bkn-dev        # push a host-built image into kind
   ```
 
-- **`mac.sh isf install` switches the stack to HTTPS automatically**: ISF (hydra/oauth2) requires HTTPS issuers, so the install path will (1) flip `mac-config.yaml` `accessAddress` to `https/443`, (2) generate a self-signed TLS cert + Secret `bkn-ingress-tls`, (3) `helm upgrade` any already-installed `bkn-foundry` releases so they pick up the new https `accessAddress`, then (4) install ISF and patch its ingress with TLS. Total time ~10 min on a fresh install. Browsers will warn on the self-signed cert — accept once. To stay on HTTP, just don't install ISF — the default full stack (incl. bkn-safe) also runs on HTTP; only ISF forces HTTPS.
+- **`mac.sh isf install` switches the stack to HTTPS automatically**: ISF (hydra/oauth2) requires HTTPS issuers, so the install path will (1) flip `mac-config.yaml` `accessAddress` to `https/443`, (2) generate a self-signed TLS cert + Secret `bkn-ingress-tls`, (3) `helm upgrade` any already-installed OpenBKN releases so they pick up the new https `accessAddress`, then (4) install ISF and patch its ingress with TLS. Total time ~10 min on a fresh install. Browsers will warn on the self-signed cert — accept once. To stay on HTTP, just don't install ISF — the default full stack (incl. bkn-safe) also runs on HTTP; only ISF forces HTTPS.
 
 - **Quick verify after install** (proxy unset, Core pods Ready):
   ```bash
@@ -110,7 +110,7 @@ See also: top-of-file comments in [`mac.sh`](mac.sh), `bash ./dev/mac.sh -h`.
 
 - **`failed to connect to the docker API` / `docker.sock: no such file` when running `cluster up`:** the Docker **CLI** is installed but the **engine** is not running. Open **Docker Desktop**, wait until it is fully started, run `docker info` to confirm, then retry `cluster up`. `doctor` also checks engine reachability. **`doctor --fix` does not start Docker** (Homebrew only installs the CLI/cask); if everything else is already installed, just start Desktop and re-run `doctor`.
 
-- **`bkn-core-data-migrator` / pre-install job `BackoffLimitExceeded`:** ensure the **data layer** is up (normally automatic with **`bkn-foundry install`**; otherwise run **`bash ./dev/mac.sh data-services install`**). Ensure **`depServices.rds`** points at in-cluster MariaDB after install (`mac-config` loopback placeholders may be updated when MariaDB is installed). Remove a failed release if Helm left it pending: `helm uninstall bkn-core-data-migrator -n <namespace>` then re-run `bkn-foundry install`.
+- **`bkn-core-data-migrator` / pre-install job `BackoffLimitExceeded`:** ensure the **data layer** is up (normally automatic with **`openbkn install`**; otherwise run **`bash ./dev/mac.sh data-services install`**). Ensure **`depServices.rds`** points at in-cluster MariaDB after install (`mac-config` loopback placeholders may be updated when MariaDB is installed). Remove a failed release if Helm left it pending: `helm uninstall bkn-core-data-migrator -n <namespace>` then re-run `openbkn install`.
 
 ### Onboard and `openbkn` (full install)
 

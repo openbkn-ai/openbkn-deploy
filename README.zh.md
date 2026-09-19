@@ -1,10 +1,10 @@
-# BKN Foundry Deploy
+# OpenBKN 部署
 
 中文 | [English](README.md)
 
-一键将 **BKN Foundry** 部署到单节点 Kubernetes 集群。
+一键将 **OpenBKN** 部署到单节点 Kubernetes 集群。
 
-这个 `deploy` 目录提供脚本安装 BKN Foundry 及其依赖，包括 Kubernetes、基础设施服务和数据服务。
+本仓库提供脚本安装 OpenBKN 及其依赖，包括 Kubernetes、基础设施服务和数据服务。
 
 **平台说明：** **Linux** 是推荐且文档最完整的目标环境（`preflight.sh`、k3s/kubeadm、数据服务等）。**macOS** 仅作**本机开发/验证**可选方案（Docker + kind + `dev/mac.sh`），详见 **[Mac 安装（开发向）](dev/README.zh.md)**（[English](dev/README.md)），**不能**替代 Linux 上的生产安装。
 
@@ -30,7 +30,7 @@ bash ./deploy.sh openbkn install
 使用官方 k3s 安装脚本（禁用 Traefik；仍会安装 **ingress-nginx** 以保持与现有 chart/accessAddress 一致）。可通过 `K3S_INSTALL_URL`、`INSTALL_K3S_VERSION`、`INSTALL_K3S_MIRROR` 等环境变量切换镜像或版本。
 
 ```bash
-cd bkn-foundry/deploy
+cd openbkn-deploy
 
 bash ./deploy.sh k3s install
 
@@ -52,13 +52,13 @@ bash ./deploy.sh --distro=k3s openbkn install
 **仅供 Mac 上做验证；正式安装请以本文 Linux 章节为准。** 本机用 **kind** 起 Kubernetes，不在 Mac 上跑 `preflight.sh` / `k3s install`。**`mac.sh` 设置 `OPENBKN_SKIP_PLATFORM_BOOTSTRAP`**。**`openbkn install` 会先执行 `ensure_data_services`**（与单独跑 `data-services install` 一致：MariaDB、Redis、Kafka、OpenSearch）；**`mac.sh` 默认 `AUTO_INSTALL_INGRESS_NGINX=false`**，避免重复装 ingress。需要跳过自带数据层时使用 **`OPENBKN_SKIP_DATA_SERVICES_BUNDLE=true`**（高级用法 / 外接中间件）。仍可单独执行 **`data-services install`** 只做数据层或刷新。**Apple Silicon：** kind 节点为 **arm64**；**步骤见 [dev/README.zh.md](dev/README.zh.md)。**
 
 ```bash
-cd deploy   # 仓库的 deploy/ 目录
+cd openbkn-deploy   # 仓库根目录
 bash ./dev/mac.sh doctor
 # 可选：用 Homebrew 补全缺失工具 — bash ./dev/mac.sh doctor --fix（或 -y doctor --fix 跳过确认）
 bash ./dev/mac.sh cluster up
-bash ./dev/mac.sh bkn-foundry install   # 全量含必选 bkn-safe（认证已启用）；前置自动装 data-services（与 data-services install 相同）
+bash ./dev/mac.sh openbkn install       # 全量含必选 bkn-safe（认证已启用）；前置自动装 data-services（与 data-services install 相同）
 # 可选：bash ./dev/mac.sh data-services install   # 仅数据层 / 刷新
-# 可选：bash ./dev/mac.sh bkn-foundry download
+# 可选：bash ./dev/mac.sh openbkn download
 # 可选：bash ./dev/mac.sh onboard；需非交互时在命令前加 -y
 ```
 
@@ -84,12 +84,12 @@ setenforce 0
 dnf install containerd.io
 ```
 
-### 安装 BKN Foundry
+### 安装 OpenBKN
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/openbkn-ai/bkn-foundry.git
-cd bkn-foundry/deploy
+git clone https://github.com/openbkn-ai/deploy.git openbkn-deploy
+cd openbkn-deploy
 
 # 2.（推荐）装机前体检 / 修复
 sudo bash ./preflight.sh                # 仅检查（默认）
@@ -100,16 +100,16 @@ sudo bash ./preflight.sh --help         # 全部参数（--role、--skip、--rep
 # 默认体检对齐 k8s/kubeadm；走单节点 k3s 时用：sudo bash ./preflight.sh --distro=k3s
 #（与 deploy 共用环境变量 KUBE_DISTRO=k3s）
 
-# 3. 安装 BKN Foundry
-# 安装 BKN Foundry 全量服务
+# 3. 安装 OpenBKN
+# 安装 OpenBKN 全量服务
 bash ./deploy.sh openbkn install
-# 默认走 kubeadm（k8s）。若改用单节点 k3s（--distro 须写在 bkn-foundry 之前）：
+# 默认走 kubeadm（k8s）。若改用单节点 k3s（--distro 须写在 openbkn 之前）：
 # bash ./deploy.sh --distro=k3s openbkn install
 # 或：export KUBE_DISTRO=k3s && bash ./deploy.sh openbkn install
 # 脚本会交互式提示输入访问地址，并自动检测 API Server 地址。
 
 # 或显式指定地址（跳过交互提示）：
-#   --access_address       客户端访问 BKN Foundry 服务的地址（可以是 IP 或域名）
+#   --access_address       客户端访问 OpenBKN 服务的地址（可以是 IP 或域名）
 #   --api_server_address   K8s API Server 绑定的本机网卡 IP（必须是真实的网卡地址）
 bash ./deploy.sh openbkn install \
   --access_address=<你的IP> \
@@ -134,7 +134,7 @@ sudo bash ./onboard.sh -y     # 非交互模式（按默认）
 sudo bash ./onboard.sh --help # 全部参数（--config=models.yaml、--enable-bkn-search 等）
 ```
 
-> **为什么要 `sudo`？** `onboard.sh` 会读 `$HOME/.openbkn-ai/config.yaml`（由 `sudo deploy.sh` 写到 `/root/.openbkn-ai/` 下）并把 `bkn` 认证 token 写到 `$HOME/.bkn`。不加 `sudo` 会回退到仓库内模板 `deploy/conf/config.yaml`，可能解析出和安装时不一致的 access URL。**macOS 开发路径**（`bash ./dev/mac.sh onboard`）**不需要** `sudo`。脚本启动时也会打印这条提示；可用 `ONBOARD_SUDO_HINT_DISABLED=1` 关闭。
+> **为什么要 `sudo`？** `onboard.sh` 会读 `$HOME/.openbkn-ai/config.yaml`（由 `sudo deploy.sh` 写到 `/root/.openbkn-ai/` 下）并把 `bkn` 认证 token 写到 `$HOME/.bkn`。不加 `sudo` 会回退到仓库内模板 `conf/config.yaml`，可能解析出和安装时不一致的 access URL。**macOS 开发路径**（`bash ./dev/mac.sh onboard`）**不需要** `sudo`。脚本启动时也会打印这条提示；可用 `ONBOARD_SUDO_HINT_DISABLED=1` 关闭。
 
 > 完整的 preflight / onboard 流程与 Mermaid 流程图见 [help/zh/install.md — Post-install：`onboard.sh`](../help/zh/install.md#post-installonboardsh安装后引导)。
 
@@ -142,7 +142,7 @@ sudo bash ./onboard.sh --help # 全部参数（--config=models.yaml、--enable-b
 
 ### 开发/测试：选择 chart 版本（`--version_file`）
 
-正式安装会在提交进仓库的 manifest（`release-manifests/<版本>/bkn-bkn-foundry.yaml`）里
+正式安装会在提交进仓库的 manifest（`release-manifests/0.1.5/openbkn.yaml`）里
 **钉死**各 chart 版本 —— 即 lockfile，可复现。
 
 **开发/测试**通常想要最新构建，而 CI 只会重新发布某分支**实际改动到**的组件。
@@ -257,18 +257,18 @@ OPENBKN_CORE_REQ_CPU=200m OPENBKN_CORE_REQ_MEM=512Mi \
 | `mirrors.aliyun.com` | RPM 软件包源 |
 | `mirrors.tuna.tsinghua.edu.cn` | `containerd.io` RPM 源 |
 | `registry.aliyuncs.com` | Kubernetes 组件镜像 |
-| `swr.cn-east-3.myhuaweicloud.com` | BKN Foundry 应用镜像仓库 |
+| `swr.cn-east-3.myhuaweicloud.com` | OpenBKN 应用镜像仓库 |
 | `repo.huaweicloud.com` | Helm 二进制下载 |
 | `openbkn-ai.github.io` | OPenbkn Helm Chart 仓库 |
 | `rancher-mirror.rancher.cn` | k3s 安装脚本/二进制（k3s 快速路径；可用 `K3S_INSTALL_URL` 覆盖） |
 
 ## 📦 部署模型
 
-`bkn-foundry` 是这个 `deploy` 目录里的产品入口，安装链路如下：
+`openbkn` 是本仓库的 OpenBKN 产品入口，安装链路如下：
 
 1. 安装或补齐单节点 Kubernetes、local-path storage、ingress-nginx。
 2. 安装或补齐数据服务：MariaDB、Redis、Kafka、OpenSearch。
-3. 部署 BKN Foundry 应用层 chart。
+3. 部署 OpenBKN 应用层 chart。
 
 Core 应用层包括数据服务管理、应用部署和任务编排相关的 chart。
 
@@ -279,7 +279,7 @@ Core 应用层包括数据服务管理、应用部署和任务编排相关的 ch
 ### 推荐命令
 
 ```bash
-# 安装 BKN Foundry（推荐入口）
+# 安装 OpenBKN（推荐入口）
 ./deploy.sh openbkn install
 
 # 查看 Core 状态

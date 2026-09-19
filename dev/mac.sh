@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# BKN Foundry — macOS dev helper (kind + Helm). Does NOT run Linux preflight/k3s/kubeadm.
+# OpenBKN — macOS dev helper (kind + Helm). Does NOT run Linux preflight/k3s/kubeadm.
 #
 # Typical order (from repo deploy/: cd deploy):
 #   1. doctor                 — optional; check docker / kind / kubectl / helm / node
 #   2. doctor --fix           — optional; install missing CLIs via Homebrew (prompts; -y skips)
 #   3. cluster up             — kind + ingress-nginx; context becomes kind-<KIND_CLUSTER_NAME>
 #   4. data-services install  — MariaDB / Redis / Kafka / OpenSearch (required before Core on mac)
-#   5. bkn-foundry download  — optional; cache charts locally
-#   6. bkn-foundry install   — Helm install bkn-foundry (full stack incl. bkn-safe)
+#   5. openbkn download  — optional; cache charts locally
+#   6. openbkn install   — Helm install OpenBKN (full stack incl. bkn-safe)
 #   7. onboard                — optional; needs bkn CLI + Core up (add -y for non-interactive)
 #   Teardown: cluster down
 #   Full write-up: deploy/dev/README.md (EN) · deploy/dev/README.zh.md (中文)
@@ -19,8 +19,8 @@
 #   bash deploy/dev/mac.sh cluster down
 #   bash deploy/dev/mac.sh cluster status
 #   bash deploy/dev/mac.sh data-services install
-#   bash deploy/dev/mac.sh bkn-foundry install
-#   bash deploy/dev/mac.sh bkn-foundry download
+#   bash ./dev/mac.sh openbkn install
+#   bash ./dev/mac.sh openbkn download
 #   bash deploy/dev/mac.sh onboard
 #
 # Global flags (same as deploy.sh; must come first):
@@ -56,14 +56,14 @@ usage() {
     local readme="${SELF_DIR}/README.md"
     local mac_cfg="${SELF_DIR}/conf/mac-config.yaml"
     cat <<EOF
-BKN Foundry mac dev (kind) — thin wrapper around deploy/onboard.
+OpenBKN mac dev (kind) — thin wrapper around deploy/onboard.
 
-Typical order (shortest path: doctor? → cluster up → bkn-foundry install):
+Typical order (shortest path: doctor? → cluster up → openbkn install):
   1) doctor                     optional toolchain check
   2) cluster up                 kind + ingress; kubectl context kind-<name>
-  3) data-services install      optional if you use bkn-foundry install (it runs the same bundled data layer first); run alone to pre-stage or refresh only
-  4) bkn-foundry download      optional; charts cache only
-  5) bkn-foundry install ...   Helm install full stack incl. bkn-safe (bundled data-services first unless OPENBKN_SKIP_DATA_SERVICES_BUNDLE=true)
+  3) data-services install      optional if you use openbkn install (it runs the same bundled data layer first); run alone to pre-stage or refresh only
+  4) openbkn download           optional; charts cache only
+  5) openbkn install ...        Helm install full stack incl. bkn-safe (bundled data-services first unless OPENBKN_SKIP_DATA_SERVICES_BUNDLE=true)
   6) onboard                    optional; after Core is up
   cluster down                  delete kind cluster
   See ${readme}
@@ -71,7 +71,7 @@ Typical order (shortest path: doctor? → cluster up → bkn-foundry install):
 Commands:
   doctor [--fix] [-y|--yes]        Check toolchain; --fix runs brew after confirm (use -y to skip prompt)
   cluster up|down|status           kind cluster + ingress-nginx (kind manifest)
-  data-services install|uninstall  Platform data layer (optional before Core: bkn-foundry install runs it automatically on mac); uninstall tears down bundled charts
+  data-services install|uninstall  Platform data layer (optional before Core: openbkn install runs it automatically on mac); uninstall tears down bundled charts
   openbkn <action> ...             Delegates to deploy.sh (aliases: bkn-foundry, foundry, bkn)
   onboard [args ...]               Runs deploy/onboard.sh
 
@@ -82,9 +82,9 @@ Examples:
   ${cmd} doctor --fix -y
   ${cmd} cluster up
   ${cmd} data-services install
-  ${cmd} bkn-foundry install --full   # full manifest profile
-  ${cmd} bkn-foundry install
-  ${cmd} bkn-foundry download
+  ${cmd} openbkn install --full   # full manifest profile
+  ${cmd} openbkn install
+  ${cmd} openbkn download
   ${cmd} onboard
 
 Environment:

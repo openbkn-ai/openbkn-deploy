@@ -23,18 +23,17 @@ Do not request a password in ordinary chat. Use the platform's secret input, an 
 The customer should provide the deployment directory when it exists. Verify it before use:
 
 ```bash
-test -x <customer-directory>/deploy/deploy.sh
-test -f <customer-directory>/AGENTS.md
+test -x <customer-directory>/deploy.sh
 ```
 
-If no directory is supplied, only inspect the current working directory and conventional locations such as `/opt/openbkn`, `/opt/bkn-foundry`, `/srv/bkn-foundry`, and `/root/bkn-foundry`. A candidate must contain `deploy/deploy.sh`. If discovery finds more than one candidate, report their paths and wait for the customer to choose; never select one based on name or modification time alone.
+If no directory is supplied, only inspect the current working directory and conventional locations such as `/opt/openbkn`, `/opt/openbkn-deploy`, `/srv/openbkn-deploy`, and `/root/openbkn-deploy`. A candidate must contain `deploy.sh`. If discovery finds more than one candidate, report their paths and wait for the customer to choose; never select one based on name or modification time alone.
 
-After selecting a candidate, declare it the canonical deployment root and use that exact path for the rest of the operation. Do not create a second version-suffixed root (for example, `/opt/bkn-foundry-0.1.4`) to work around a mismatch. Verify, in the same root, all of the following before any remote mutation:
+After selecting a candidate, declare it the canonical deployment root and use that exact path for the rest of the operation. Do not create a second version-suffixed root (for example, `/opt/openbkn-0.1.4`) to work around a mismatch. Verify, in the same root, all of the following before any remote mutation:
 
 ```bash
-test -x <root>/deploy/deploy.sh
+test -x <root>/deploy.sh
 test -f <root>/VERSION
-test -f <root>/deploy/release-manifests/<version>/bkn-foundry.yaml
+test -f <root>/release-manifests/<version>/openbkn.yaml  # 0.1.5+
 git -C <root> describe --tags --always --dirty  # when Git metadata exists
 cat <root>/VERSION
 ```
@@ -51,13 +50,12 @@ git -C <candidate-directory> remote -v
 First prefer a customer-provided, versioned release package. If the approved delivery method is Git, clone the approved repository and check out the requested tag or commit before running any deploy script:
 
 ```bash
-git clone https://github.com/openbkn-ai/bkn-foundry.git
-cd bkn-foundry
+git clone https://github.com/openbkn-ai/deploy.git openbkn-deploy
+cd openbkn-deploy
 git checkout <approved-tag-or-commit>
-cd deploy
 ```
 
-For a production installation, report the resolved commit and the selected `release-manifests/<version>/bkn-foundry.yaml` before continuing. Do not run `git pull` blindly on a customer server; it can silently change the deployment version.
+For a production installation, report the resolved commit and the selected manifest (for 0.1.5, `release-manifests/0.1.5/openbkn.yaml`) before continuing. Do not run `git pull` blindly on a customer server; it can silently change the deployment version.
 
 Prefer the repository's documented version entrypoint, such as `deploy.sh openbkn install --version=<version>`, when it resolves the verified manifest in the canonical root. If using `--version_file`, confirm it points inside that same root and record the reason. Never mix a script from one checkout/tag with a manifest or charts from another checkout/tag.
 
@@ -76,7 +74,7 @@ After the read-only CPU and memory check, if either condition is true—total me
 
 Treat this as a lab-only scheduling override and report it in the confirmation and final result. It does not waive other preflight failures and does not change the host's recommended-capacity warning. If the customer explicitly provides resource settings, preserve those settings and report that the automatic override was not applied.
 
-If Git is unavailable, do not install it automatically. Ask the customer to provide the approved release package or explicitly authorize installing Git. Extract a customer-provided package only into a customer-approved directory, then verify that it contains `deploy/deploy.sh` before continuing.
+If Git is unavailable, do not install it automatically. Ask the customer to provide the approved release package or explicitly authorize installing Git. Extract a customer-provided package only into a customer-approved directory, then verify that it contains `deploy.sh` before continuing.
 
 ## Read-only checks
 

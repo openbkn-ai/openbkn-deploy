@@ -197,7 +197,7 @@ mac_doctor_apply_fixes() {
     return 0
 }
 
-# Inspect Docker engine memory budget and warn when it is too low for BKN Foundry
+# Inspect Docker engine memory budget and warn when it is too low for OpenBKN
 # + bundled data services (mariadb/redis/kafka/opensearch). Warning only —
 # does NOT set fail=1, since the user can still proceed (just slower / OOM-prone).
 # Threshold defaults are tuned for the full profile + data-services on kind:
@@ -215,7 +215,7 @@ mac_doctor_check_docker_memory() {
     min_gb="${MAC_DOCTOR_MIN_MEM_GB:-12}"
     rec_gb="${MAC_DOCTOR_REC_MEM_GB:-16}"
     if (( $(awk -v m="${mem_gb}" -v t="${min_gb}" 'BEGIN{print (m+0 < t+0)}') )); then
-        printf '%b[WARNING]%b docker memory %s GB < %s GB minimum (BKN Foundry + data-services likely to OOM; redis/bkn-backend will crash-restart)\n' \
+        printf '%b[WARNING]%b docker memory %s GB < %s GB minimum (OpenBKN + data-services likely to OOM; redis/bkn-backend will crash-restart)\n' \
             "${MAC_D_WARN}" "${MAC_D_RESET}" "${mem_gb}" "${min_gb}"
         printf '  %bto fix:%b Docker Desktop → Settings → Resources → %bMemory ≥ %s GB%b → Apply & restart\n' \
             "${MAC_D_DIM}" "${MAC_D_RESET}" "${MAC_D_BOLD}" "${rec_gb}" "${MAC_D_RESET}"
@@ -333,7 +333,7 @@ mac_doctor() {
         printf '\n'
         printf '  %bNext:%b run from your %bdeploy/%b directory:\n' "${MAC_D_DIM}" "${MAC_D_RESET}" "${MAC_D_BOLD}" "${MAC_D_RESET}"
         printf '    bash ./dev/mac.sh cluster up\n'
-        printf '    bash ./dev/mac.sh bkn-foundry install\n'
+        printf '    bash ./dev/mac.sh openbkn install\n'
         printf '  %bOptional:%b bash ./dev/mac.sh onboard -y\n' "${MAC_D_DIM}" "${MAC_D_RESET}"
         printf '  %bGuide:%b deploy/dev/README.md · README.zh.md\n' "${MAC_D_DIM}" "${MAC_D_RESET}"
     fi
@@ -380,9 +380,9 @@ mac_prepare_isf_https() {
     # If bkn-foundry releases already exist they were rendered with the old http
     # accessAddress; refresh them so the in-cluster URLs/issuers match the new https.
     if helm list -n "${ns}" -q 2>/dev/null | grep -qE '.'; then
-        mac_log_info "bkn-foundry releases already in ${ns}; running 'bkn-foundry install' to refresh accessAddress (https/443)"
+        mac_log_info "OpenBKN releases already in ${ns}; running 'openbkn install' to refresh accessAddress (https/443)"
         bash "${DEPLOY_ROOT}/deploy.sh" openbkn install || \
-            mac_log_warn "bkn-foundry refresh failed; you may need to re-run 'mac.sh bkn-foundry install' manually"
+            mac_log_warn "OpenBKN refresh failed; you may need to re-run 'mac.sh openbkn install' manually"
     fi
 }
 

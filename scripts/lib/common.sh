@@ -773,6 +773,17 @@ resolve_embedded_release_manifest() {
     local candidate="${RELEASE_MANIFESTS_DIR}/${version}/${product}.yaml"
     if [[ -f "${candidate}" ]]; then
         echo "${candidate}"
+        return 0
+    fi
+
+    # OpenBKN 0.1.5 renamed only the aggregate manifest filename. Keep the
+    # bkn-foundry product identity for validation and older release manifests,
+    # while accepting the renamed file for this and future OpenBKN releases.
+    if [[ "${product}" == "bkn-foundry" ]]; then
+        candidate="${RELEASE_MANIFESTS_DIR}/${version}/openbkn.yaml"
+        if [[ -f "${candidate}" ]]; then
+            echo "${candidate}"
+        fi
     fi
 }
 
@@ -785,9 +796,16 @@ resolve_latest_embedded_release_manifest() {
         return 0
     fi
 
-    find "${RELEASE_MANIFESTS_DIR}" -mindepth 2 -maxdepth 2 -type f -name "${product}.yaml" 2>/dev/null \
-        | sort -V \
-        | tail -1
+    if [[ "${product}" == "bkn-foundry" ]]; then
+        find "${RELEASE_MANIFESTS_DIR}" -mindepth 2 -maxdepth 2 -type f \
+            \( -name "${product}.yaml" -o -name "openbkn.yaml" \) 2>/dev/null \
+            | sort -V \
+            | tail -1
+    else
+        find "${RELEASE_MANIFESTS_DIR}" -mindepth 2 -maxdepth 2 -type f -name "${product}.yaml" 2>/dev/null \
+            | sort -V \
+            | tail -1
+    fi
 }
 
 # Resolve the exact chart version for one aggregate release.
