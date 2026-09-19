@@ -453,12 +453,25 @@ preflight_check_swap_selinux() {
 }
 
 # --- firewall ------------------------------------------------------------------
+_preflight_openbkn_firewall_enabled() {
+    if declare -F openbkn_firewall_enabled >/dev/null 2>&1; then
+        openbkn_firewall_enabled
+        return
+    fi
+    [[ "${OPENBKN_FIREWALL_ENABLED:-}" == "true" ]] \
+        || { [[ -z "${OPENBKN_FIREWALL_ENABLED:-}" ]] && [[ -f "${OPENBKN_FIREWALL_MARKER_FILE:-/etc/openbkn-deploy/firewall-enabled}" ]]; }
+}
+
 preflight_check_firewall() {
     preflight_skip "firewall" && return 0
     log_info "Checking local firewall..."
 
     if systemctl is-active --quiet firewalld 2>/dev/null; then
-        preflight_warn "firewalld is active; recommend stop/disable for one-node install (or open required ports)"
+        if _preflight_openbkn_firewall_enabled; then
+            preflight_ok "firewalld is active; OpenBKN will reconcile its scoped rules during installation"
+        else
+            preflight_warn "firewalld is active; recommend stop/disable for one-node install (or set OPENBKN_FIREWALL_ENABLED=true to manage scoped rules)"
+        fi
     else
         preflight_ok "firewalld is not active (or not installed)"
     fi
@@ -2468,7 +2481,7 @@ preflight_apply_safe_fixes() {
     fi
 
     # --- 7) firewalld / ufw / selinux / system-tuning (existing order) -------
-    if systemctl is-active --quiet firewalld 2>/dev/null; then
+    if systemctl is-active --quiet firewalld 2>/dev/null && ! _preflight_openbkn_firewall_enabled; then
         if preflight_confirm_fix "firewalld" \
             "systemctl stop firewalld && systemctl disable firewalld" \
             "Disables host firewall for lab-style installs."; then

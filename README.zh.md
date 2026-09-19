@@ -84,6 +84,21 @@ setenforce 0
 dnf install containerd.io
 ```
 
+### 保留 firewalld（可选）
+
+默认流程沿用关闭主机防火墙的兼容模式。若必须保留或重新开启 `firewalld`，在安装前显式启用 OpenBKN 的规则收敛；脚本会启动并设为开机启动 `firewalld`，只开放实际 Ingress 的 HTTP/HTTPS 端口，将实际 Pod/Service 网段和已发现的 CNI 接口放入内部 `trusted` 区域。Kubernetes API 默认仅允许节点自身访问，`6443` 不对公网开放。
+
+```bash
+export OPENBKN_FIREWALL_ENABLED=true
+# 仅远程管理集群时才设置；多个网段以逗号分隔。
+# export K8S_API_ALLOWED_CIDRS="10.10.0.0/16,192.168.1.50/32"
+bash ./deploy.sh openbkn install
+```
+
+Ingress 端口从已安装 Controller 的 `hostPort` 或 `nodePort` 读取，因此会适配 `INGRESS_NGINX_HTTP_PORT`、`INGRESS_NGINX_HTTPS_PORT` 的自定义值；每次安装或升级都会重新收敛规则。
+
+启用状态会持久化在 `/etc/openbkn-deploy/firewall-enabled`。后续升级即使不再设置 `OPENBKN_FIREWALL_ENABLED`，也会继续使用并收敛 OpenBKN 的防火墙规则；若本次显式设置为 `false`，则本次执行跳过防火墙管理。使用 `OPENBKN_FIREWALL_ENABLED=forget` 可永久取消 OpenBKN 托管状态，但不会关闭 firewalld 或删除已有规则。
+
 ### 安装 OpenBKN
 
 ```bash

@@ -1449,6 +1449,7 @@ install_openbkn() {
         diagnose_cluster_context
         return 1
     fi
+    reconcile_openbkn_firewall all || return 1
 
     # macOS kind / BYOK: platform bootstrap is skipped, so ensure_data_services is not run above.
     # Install the same bundled data layer as `deploy.sh data-services install` unless opted out.

@@ -29,6 +29,7 @@ source "${SCRIPT_DIR}/scripts/services/mariadb.sh"
 source "${SCRIPT_DIR}/scripts/services/redis.sh"
 source "${SCRIPT_DIR}/scripts/services/kafka.sh"
 source "${SCRIPT_DIR}/scripts/services/ingress_nginx.sh"
+source "${SCRIPT_DIR}/scripts/services/firewall.sh"
 source "${SCRIPT_DIR}/scripts/services/opensearch.sh"
 source "${SCRIPT_DIR}/scripts/services/openbkn.sh"
 source "${SCRIPT_DIR}/scripts/services/status.sh"
@@ -552,10 +553,12 @@ main() {
                 install_helm
                 
                 check_prerequisites
+                reconcile_openbkn_firewall api
                 init_k8s_master
                 allow_master_scheduling
                 install_cni
                 wait_for_dns
+                reconcile_openbkn_firewall internal
 
                 if [[ "${AUTO_INSTALL_LOCALPV}" == "true" ]]; then
                     if [[ -z "$(kubectl get storageclass --no-headers 2>/dev/null)" ]]; then
@@ -597,7 +600,9 @@ main() {
             install|init)
                 check_root
                 install_helm || exit 1
+                reconcile_openbkn_firewall api || exit 1
                 install_k3s || exit 1
+                reconcile_openbkn_firewall internal || exit 1
                 if [[ "${AUTO_INSTALL_INGRESS_NGINX}" == "true" ]]; then
                     install_ingress_nginx || exit 1
                 fi

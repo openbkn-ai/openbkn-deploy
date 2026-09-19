@@ -1539,7 +1539,9 @@ ensure_k3s() {
     log_info "No running k3s cluster detected. Installing k3s first..."
     check_root
     install_helm || return 1
+    reconcile_openbkn_firewall api || return 1
     install_k3s || return 1
+    reconcile_openbkn_firewall internal || return 1
 
     if [[ "${AUTO_INSTALL_INGRESS_NGINX}" == "true" ]]; then
         install_ingress_nginx || return 1
@@ -1568,10 +1570,12 @@ ensure_k8s() {
     install_helm || return 1
 
     check_prerequisites || return 1
+    reconcile_openbkn_firewall api || return 1
     init_k8s_master || return 1
     allow_master_scheduling || return 1
     install_cni || return 1
     wait_for_dns || return 1
+    reconcile_openbkn_firewall internal || return 1
 
     if [[ "${AUTO_INSTALL_LOCALPV}" == "true" ]]; then
         if [[ -z "$(kubectl get storageclass --no-headers 2>/dev/null)" ]]; then

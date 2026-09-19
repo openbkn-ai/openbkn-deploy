@@ -12,6 +12,8 @@ source "${SCRIPT_DIR}/scripts/lib/common.sh"
 source "${SCRIPT_DIR}/scripts/services/k8s.sh"
 # shellcheck source=scripts/services/k3s.sh
 source "${SCRIPT_DIR}/scripts/services/k3s.sh"
+# shellcheck source=scripts/services/firewall.sh
+source "${SCRIPT_DIR}/scripts/services/firewall.sh"
 # shellcheck source=scripts/lib/preflight_checks.sh
 source "${SCRIPT_DIR}/scripts/lib/preflight_checks.sh"
 

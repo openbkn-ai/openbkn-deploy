@@ -249,6 +249,10 @@ install_ingress_nginx() {
     else
         log_info "AUTO_GENERATE_CONFIG is false, skipping config generation"
     fi
+
+    # The live hostPort/NodePort is authoritative, so reconcile after Helm has
+    # completed rather than relying on the ingress default ports.
+    reconcile_openbkn_firewall all
 }
 
 # Uninstall ingress-nginx-controller

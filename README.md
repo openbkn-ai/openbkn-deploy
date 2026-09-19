@@ -85,6 +85,21 @@ setenforce 0
 dnf install containerd.io
 ```
 
+### Keep firewalld enabled (optional)
+
+The default flow keeps the compatibility mode that disables the host firewall. To retain or re-enable `firewalld`, explicitly enable OpenBKN firewall reconciliation before installation. The script starts and enables `firewalld`, opens only the live ingress HTTP/HTTPS ports, places the live Pod/Service CIDRs and discovered CNI interfaces in the internal `trusted` zone, and leaves Kubernetes API port `6443` closed to the public network by default.
+
+```bash
+export OPENBKN_FIREWALL_ENABLED=true
+# Set only when remote Kubernetes administration is required; separate CIDRs with commas.
+# export K8S_API_ALLOWED_CIDRS="10.10.0.0/16,192.168.1.50/32"
+bash ./deploy.sh openbkn install
+```
+
+Ingress ports are read from the installed controller's `hostPort` or `nodePort`, so custom `INGRESS_NGINX_HTTP_PORT` and `INGRESS_NGINX_HTTPS_PORT` values are reconciled on every install or upgrade.
+
+The enabled state is persisted at `/etc/openbkn-deploy/firewall-enabled`. Later upgrades continue reconciling OpenBKN firewall rules even when `OPENBKN_FIREWALL_ENABLED` is omitted. An explicit `OPENBKN_FIREWALL_ENABLED=false` skips firewall management for that invocation. Use `OPENBKN_FIREWALL_ENABLED=forget` to permanently stop OpenBKN management without stopping firewalld or deleting existing rules.
+
 ### Install OpenBKN
 
 ```bash
