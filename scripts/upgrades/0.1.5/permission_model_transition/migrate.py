@@ -26,7 +26,6 @@ DEFAULT_AUTHZ_MIGRATOR = str(
 DEFAULT_STATE_FILE = "/tmp/openbkn-permission-model-transition-workloads.tsv"
 DEFAULT_RUN_ROOT = "/var/lib/openbkn/migrations"
 TARGET_VERSION = "0.1.5"
-SOURCE_VERSION = "0.1.4"
 
 
 class OrchestrationError(RuntimeError):
@@ -68,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     upgrade = commands.add_parser(
         "upgrade",
-        help="run the complete 0.1.4 to 0.1.5 permission transition",
+        help="run the complete post-install 0.1.5 permission transition",
     )
     upgrade.add_argument("--namespace", default="openbkn", help=argparse.SUPPRESS)
     upgrade.add_argument("--expected-context", default="", help=argparse.SUPPRESS)
@@ -107,8 +106,8 @@ def prepare_report_directory(path: str) -> Path:
     return report_dir
 
 
-def installed_source_version(namespace: str) -> str:
-    """Read the installed bkn-safe chart version instead of trusting user input."""
+def installed_target_version(namespace: str) -> str:
+    """Require the target bkn-safe chart before modifying its data."""
     try:
         result = subprocess.run(
             ["helm", "list", "--namespace", namespace, "--output", "json"],
@@ -135,10 +134,10 @@ def installed_source_version(namespace: str) -> str:
             "cannot identify the installed bkn-safe chart version; expected release bkn-safe"
         )
     version = match.group(1)
-    if version != SOURCE_VERSION:
+    if version != TARGET_VERSION:
         raise OrchestrationError(
-            f"unsupported installed version {version!r}; this package only migrates "
-            f"{SOURCE_VERSION} to {TARGET_VERSION}"
+            f"unsupported installed version {version!r}; install "
+            f"bkn-safe {TARGET_VERSION} before running this post-install migration"
         )
     return version
 
@@ -224,13 +223,13 @@ def write_summary(
     report_dir: Path,
     mode: str,
     steps: Sequence[Step],
-    source_version: str,
+    installed_version: str,
     error: str = "",
 ) -> None:
     """Write a release-level report that links every module result."""
     summary = {
         "target_version": "0.1.5",
-        "source_version": source_version,
+        "installed_version": installed_version,
         "migration": "permission_model_transition",
         "mode": mode,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -254,7 +253,7 @@ def write_summary(
 
 def run_migration(args: argparse.Namespace) -> int:
     """Run BKN first and authorization second, stopping on the first failure."""
-    source_version = installed_source_version(args.namespace)
+    installed_version = installed_target_version(args.namespace)
     if args.command == "apply":
         require_stopped_workloads(args)
     report_dir = prepare_report_directory(args.report_dir)
@@ -263,9 +262,9 @@ def run_migration(args: argparse.Namespace) -> int:
         for step in steps:
             run_step(step)
     except Exception as exc:
-        write_summary(report_dir, args.command, steps, source_version, str(exc))
+        write_summary(report_dir, args.command, steps, installed_version, str(exc))
         raise
-    write_summary(report_dir, args.command, steps, source_version)
+    write_summary(report_dir, args.command, steps, installed_version)
     return 0
 
 
@@ -289,10 +288,10 @@ def automatic_run_directory() -> Path:
 
 
 def run_upgrade(args: argparse.Namespace) -> int:
-    """Run the release-owned transition without operator-supplied data inputs."""
-    # Fail before allocating a state directory or scaling anything when this is
-    # not the source release reviewed by this one-time package.
-    installed_source_version(args.namespace)
+    """Run the post-install transition without operator-supplied data inputs."""
+    # Do not mutate data or workloads unless the target release is already
+    # installed. This package is intentionally a one-time post-install step.
+    installed_target_version(args.namespace)
     run_dir = automatic_run_directory()
     state_file = run_dir / "workloads.tsv"
     base = {
@@ -301,26 +300,34 @@ def run_upgrade(args: argparse.Namespace) -> int:
         "authz_migrator": args.authz_migrator,
         "state_file": str(state_file),
     }
-    dry_run = argparse.Namespace(
-        **base, command="dry-run", report_dir=str(run_dir / "dry-run")
-    )
-    run_migration(dry_run)
-
     control = argparse.Namespace(
         **base, command="stop", timeout_seconds=300
     )
     if control_services(control) != 0:
         raise OrchestrationError("could not stop migration workloads")
 
+    dry_run = argparse.Namespace(
+        **base, command="dry-run", report_dir=str(run_dir / "dry-run")
+    )
+    run_migration(dry_run)
+
     apply = argparse.Namespace(
         **base, command="apply", report_dir=str(run_dir / "apply")
     )
     run_migration(apply)
 
+    restore = argparse.Namespace(
+        **base, command="start", timeout_seconds=300
+    )
+    if control_services(restore) != 0:
+        raise OrchestrationError(
+            "migration completed but workloads could not be restored; "
+            f"restore them with: {SCRIPT_DIRECTORY / 'migrate.py'} start "
+            f"--state-file {state_file}"
+        )
+
     print(
-        f"Permission transition to {TARGET_VERSION} applied: {run_dir}\n"
-        f"Workloads remain stopped. Deploy the {TARGET_VERSION} release, then restore "
-        f"them with: {SCRIPT_DIRECTORY / 'migrate.py'} start --state-file {state_file}"
+        f"Post-install permission transition for {TARGET_VERSION} completed: {run_dir}"
     )
     return 0
 

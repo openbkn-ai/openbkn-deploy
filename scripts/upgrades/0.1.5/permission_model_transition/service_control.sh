@@ -35,7 +35,7 @@ Usage:
   $0 verify-stopped [options]
   $0 start [options]
 
-Control the application Deployments used by the OpenBKN 0.1.4 to 0.1.5
+Control the application Deployments used by the OpenBKN 0.1.5 post-install
 permission-model transition. Database and other infrastructure workloads are
 not changed. External gateways and CronJobs must be closed separately as
 documented in README.md.
