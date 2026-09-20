@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -23,6 +24,9 @@ DEFAULT_AUTHZ_MIGRATOR = str(
     SCRIPT_DIRECTORY / "authz_migrate" / "authz-migrate"
 )
 DEFAULT_STATE_FILE = "/tmp/openbkn-permission-model-transition-workloads.tsv"
+DEFAULT_RUN_ROOT = "/var/lib/openbkn/migrations"
+TARGET_VERSION = "0.1.5"
+SOURCE_VERSION = "0.1.4"
 
 
 class OrchestrationError(RuntimeError):
@@ -52,21 +56,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     for mode in ("dry-run", "apply"):
         migration = commands.add_parser(mode, help=f"{mode} all registered steps")
-        migration.add_argument(
-            "--source-version",
-            required=True,
-            help="installed version; this workflow accepts only 0.1.4",
-        )
-        migration.add_argument("--manifest", required=True)
-        migration.add_argument("--authz-config", default="")
-        migration.add_argument(
-            "--authz-migrator",
-            default=os.getenv("OPENBKN_AUTHZ_MIGRATOR", DEFAULT_AUTHZ_MIGRATOR),
-        )
         migration.add_argument("--report-dir", required=True)
         migration.add_argument("--state-file", default=DEFAULT_STATE_FILE)
         migration.add_argument("--namespace", default="openbkn")
         migration.add_argument("--expected-context", default="")
+        migration.add_argument(
+            "--authz-migrator",
+            default=os.getenv("OPENBKN_AUTHZ_MIGRATOR", DEFAULT_AUTHZ_MIGRATOR),
+            help=argparse.SUPPRESS,
+        )
+
+    upgrade = commands.add_parser(
+        "upgrade",
+        help="run the complete 0.1.4 to 0.1.5 permission transition",
+    )
+    upgrade.add_argument("--namespace", default="openbkn", help=argparse.SUPPRESS)
+    upgrade.add_argument("--expected-context", default="", help=argparse.SUPPRESS)
+    upgrade.add_argument(
+        "--authz-migrator",
+        default=os.getenv("OPENBKN_AUTHZ_MIGRATOR", DEFAULT_AUTHZ_MIGRATOR),
+        help=argparse.SUPPRESS,
+    )
 
     return parser
 
@@ -97,14 +107,40 @@ def prepare_report_directory(path: str) -> Path:
     return report_dir
 
 
-def validate_source_version(value: str) -> str:
-    """Limit this one-time package to its reviewed source release."""
-    normalized = value.strip().removeprefix("v").split("+", 1)[0]
-    if normalized != "0.1.4":
-        raise OrchestrationError(
-            f"unsupported source version {value!r}; this package only migrates 0.1.4 to 0.1.5"
+def installed_source_version(namespace: str) -> str:
+    """Read the installed bkn-safe chart version instead of trusting user input."""
+    try:
+        result = subprocess.run(
+            ["helm", "list", "--namespace", namespace, "--output", "json"],
+            check=False,
+            capture_output=True,
+            text=True,
         )
-    return normalized
+    except FileNotFoundError as exc:
+        raise OrchestrationError("helm is required to identify the installed release") from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "helm list failed"
+        raise OrchestrationError(f"cannot identify installed OpenBKN release: {detail}")
+    try:
+        releases = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise OrchestrationError("helm returned an invalid release inventory") from exc
+    chart = next(
+        (item.get("chart", "") for item in releases if item.get("name") == "bkn-safe"),
+        "",
+    )
+    match = re.fullmatch(r"bkn-safe-(\d+\.\d+\.\d+)", chart)
+    if match is None:
+        raise OrchestrationError(
+            "cannot identify the installed bkn-safe chart version; expected release bkn-safe"
+        )
+    version = match.group(1)
+    if version != SOURCE_VERSION:
+        raise OrchestrationError(
+            f"unsupported installed version {version!r}; this package only migrates "
+            f"{SOURCE_VERSION} to {TARGET_VERSION}"
+        )
+    return version
 
 
 def build_steps(args: argparse.Namespace, report_dir: Path) -> list[Step]:
@@ -113,9 +149,6 @@ def build_steps(args: argparse.Namespace, report_dir: Path) -> list[Step]:
     Future Vega work for the same target release is added here as another
     explicit step. It must not introduce another operator-facing entry point.
     """
-    manifest = Path(args.manifest).resolve()
-    if not manifest.is_file():
-        raise OrchestrationError(f"migration manifest does not exist: {manifest}")
     authz_migrator = Path(args.authz_migrator)
     if not authz_migrator.is_file() or not os.access(authz_migrator, os.X_OK):
         raise OrchestrationError(
@@ -127,15 +160,7 @@ def build_steps(args: argparse.Namespace, report_dir: Path) -> list[Step]:
     bkn_report = report_dir / "01-bkn-data.json"
     vega_report = report_dir / "02-vega-data.json"
     authz_report = report_dir / "03-authorization.json"
-    authz_command = [
-        str(authz_migrator),
-        "--mode",
-        args.command,
-        "--manifest",
-        str(manifest),
-    ]
-    if args.authz_config:
-        authz_command.extend(["--config", str(Path(args.authz_config).resolve())])
+    authz_command = [str(authz_migrator), "--mode", args.command]
     return [
         Step(
             "bkn-data",
@@ -229,7 +254,7 @@ def write_summary(
 
 def run_migration(args: argparse.Namespace) -> int:
     """Run BKN first and authorization second, stopping on the first failure."""
-    source_version = validate_source_version(args.source_version)
+    source_version = installed_source_version(args.namespace)
     if args.command == "apply":
         require_stopped_workloads(args)
     report_dir = prepare_report_directory(args.report_dir)
@@ -244,12 +269,70 @@ def run_migration(args: argparse.Namespace) -> int:
     return 0
 
 
+def automatic_run_directory() -> Path:
+    """Allocate persistent evidence paths for the one-command workflow."""
+    root = Path(os.getenv("OPENBKN_MIGRATION_WORKDIR", DEFAULT_RUN_ROOT))
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for suffix in range(1000):
+        name = timestamp if suffix == 0 else f"{timestamp}-{suffix:02d}"
+        candidate = root / f"permission-model-transition-{name}"
+        try:
+            candidate.mkdir(parents=True)
+            return candidate
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise OrchestrationError(
+                f"cannot create migration work directory {candidate}: {exc}"
+            ) from exc
+    raise OrchestrationError(f"cannot allocate a migration work directory under {root}")
+
+
+def run_upgrade(args: argparse.Namespace) -> int:
+    """Run the release-owned transition without operator-supplied data inputs."""
+    # Fail before allocating a state directory or scaling anything when this is
+    # not the source release reviewed by this one-time package.
+    installed_source_version(args.namespace)
+    run_dir = automatic_run_directory()
+    state_file = run_dir / "workloads.tsv"
+    base = {
+        "namespace": args.namespace,
+        "expected_context": args.expected_context,
+        "authz_migrator": args.authz_migrator,
+        "state_file": str(state_file),
+    }
+    dry_run = argparse.Namespace(
+        **base, command="dry-run", report_dir=str(run_dir / "dry-run")
+    )
+    run_migration(dry_run)
+
+    control = argparse.Namespace(
+        **base, command="stop", timeout_seconds=300
+    )
+    if control_services(control) != 0:
+        raise OrchestrationError("could not stop migration workloads")
+
+    apply = argparse.Namespace(
+        **base, command="apply", report_dir=str(run_dir / "apply")
+    )
+    run_migration(apply)
+
+    print(
+        f"Permission transition to {TARGET_VERSION} applied: {run_dir}\n"
+        f"Workloads remain stopped. Deploy the {TARGET_VERSION} release, then restore "
+        f"them with: {SCRIPT_DIRECTORY / 'migrate.py'} start --state-file {state_file}"
+    )
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Run the selected release migration action."""
     args = build_parser().parse_args(argv)
     try:
         if args.command in {"stop", "start"}:
             return control_services(args)
+        if args.command == "upgrade":
+            return run_upgrade(args)
         return run_migration(args)
     except KeyboardInterrupt:
         print("Migration interrupted; keep all workloads stopped.", file=sys.stderr)

@@ -31,6 +31,21 @@ func TestLoadDatabaseConfigUsesFileThenEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadDatabaseConfigReadsTheSamePasswordFileConventionAsDataSteps(t *testing.T) {
+	passwordFile := filepath.Join(t.TempDir(), "safe-password")
+	if err := os.WriteFile(passwordFile, []byte("from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SAFE_DB_PASSWORD_FILE", passwordFile)
+	cfg, err := loadDatabaseConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Password != "from-file" {
+		t.Fatalf("password = %q", cfg.Password)
+	}
+}
+
 func TestMigrationGORMConfigKeepsStandardOutputMachineReadable(t *testing.T) {
 	cfg := migrationGORMConfig()
 	if cfg.Logger != logger.Discard {

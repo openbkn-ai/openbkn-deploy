@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	_ "github.com/openbkn-ai/bkn-foundry/comm-go/db/driver"
 	"gopkg.in/yaml.v3"
@@ -48,15 +49,26 @@ func loadDatabaseConfig(path string) (databaseConfig, error) {
 			return databaseConfig{}, fmt.Errorf("parse config %q: %w", path, err)
 		}
 	}
-	applyDatabaseEnvironment(&cfg.DB)
+	if err := applyDatabaseEnvironment(&cfg.DB); err != nil {
+		return databaseConfig{}, err
+	}
 	return cfg.DB, nil
 }
 
-func applyDatabaseEnvironment(cfg *databaseConfig) {
+func applyDatabaseEnvironment(cfg *databaseConfig) error {
 	assignNonEmpty(&cfg.Type, "SAFE_DB_TYPE")
 	assignNonEmpty(&cfg.Host, "SAFE_DB_HOST")
 	assignNonEmpty(&cfg.User, "SAFE_DB_USER")
 	assignNonEmpty(&cfg.Password, "SAFE_DB_PASSWORD")
+	if os.Getenv("SAFE_DB_PASSWORD") == "" {
+		if passwordFile := os.Getenv("SAFE_DB_PASSWORD_FILE"); passwordFile != "" {
+			password, err := os.ReadFile(passwordFile)
+			if err != nil {
+				return fmt.Errorf("read SAFE_DB_PASSWORD_FILE %q: %w", passwordFile, err)
+			}
+			cfg.Password = strings.TrimRight(string(password), "\r\n")
+		}
+	}
 	assignNonEmpty(&cfg.Name, "SAFE_DB_NAME")
 	assignNonEmpty(&cfg.Params, "SAFE_DB_PARAMS")
 	if value := os.Getenv("SAFE_DB_PORT"); value != "" {
@@ -64,6 +76,7 @@ func applyDatabaseEnvironment(cfg *databaseConfig) {
 			cfg.Port = port
 		}
 	}
+	return nil
 }
 
 func assignNonEmpty(target *string, name string) {
