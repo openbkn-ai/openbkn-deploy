@@ -41,17 +41,22 @@ logical-backup client is available, the preceding BKN step also backs up Safe.
 - Python 3.9+ and PyMySQL 1.1.0;
 - optional: `mariadb-dump` or `mysqldump` and enough space for complete BKN
   and Safe logical backups;
-- `kubectl` access to the target cluster;
+- `helm` and `kubectl` access to the target cluster, including permission to
+  read the installed release values, bkn-safe ConfigMap/Secret, control the
+  registered Deployments, and port-forward an in-cluster database Service;
 - the checked-in `authz_migrate/authz-migrate` executable for the Linux
   deployment environment;
-- MariaDB/MySQL access to the BKN, Vega, and Safe databases.
+- network access to any externally hosted MariaDB/MySQL endpoint.
 
-The migration runs in the deployment environment and reuses the services'
-existing database configuration. Data steps use `BKN_DB_*`, `VEGA_DB_*`, and
-`SAFE_DB_*`; both the Python and Go Safe steps support `SAFE_DB_PASSWORD_FILE`.
+The normal workflow discovers the namespace, BKN/Vega RDS values, and the
+effective bkn-safe database ConfigMap/Secret from the installed cluster. It
+does not require operator-supplied database variables and does not print or
+persist a database password. Cluster Service addresses are reached through a
+temporary kubectl port-forward; external database addresses are used directly.
 When either dump tool is available, `OPENBKN_MIGRATION_BACKUP_DIR` chooses the
-backup volume; otherwise the BKN report records that backup was skipped. Reports default to `/var/lib/openbkn/migrations`;
-set `OPENBKN_MIGRATION_WORKDIR` only when that location is unsuitable.
+backup volume; otherwise the BKN report records that backup was skipped. Reports
+default to `~/.openbkn-ai/migrations`; set `OPENBKN_MIGRATION_WORKDIR` only when
+that location is unsuitable.
 
 ## Workflow
 
@@ -69,8 +74,10 @@ Run the complete transition with one command:
 ```
 
 Install OpenBKN 0.1.5 first, then run the command. It verifies that bkn-safe is
-installed at 0.1.5, allocates a run directory, and executes stop, dry-run, and
-apply in that order before automatically restoring the saved replica counts.
+installed at 0.1.5, discovers the namespace and database settings, establishes
+any required database tunnel, and runs dry-run before changing workload state.
+It then stops the registered Deployments, applies the migration, and
+automatically restores the saved replica counts.
 When `mariadb-dump` or `mysqldump` is available, the BKN step creates and
 verifies complete BKN and Safe logical backups before its first write. Without
 either tool, it records `backup.status=skipped` and proceeds without a logical
@@ -83,7 +90,8 @@ by the transition. Any later EE activation must use the post-upgrade
 authorization workflow with its own audit trail.
 
 The `dry-run`, `stop`, `apply`, and `start` subcommands remain only for
-diagnosis and recovery; they are not the normal operator interface.
+diagnosis and recovery; they are not the normal operator interface and may
+require explicit environment configuration.
 
 ## Failure recovery
 

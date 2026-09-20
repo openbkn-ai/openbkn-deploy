@@ -3,12 +3,14 @@
 # Licensed under the OpenBKN License. See LICENSE-OPENBKN.txt in the project root.
 
 import argparse
+import base64
+import contextlib
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import migrate
 
@@ -45,6 +47,120 @@ class StepRegistryTest(unittest.TestCase):
 
 
 class OrchestrationTest(unittest.TestCase):
+    def test_json_decode_failure_does_not_expose_sensitive_stdout(self):
+        result = MagicMock(returncode=0, stdout="database-password", stderr="")
+        with patch.object(migrate.subprocess, "run", return_value=result):
+            with self.assertRaises(migrate.OrchestrationError) as raised:
+                migrate.run_json_command(
+                    ["kubectl", "get", "secret", "bkn-safe-secrets"],
+                    "read the Safe database secret",
+                )
+
+        self.assertNotIn("database-password", str(raised.exception))
+
+    def test_discovers_the_unique_bkn_safe_namespace(self):
+        inventory = [
+            {
+                "name": "bkn-safe",
+                "namespace": "customer-openbkn",
+                "chart": "bkn-safe-0.1.5",
+            }
+        ]
+        with patch.object(migrate, "run_json_command", return_value=inventory):
+            self.assertEqual(
+                "customer-openbkn", migrate.discover_target_namespace("")
+            )
+
+    def test_discovers_database_settings_from_installed_cluster_resources(self):
+        bkn_values = {
+            "depServices": {
+                "rds": {
+                    "host": "bkn-db",
+                    "port": 3306,
+                    "user": "bkn-user",
+                    "password": "bkn-password",
+                    "database": "openbkn",
+                }
+            }
+        }
+        vega_values = {
+            "depServices": {
+                "rds": {
+                    "host": "vega-db",
+                    "port": 3307,
+                    "user": "vega-user",
+                    "password": "vega-password",
+                    "database": "vega",
+                }
+            }
+        }
+        safe_config = {
+            "data": {
+                "SAFE_DB_TYPE": "MySQL",
+                "SAFE_DB_HOST": "safe-db",
+                "SAFE_DB_PORT": "3308",
+                "SAFE_DB_USER": "safe-user",
+                "SAFE_DB_NAME": "safe",
+            }
+        }
+        safe_secret = {
+            "data": {
+                "SAFE_DB_PASSWORD": base64.b64encode(b"safe-password").decode()
+            }
+        }
+
+        with patch.object(
+            migrate,
+            "helm_release_values",
+            side_effect=[bkn_values, vega_values],
+        ), patch.object(
+            migrate,
+            "kubernetes_resource",
+            side_effect=[safe_config, safe_secret],
+        ):
+            environment = migrate.discover_database_environment("openbkn")
+
+        self.assertEqual("bkn-db", environment["BKN_DB_HOST"])
+        self.assertEqual("vega", environment["VEGA_DB_NAME"])
+        self.assertEqual("safe-db", environment["SAFE_DB_HOST"])
+        self.assertEqual("safe-password", environment["SAFE_DB_PASSWORD"])
+
+    def test_installs_discovered_database_settings_over_stale_shell_values(self):
+        with patch.dict(
+            os.environ,
+            {"SAFE_CONFIG": "/stale/config.yaml", "BKN_DB_HOST": "stale"},
+            clear=True,
+        ):
+            migrate.install_database_environment(
+                {"BKN_DB_HOST": "installed", "SAFE_DB_PASSWORD": "secret"}
+            )
+            self.assertNotIn("SAFE_CONFIG", os.environ)
+            self.assertEqual("installed", os.environ["BKN_DB_HOST"])
+            self.assertEqual("secret", os.environ["SAFE_DB_PASSWORD"])
+
+    def test_reuses_one_tunnel_for_shared_cluster_database_service(self):
+        environment = {}
+        for prefix in ("BKN_DB", "VEGA_DB", "SAFE_DB"):
+            environment[f"{prefix}_HOST"] = "mariadb.resource.svc.cluster.local"
+            environment[f"{prefix}_PORT"] = "3306"
+        process = MagicMock()
+        with patch.object(
+            migrate, "available_local_port", return_value=43306
+        ), patch.object(
+            migrate.subprocess, "Popen", return_value=process
+        ) as popen, patch.object(
+            migrate, "wait_for_port_forward"
+        ), patch.object(
+            migrate, "stop_port_forward"
+        ) as stop:
+            with migrate.database_access_environment(environment) as effective:
+                for prefix in ("BKN_DB", "VEGA_DB", "SAFE_DB"):
+                    self.assertEqual("127.0.0.1", effective[f"{prefix}_HOST"])
+                    self.assertEqual("43306", effective[f"{prefix}_PORT"])
+
+        popen.assert_called_once()
+        stop.assert_called_once_with(process)
+
     def test_apply_requires_the_stop_replica_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -137,9 +253,9 @@ class OrchestrationTest(unittest.TestCase):
         ):
             migrate.installed_target_version("openbkn")
 
-    def test_upgrade_runs_stop_dry_run_apply_and_start_without_user_inputs(self):
+    def test_upgrade_discovers_configuration_and_runs_once_without_user_inputs(self):
         args = argparse.Namespace(
-            namespace="openbkn", expected_context="", authz_migrator="/tmp/authz-migrate"
+            namespace="", expected_context="", authz_migrator="/tmp/authz-migrate"
         )
         calls = []
 
@@ -151,16 +267,33 @@ class OrchestrationTest(unittest.TestCase):
             calls.append(command.command)
             return 0
 
+        database_environment = {"BKN_DB_HOST": "database"}
         with tempfile.TemporaryDirectory() as directory, patch.object(
             migrate, "automatic_run_directory", return_value=Path(directory)
         ), patch.object(
+            migrate, "discover_target_namespace", return_value="openbkn"
+        ), patch.object(
             migrate, "installed_target_version", return_value="0.1.5"
-        ), patch.object(migrate, "run_migration", side_effect=record_migration), patch.object(
+        ), patch.object(
+            migrate,
+            "discover_database_environment",
+            return_value=database_environment,
+        ), patch.object(
+            migrate,
+            "database_access_environment",
+            return_value=contextlib.nullcontext(database_environment),
+        ), patch.object(
+            migrate, "install_database_environment"
+        ) as install_environment, patch.object(
+            migrate, "run_migration", side_effect=record_migration
+        ), patch.object(
             migrate, "control_services", side_effect=record_control
         ):
             self.assertEqual(0, migrate.run_upgrade(args))
 
-        self.assertEqual(["stop", "dry-run", "apply", "start"], calls)
+        install_environment.assert_called_once_with(database_environment)
+        self.assertEqual("openbkn", args.namespace)
+        self.assertEqual(["dry-run", "stop", "apply", "start"], calls)
 
 
 if __name__ == "__main__":
