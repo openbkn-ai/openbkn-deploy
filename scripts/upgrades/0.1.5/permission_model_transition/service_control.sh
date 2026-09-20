@@ -37,8 +37,8 @@ Usage:
 
 Control the application Deployments used by the OpenBKN 0.1.5 post-install
 permission-model transition. Database and other infrastructure workloads are
-not changed. External gateways and CronJobs must be closed separately as
-documented in README.md.
+not changed. Requests routed through external gateways are unavailable while
+the registered application Deployments are stopped.
 
 Options:
   --namespace NAMESPACE       Kubernetes namespace (default: openbkn)

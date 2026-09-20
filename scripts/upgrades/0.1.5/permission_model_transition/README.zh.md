@@ -22,11 +22,11 @@ Vega 步骤只写 bkn-safe，Vega 数据库只读。若检测到逻辑备份客�
 
 - Python 3.9+、PyMySQL 1.1.0；
 - 可选的 `mariadb-dump` 或 `mysqldump`，以及足够保存 BKN、Safe 完整逻辑备份的空间；
-- 目标集群的 `kubectl` 权限；
+- 目标集群的 `helm` 与 `kubectl` 权限，包括读取已安装 release values、bkn-safe ConfigMap/Secret、控制登记的 Deployment，以及对集群内数据库 Service 建立 port-forward；
 - 仓库内置的、适用于 Linux 部署环境的 `authz_migrate/authz-migrate` 可执行程序；
-- BKN、Vega 和 Safe 数据库访问权限。
+- 对外部 MariaDB/MySQL 地址的网络访问能力（若数据库部署在集群外）。
 
-迁移运行在部署环境中并复用现有服务的数据库配置。数据步骤读取 `BKN_DB_*`、`VEGA_DB_*`、`SAFE_DB_*`；密码可通过 `*_PASSWORD_FILE` 提供。Safe 的 Go 与 Python 步骤都支持 `SAFE_DB_PASSWORD_FILE`。检测到 dump 工具时可通过 `OPENBKN_MIGRATION_BACKUP_DIR` 指定备份目录；未检测到时 BKN 报告会标明备份已跳过。运行报告默认保存到 `/var/lib/openbkn/migrations`，仅在该目录不适用时设置 `OPENBKN_MIGRATION_WORKDIR`。
+正常入口会从已安装集群自动发现 namespace、BKN/Vega RDS values，以及 bkn-safe 最终生效的数据库 ConfigMap/Secret；不要求用户提供数据库变量，也不会打印或持久化数据库密码。集群内 Service 地址通过临时 kubectl port-forward 访问，外部数据库地址直接连接。检测到 dump 工具时可通过 `OPENBKN_MIGRATION_BACKUP_DIR` 指定备份目录；未检测到时 BKN 报告会标明备份已跳过。运行报告默认保存到 `~/.openbkn-ai/migrations`，仅在该目录不适用时设置 `OPENBKN_MIGRATION_WORKDIR`。
 
 ## 执行流程
 
@@ -42,11 +42,11 @@ Vega 步骤只写 bkn-safe，Vega 数据库只读。若检测到逻辑备份客�
 ./migrate.py upgrade
 ```
 
-请先完成 OpenBKN 0.1.5 安装，再执行该命令。它自动验证 bkn-safe 已安装版本为 0.1.5，生成本次运行目录，依次执行停止登记的业务 Deployment、dry-run、apply，并在成功后自动按副本快照恢复工作负载。若检测到 `mariadb-dump` 或 `mysqldump`，BKN 步骤会在首次写入前创建并校验 BKN、Safe 完整逻辑备份；未检测到时会在报告中写入 `backup.status=skipped`，并在无逻辑备份的情况下继续迁移。任一步失败时，不会继续下一步，业务服务保持停止。
+请先完成 OpenBKN 0.1.5 安装，再执行该命令。它自动发现 namespace 和数据库配置、验证 bkn-safe 已安装版本为 0.1.5、建立必要的数据库隧道并先完成 dry-run；随后停止登记的业务 Deployment、执行 apply，并在成功后自动按副本快照恢复工作负载。若检测到 `mariadb-dump` 或 `mysqldump`，BKN 步骤会在首次写入前创建并校验 BKN、Safe 完整逻辑备份；未检测到时会在报告中写入 `backup.status=skipped`，并在无逻辑备份的情况下继续迁移。任一步失败时，不会继续下一步；若服务已停止，则保持停止。
 
 报告目录包含 `dry-run/01-bkn-data.json`、`dry-run/02-vega-data.json`、`dry-run/03-authorization.json`，以及对应的 apply 报告和副本快照。历史 Core 规则无法从权威生命周期数据证明时保留为 `legacy`；历史 Enterprise 规则会迁移为 inactive，绝不因迁移自动启用。后续如确需启用 EE 规则，应通过升级后的权限管理流程完成审计和授权。
 
-`dry-run`、`stop`、`apply`、`start` 子命令仍保留，仅用于故障诊断和恢复；它们不是正常操作入口。
+`dry-run`、`stop`、`apply`、`start` 子命令仍保留，仅用于故障诊断和恢复；它们不是正常操作入口，可能需要显式提供环境配置。
 
 ## 失败恢复
 
