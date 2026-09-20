@@ -56,7 +56,7 @@ class OrchestrationTest(unittest.TestCase):
                 report_dir=str(root / "reports"),
             )
 
-            with patch.object(migrate, "installed_source_version", return_value="0.1.4"), self.assertRaisesRegex(
+            with patch.object(migrate, "installed_target_version", return_value="0.1.5"), self.assertRaisesRegex(
                 migrate.OrchestrationError, "run the unified stop command first"
             ):
                 migrate.run_migration(args)
@@ -85,7 +85,7 @@ class OrchestrationTest(unittest.TestCase):
                 calls.append(step.name)
                 step.report_path.write_text("{}", encoding="utf-8")
 
-            with patch.object(migrate, "installed_source_version", return_value="0.1.4"), patch.object(migrate, "require_stopped_workloads") as stopped, patch.object(
+            with patch.object(migrate, "installed_target_version", return_value="0.1.5"), patch.object(migrate, "require_stopped_workloads") as stopped, patch.object(
                 migrate, "build_steps", return_value=steps
             ), patch.object(migrate, "run_step", side_effect=complete):
                 self.assertEqual(0, migrate.run_migration(args))
@@ -112,7 +112,7 @@ class OrchestrationTest(unittest.TestCase):
                 report_dir=str(report_dir),
             )
 
-            with patch.object(migrate, "installed_source_version", return_value="0.1.4"), patch.object(migrate, "build_steps", return_value=steps), patch.object(
+            with patch.object(migrate, "installed_target_version", return_value="0.1.5"), patch.object(migrate, "build_steps", return_value=steps), patch.object(
                 migrate,
                 "run_step",
                 side_effect=migrate.OrchestrationError("bkn failed"),
@@ -126,18 +126,18 @@ class OrchestrationTest(unittest.TestCase):
             self.assertFalse(summary["steps"][1]["completed"])
 
     def test_reads_and_validates_the_installed_bkn_safe_chart_version(self):
-        inventory = '[{"name":"bkn-safe","chart":"bkn-safe-0.1.4"}]'
+        inventory = '[{"name":"bkn-safe","chart":"bkn-safe-0.1.5"}]'
         completed = type("Completed", (), {"returncode": 0, "stdout": inventory, "stderr": ""})()
         with patch.object(migrate.subprocess, "run", return_value=completed):
-            self.assertEqual("0.1.4", migrate.installed_source_version("openbkn"))
+            self.assertEqual("0.1.5", migrate.installed_target_version("openbkn"))
 
-        completed.stdout = '[{"name":"bkn-safe","chart":"bkn-safe-0.1.5"}]'
+        completed.stdout = '[{"name":"bkn-safe","chart":"bkn-safe-0.1.4"}]'
         with patch.object(migrate.subprocess, "run", return_value=completed), self.assertRaisesRegex(
-            migrate.OrchestrationError, "only migrates 0.1.4"
+            migrate.OrchestrationError, "install bkn-safe 0.1.5"
         ):
-            migrate.installed_source_version("openbkn")
+            migrate.installed_target_version("openbkn")
 
-    def test_upgrade_runs_dry_run_stop_and_apply_without_user_inputs(self):
+    def test_upgrade_runs_stop_dry_run_apply_and_start_without_user_inputs(self):
         args = argparse.Namespace(
             namespace="openbkn", expected_context="", authz_migrator="/tmp/authz-migrate"
         )
@@ -154,13 +154,13 @@ class OrchestrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             migrate, "automatic_run_directory", return_value=Path(directory)
         ), patch.object(
-            migrate, "installed_source_version", return_value="0.1.4"
+            migrate, "installed_target_version", return_value="0.1.5"
         ), patch.object(migrate, "run_migration", side_effect=record_migration), patch.object(
             migrate, "control_services", side_effect=record_control
         ):
             self.assertEqual(0, migrate.run_upgrade(args))
 
-        self.assertEqual(["dry-run", "stop", "apply"], calls)
+        self.assertEqual(["stop", "dry-run", "apply", "start"], calls)
 
 
 if __name__ == "__main__":

@@ -1905,15 +1905,13 @@ def database_configs() -> tuple[DBConfig, DBConfig]:
     return bkn_config, safe_config
 
 
-def find_dump_executable() -> str:
-    """Find a compatible logical-backup client."""
+def find_dump_executable() -> Optional[str]:
+    """Find an optional compatible logical-backup client."""
     for name in ("mariadb-dump", "mysqldump"):
         executable = shutil.which(name)
         if executable:
             return executable
-    raise MigrationError(
-        "database backup requires mariadb-dump or mysqldump in PATH"
-    )
+    return None
 
 
 def redact_secrets(message: str, configs: Iterable[DBConfig]) -> str:
@@ -2010,6 +2008,10 @@ def create_pre_migration_backup(
     instant = now or datetime.now(timezone.utc)
     timestamp = instant.astimezone(timezone.utc).strftime("%Y%m%d_%H%M%S")
     executable = dump_executable or find_dump_executable()
+    if executable is None:
+        raise MigrationError(
+            "database backup requires mariadb-dump or mysqldump in PATH"
+        )
     target = backup_directory(root, timestamp)
     entries = []
     restore_commands = []
@@ -2154,6 +2156,7 @@ def migration_report(
     plan: MigrationPlan,
     proxy_plan: ProxyMigrationPlan,
     backup: Optional[BackupResult] = None,
+    backup_skipped: bool = False,
     proxy_result: Optional[Mapping[str, int]] = None,
 ) -> dict[str, Any]:
     """Return a deterministic report for the release-level orchestrator."""
@@ -2212,8 +2215,14 @@ def migration_report(
     }
     if backup is not None:
         result["backup"] = {
+            "status": "created",
             "path": str(backup.path),
             "restore_commands": list(backup.restore_commands),
+        }
+    elif backup_skipped:
+        result["backup"] = {
+            "status": "skipped",
+            "reason": "mariadb-dump or mysqldump is unavailable",
         }
     if proxy_result is not None:
         result["managed_proxies"]["applied"] = dict(proxy_result)
@@ -2262,9 +2271,13 @@ def run(mode: str = "apply", report_path: str = "") -> int:
             write_report(migration_report(mode, plan, proxy_plan), report_path)
             return 0
 
-        backup = create_pre_migration_backup(
-            {"bkn": bkn_config, "safe": safe_config}
-        )
+        dump_executable = find_dump_executable()
+        backup = None
+        if dump_executable is not None:
+            backup = create_pre_migration_backup(
+                {"bkn": bkn_config, "safe": safe_config},
+                dump_executable=dump_executable,
+            )
 
         try:
             normalize_branches(bkn_connection, commit=False)
@@ -2284,7 +2297,14 @@ def run(mode: str = "apply", report_path: str = "") -> int:
             raise
 
         write_report(
-            migration_report(mode, plan, proxy_plan, backup, proxy_result),
+            migration_report(
+                mode,
+                plan,
+                proxy_plan,
+                backup,
+                backup_skipped=dump_executable is None,
+                proxy_result=proxy_result,
+            ),
             report_path,
         )
         return 0

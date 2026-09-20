@@ -1116,6 +1116,7 @@ class OneShotMigrationTest(unittest.TestCase):
         apply_parents.assert_not_called()
         apply_proxies.assert_not_called()
 
+    @patch.object(migration, "find_dump_executable", return_value="/usr/bin/mariadb-dump")
     @patch.object(migration, "create_pre_migration_backup")
     @patch.object(migration, "verify_proxy_plan")
     @patch.object(migration, "apply_proxy_plan", return_value={"mappings_ready": 0})
@@ -1140,12 +1141,13 @@ class OneShotMigrationTest(unittest.TestCase):
         apply_proxy_plan_mock,
         verify_proxy_plan,
         create_pre_migration_backup,
+        find_dump_executable,
     ):
         bkn_connection = MagicMock()
         safe_connection = MagicMock()
         connect_database.side_effect = [bkn_connection, safe_connection]
         events = []
-        create_pre_migration_backup.side_effect = lambda configs: (
+        create_pre_migration_backup.side_effect = lambda configs, **kwargs: (
             events.append("backup")
             or BackupResult(Path("/backup/20260908_120000"), ())
         )
@@ -1156,6 +1158,7 @@ class OneShotMigrationTest(unittest.TestCase):
         self.assertEqual(0, migration.run("apply"))
 
         self.assertEqual(["backup", "first-write"], events)
+        find_dump_executable.assert_called_once_with()
         create_pre_migration_backup.assert_called_once()
         apply_parent_plan_mock.assert_called_once()
         apply_proxy_plan_mock.assert_called_once()
@@ -1211,6 +1214,13 @@ class OneShotMigrationTest(unittest.TestCase):
             stack.enter_context(
                 patch.object(
                     migration,
+                    "find_dump_executable",
+                    return_value="/usr/bin/mariadb-dump",
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    migration,
                     "create_pre_migration_backup",
                     side_effect=migration.MigrationError("backup failed"),
                 )
@@ -1232,6 +1242,71 @@ class OneShotMigrationTest(unittest.TestCase):
         apply_proxy_plan_mock.assert_not_called()
         bkn_connection.close.assert_called_once_with()
         safe_connection.close.assert_called_once_with()
+
+    def test_apply_continues_and_reports_when_no_dump_tool_is_available(self):
+        bkn_connection = MagicMock()
+        safe_connection = MagicMock()
+        configs = (
+            DBConfig("127.0.0.1", 3306, "root", "", "openbkn"),
+            DBConfig("127.0.0.1", 3306, "root", "", "safe"),
+        )
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            report = Path(directory) / "bkn.json"
+            stack.enter_context(
+                patch.object(migration, "database_configs", return_value=configs)
+            )
+            stack.enter_context(
+                patch.object(
+                    migration,
+                    "connect_database",
+                    side_effect=[bkn_connection, safe_connection],
+                )
+            )
+            stack.enter_context(patch.object(migration, "load_resources", return_value=[]))
+            stack.enter_context(
+                patch.object(migration, "count_branch_updates", return_value=0)
+            )
+            stack.enter_context(
+                patch.object(migration, "load_existing_parent_count", return_value=0)
+            )
+            stack.enter_context(
+                patch.object(migration, "build_plan", return_value=MigrationPlan({}, 0))
+            )
+            stack.enter_context(
+                patch.object(
+                    migration, "load_proxy_plan", return_value=ProxyMigrationPlan()
+                )
+            )
+            stack.enter_context(
+                patch.object(migration, "find_dump_executable", return_value=None)
+            )
+            backup = stack.enter_context(
+                patch.object(migration, "create_pre_migration_backup")
+            )
+            normalize = stack.enter_context(
+                patch.object(migration, "normalize_branches", return_value=0)
+            )
+            stack.enter_context(
+                patch.object(migration, "apply_parent_plan", return_value=0)
+            )
+            stack.enter_context(
+                patch.object(
+                    migration,
+                    "apply_proxy_plan",
+                    return_value={"mappings_ready": 0},
+                )
+            )
+            stack.enter_context(patch.object(migration, "verify_proxy_plan"))
+
+            self.assertEqual(0, migration.run("apply", str(report)))
+            report_content = json.loads(report.read_text())
+
+        backup.assert_not_called()
+        normalize.assert_called_once()
+        self.assertEqual(
+            {"status": "skipped", "reason": "mariadb-dump or mysqldump is unavailable"},
+            report_content["backup"],
+        )
 
     @patch.object(migration, "run", side_effect=RuntimeError("database write failed"))
     def test_command_prints_the_complete_traceback_on_failure(self, run):

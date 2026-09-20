@@ -3,10 +3,10 @@
 [中文](README.zh.md) | English
 
 This directory is the optional operator-facing entry for the one-time OpenBKN
-0.1.4 to 0.1.5 permission-model transition. The normal workflow requires no
+0.1.5 post-install permission-model transition. The normal workflow requires no
 manifest, resource IDs, permission IDs, database parameters, or report paths:
-it identifies the installed bkn-safe chart, creates backup and report evidence,
-and conservatively handles historical authorization whose source is unproven.
+it identifies the installed target chart, creates report evidence, and
+conservatively handles historical authorization whose source is unproven.
 
 Fresh installations receive the current authorization marker from bkn-safe
 seed data. Later releases that keep the same authorization storage contract do
@@ -33,14 +33,14 @@ The BKN step never deletes or rebuilds caller authorization policies. In
 particular, it never writes `task_manage`. Historical Core allow/deny rows are
 classified by the authorization step instead of being replaced.
 
-The Vega step writes only bkn-safe. Its changes are covered by the Safe backup
-created by the preceding BKN step; the Vega database is read-only.
+The Vega step writes only bkn-safe; the Vega database is read-only. When a
+logical-backup client is available, the preceding BKN step also backs up Safe.
 
 ## Requirements
 
 - Python 3.9+ and PyMySQL 1.1.0;
-- `mariadb-dump` or `mysqldump` and enough space for complete BKN and Safe
-  logical backups;
+- optional: `mariadb-dump` or `mysqldump` and enough space for complete BKN
+  and Safe logical backups;
 - `kubectl` access to the target cluster;
 - the checked-in `authz_migrate/authz-migrate` executable for the Linux
   deployment environment;
@@ -49,8 +49,8 @@ created by the preceding BKN step; the Vega database is read-only.
 The migration runs in the deployment environment and reuses the services'
 existing database configuration. Data steps use `BKN_DB_*`, `VEGA_DB_*`, and
 `SAFE_DB_*`; both the Python and Go Safe steps support `SAFE_DB_PASSWORD_FILE`.
-Set `OPENBKN_MIGRATION_BACKUP_DIR` when the directory beside this script is not
-an appropriate backup volume. Reports default to `/var/lib/openbkn/migrations`;
+When either dump tool is available, `OPENBKN_MIGRATION_BACKUP_DIR` chooses the
+backup volume; otherwise the BKN report records that backup was skipped. Reports default to `/var/lib/openbkn/migrations`;
 set `OPENBKN_MIGRATION_WORKDIR` only when that location is unsuitable.
 
 ## Workflow
@@ -68,13 +68,13 @@ Run the complete transition with one command:
 ./migrate.py upgrade
 ```
 
-The command verifies that bkn-safe is installed at 0.1.4, allocates a run
-directory, and executes dry-run, stop, and apply in that order. The BKN step
-creates and verifies complete BKN and Safe logical backups before its first
-write. A failure never proceeds to the next step; workloads remain stopped
-after either success or failure. This standalone script does not deploy the
-target release: deploy 0.1.5 externally, then use the printed state-file
-command to restore replicas.
+Install OpenBKN 0.1.5 first, then run the command. It verifies that bkn-safe is
+installed at 0.1.5, allocates a run directory, and executes stop, dry-run, and
+apply in that order before automatically restoring the saved replica counts.
+When `mariadb-dump` or `mysqldump` is available, the BKN step creates and
+verifies complete BKN and Safe logical backups before its first write. Without
+either tool, it records `backup.status=skipped` and proceeds without a logical
+backup. A failure never proceeds to the next step and leaves workloads stopped.
 
 The run directory contains the dry-run and apply reports plus the replica
 snapshot. Core rules without authoritative lifecycle proof remain `legacy`.
@@ -87,10 +87,10 @@ diagnosis and recovery; they are not the normal operator interface.
 
 ## Failure recovery
 
-Do not start workloads after a failed step. Restore both logical backups named
-in `01-bkn-data.json`, deploy all previous binaries, and verify the previous
-authorization behavior before reopening traffic. Never create a success marker
-manually or continue on a partially migrated database.
+Do not start workloads after a failed step. If `01-bkn-data.json` records a
+created backup, use its restore commands; if it records `skipped`, use the
+environment's database snapshot/PITR procedure or perform a manual repair.
+Never create a success marker manually or continue on partially migrated data.
 
 ## Focused tests
 
