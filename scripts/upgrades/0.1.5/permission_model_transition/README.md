@@ -2,11 +2,11 @@
 
 [中文](README.zh.md) | English
 
-This directory is the only operator-facing entry for the one-time OpenBKN
-0.1.4 to 0.1.5 permission-model transition. It deliberately does not use the
-general `data-migrator`: this workflow needs a maintenance window, a reviewed
-dry-run, explicit Enterprise activation evidence, and a coordinated backup of
-multiple product databases.
+This directory is the optional operator-facing entry for the one-time OpenBKN
+0.1.4 to 0.1.5 permission-model transition. The normal workflow requires no
+manifest, resource IDs, permission IDs, database parameters, or report paths:
+it identifies the installed bkn-safe chart, creates backup and report evidence,
+and conservatively handles historical authorization whose source is unproven.
 
 Fresh installations receive the current authorization marker from bkn-safe
 seed data. Later releases that keep the same authorization storage contract do
@@ -26,8 +26,8 @@ The entry runs a fixed, fail-fast sequence:
    every `resource -> catalog` parent row, and registers each non-built-in
    Catalog's canonical creator bundle and authorization grant.
 3. `authorization` invokes this directory's `authz_migrate` executable to
-   classify Core provenance and stable grants, reconcile Enterprise rules,
-   apply explicitly confirmed activation, and persist the checksummed marker.
+   classify Core provenance and stable grants, reconcile Enterprise rules, and
+   persist the checksummed marker.
 
 The BKN step never deletes or rebuilds caller authorization policies. In
 particular, it never writes `task_manage`. Historical Core allow/deny rows are
@@ -46,17 +46,14 @@ created by the preceding BKN step; the Vega database is read-only.
   deployment environment;
 - MariaDB/MySQL access to the BKN, Vega, and Safe databases.
 
-The data steps resolve `BKN_DB_*`, `VEGA_DB_*`, and `SAFE_DB_*` variables first,
-then standard `MARIADB_*` variables, and finally local defaults. Password files
-are supported through each database prefix's `*_PASSWORD_FILE` variable and the
-corresponding MariaDB password-file variables. Set
-`OPENBKN_MIGRATION_BACKUP_DIR` when the directory beside this script is not an
-appropriate backup volume.
+The migration runs in the deployment environment and reuses the services'
+existing database configuration. Data steps use `BKN_DB_*`, `VEGA_DB_*`, and
+`SAFE_DB_*`; both the Python and Go Safe steps support `SAFE_DB_PASSWORD_FILE`.
+Set `OPENBKN_MIGRATION_BACKUP_DIR` when the directory beside this script is not
+an appropriate backup volume. Reports default to `/var/lib/openbkn/migrations`;
+set `OPENBKN_MIGRATION_WORKDIR` only when that location is unsuitable.
 
 ## Workflow
-
-Copy `manifest.example.json` to a protected working location and replace every
-placeholder with authoritative release, lifecycle, and Enterprise evidence.
 
 The release includes the authorization executable, so Go is not required to
 run this migration. Rebuild it only when intentionally changing its Go source:
@@ -65,60 +62,28 @@ run this migration. Rebuild it only when intentionally changing its Go source:
 ./authz_migrate/build.sh
 ```
 
-Run both read-only plans and preserve their reports:
+Run the complete transition with one command:
 
 ```bash
-./migrate.py dry-run \
-  --source-version 0.1.4 \
-  --manifest /work/authz-migration.json \
-  --authz-config /etc/bkn-safe/config.yaml \
-  --report-dir /work/reports/dry-run
+./migrate.py upgrade
 ```
 
-Review `01-bkn-data.json`, `02-vega-data.json`, `03-authorization.json`, and
-`summary.json`. The Vega creator bundle is derived only from authoritative
-`t_catalog.f_creator` lifecycle metadata, never from historical access. Add the
-exact Enterprise inventory digest and activation confirmation to the manifest
-when historical EE rules are intentionally activated. The authorization step
-must not infer `full_business_access` from a historical operation set or add an
-operation to one.
+The command verifies that bkn-safe is installed at 0.1.4, allocates a run
+directory, and executes dry-run, stop, and apply in that order. The BKN step
+creates and verifies complete BKN and Safe logical backups before its first
+write. A failure never proceeds to the next step; workloads remain stopped
+after either success or failure. This standalone script does not deploy the
+target release: deploy 0.1.5 externally, then use the printed state-file
+command to restore replicas.
 
-Close external gateways and disable relevant CronJobs/workers, then stop the
-registered application Deployments:
+The run directory contains the dry-run and apply reports plus the replica
+snapshot. Core rules without authoritative lifecycle proof remain `legacy`.
+Historical Enterprise rules are migrated as inactive and are never activated
+by the transition. Any later EE activation must use the post-upgrade
+authorization workflow with its own audit trail.
 
-```bash
-./migrate.py stop \
-  --namespace openbkn \
-  --state-file /work/workloads.tsv
-```
-
-Apply with a new, empty report directory:
-
-```bash
-./migrate.py apply \
-  --source-version 0.1.4 \
-  --manifest /work/authz-migration.json \
-  --authz-config /etc/bkn-safe/config.yaml \
-  --state-file /work/workloads.tsv \
-  --namespace openbkn \
-  --report-dir /work/reports/apply
-```
-
-`apply` verifies through the live cluster that every registered Deployment is
-still stopped. The BKN step creates and verifies complete logical backups of
-both databases before its first write. It then commits BKN/proxy data before
-the authorization step runs; if either step fails, the remaining steps do not
-run and workloads stay stopped.
-
-After reviewing the apply reports, start the new binaries while the external
-entry remains closed, complete the documented authorization smoke tests, and
-only then reopen traffic:
-
-```bash
-./migrate.py start \
-  --namespace openbkn \
-  --state-file /work/workloads.tsv
-```
+The `dry-run`, `stop`, `apply`, and `start` subcommands remain only for
+diagnosis and recovery; they are not the normal operator interface.
 
 ## Failure recovery
 

@@ -143,12 +143,12 @@ func PlanEnterprise(ctx context.Context, db *gorm.DB, opts EEOptions) (EEReport,
 		if hasEvidence {
 			usedEvidence[row.ID] = struct{}{}
 		}
-		plan := classifyEERow(row, facts, ruleEvidence, opts.Now)
+		plan := classifyEERow(row, facts, ruleEvidence, opts.Now, opts.FreezeHistoricalActivations)
 		if _, duplicate := seenIDs[row.ID]; duplicate {
 			plan.Anomalies = append(plan.Anomalies, "duplicate grant_id")
 		}
 		seenIDs[row.ID] = struct{}{}
-		if row.ActivationState == eeActivationActive && plan.PlannedClassification != EEClassificationPublished {
+		if !opts.FreezeHistoricalActivations && row.ActivationState == eeActivationActive && plan.PlannedClassification != EEClassificationPublished {
 			plan.Anomalies = append(plan.Anomalies, "an active row fails current classification and must fail closed")
 			report.Anomalies = append(report.Anomalies,
 				fmt.Sprintf("EE rule %q is active but invalid: %s", row.ID, strings.Join(plan.Anomalies, "; ")))
@@ -180,8 +180,8 @@ func PlanEnterprise(ctx context.Context, db *gorm.DB, opts EEOptions) (EEReport,
 }
 
 // ApplyEnterprise persists classification for an existing EE table and
-// activates only the explicitly confirmed rows. An absent Community table is
-// returned unchanged and is never created.
+// activates only explicitly confirmed rows. A caller may instead request that
+// historical activations are frozen during a non-interactive migration.
 func ApplyEnterprise(ctx context.Context, db *gorm.DB, opts EEOptions) (EEReport, error) {
 	plan, err := PlanEnterprise(ctx, db, opts)
 	if err != nil {
@@ -203,7 +203,9 @@ func ApplyEnterprise(ctx context.Context, db *gorm.DB, opts EEOptions) (EEReport
 				"subject_type": item.PlannedSubjectType, "classification": item.PlannedClassification,
 				"classification_evidence": item.ClassificationEvidence,
 			}
-			if item.CurrentActivation == "" {
+			if opts.FreezeHistoricalActivations {
+				updates["activation_state"] = item.PlannedActivation
+			} else if item.CurrentActivation == "" {
 				updates["activation_state"] = eeActivationInactive
 			}
 			if item.PlannedActivation == eeActivationActive && item.CurrentActivation != eeActivationActive {
@@ -380,7 +382,7 @@ func loadSubjectFacts(ctx context.Context, db *gorm.DB) (subjectFacts, error) {
 	return facts, nil
 }
 
-func classifyEERow(row eeRuleRow, facts subjectFacts, evidence EERuleEvidence, now time.Time) EERulePlan {
+func classifyEERow(row eeRuleRow, facts subjectFacts, evidence EERuleEvidence, now time.Time, freezeHistoricalActivations bool) EERulePlan {
 	currentSubject := row.SubjectType
 	if currentSubject == "" {
 		currentSubject = eeSubjectUnknown
@@ -453,7 +455,9 @@ func classifyEERow(row eeRuleRow, facts subjectFacts, evidence EERuleEvidence, n
 		plan.ActivationEligible = false
 		plan.Reason += "; rule is expired"
 	}
-	if currentActivation != eeActivationActive && currentActivation != eeActivationRevoked {
+	if freezeHistoricalActivations && currentActivation != eeActivationRevoked {
+		plan.PlannedActivation = eeActivationInactive
+	} else if currentActivation != eeActivationActive && currentActivation != eeActivationRevoked {
 		plan.PlannedActivation = eeActivationInactive
 	}
 	return plan

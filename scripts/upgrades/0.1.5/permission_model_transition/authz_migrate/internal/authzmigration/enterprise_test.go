@@ -125,6 +125,38 @@ func TestEnterpriseActivationRequiresReviewedDigestAndIsIdempotent(t *testing.T)
 	}
 }
 
+func TestDefaultUpgradePolicyFreezesHistoricalActiveRules(t *testing.T) {
+	db := enterpriseTestDB(t, true)
+	seedEnterpriseSubjects(t, db)
+	activatedAt := time.Date(2026, 9, 11, 8, 0, 0, 0, time.UTC)
+	seedEERules(t, db, eeRuleRow{
+		ID: "active-history", AccessorID: "user-1", ResourceType: "object_type",
+		ResourceID: "ot-1", Op: "query_data", Effect: "allow",
+		SubjectType: eeSubjectUser, Classification: EEClassificationPublished,
+		ClassificationEvidence: "historical", ActivationState: eeActivationActive,
+		ActivatedAt: &activatedAt, ActivatedBy: "legacy-admin", ActivationRef: "legacy-change",
+	})
+
+	opts := DefaultEEOptions(activatedAt)
+	plan, err := PlanEnterprise(context.Background(), db, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Rules[0].PlannedActivation != eeActivationInactive {
+		t.Fatalf("planned activation = %q, want inactive", plan.Rules[0].PlannedActivation)
+	}
+	if _, err := ApplyEnterprise(context.Background(), db, opts); err != nil {
+		t.Fatal(err)
+	}
+	var row eeRuleRow
+	if err := db.First(&row, "id = ?", "active-history").Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.ActivationState != eeActivationInactive {
+		t.Fatalf("activation state = %q, want inactive", row.ActivationState)
+	}
+}
+
 func TestApplyEnterpriseAddsMissingMigrationColumnsWithoutRewritingBaseTable(t *testing.T) {
 	db := enterpriseTestDB(t, false)
 	seedEnterpriseSubjects(t, db)

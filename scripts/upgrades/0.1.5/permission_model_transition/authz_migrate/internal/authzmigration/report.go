@@ -119,10 +119,17 @@ type EEActivationConfirmation struct {
 }
 
 type EEOptions struct {
-	Now          time.Time                 `json:"-"`
-	Assembly     EEAssemblyEvidence        `json:"assembly"`
-	RuleEvidence []EERuleEvidence          `json:"rule_evidence,omitempty"`
-	Activation   *EEActivationConfirmation `json:"activation,omitempty"`
+	Now                         time.Time                 `json:"-"`
+	Assembly                    EEAssemblyEvidence        `json:"assembly"`
+	RuleEvidence                []EERuleEvidence          `json:"rule_evidence,omitempty"`
+	Activation                  *EEActivationConfirmation `json:"activation,omitempty"`
+	FreezeHistoricalActivations bool                      `json:"-"`
+}
+
+// DefaultEEOptions is the non-interactive, fail-closed upgrade policy.  The
+// migration never treats a historical EE rule as a request to activate it.
+func DefaultEEOptions(now time.Time) EEOptions {
+	return EEOptions{Now: now, FreezeHistoricalActivations: true}
 }
 
 type EERulePlan struct {

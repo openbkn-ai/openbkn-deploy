@@ -17,21 +17,19 @@ class StepRegistryTest(unittest.TestCase):
     def test_bundled_authorization_migrator_is_executable(self):
         executable = migrate.SCRIPT_DIRECTORY / "authz_migrate" / "authz-migrate"
 
+        if not executable.exists():
+            self.skipTest("source checkout intentionally excludes the release executable")
         self.assertTrue(executable.is_file())
         self.assertTrue(os.access(executable, os.X_OK))
 
     def test_registers_data_steps_before_authorization(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            manifest = root / "manifest.json"
             executable = root / "authz-migrate"
-            manifest.write_text("{}", encoding="utf-8")
             executable.write_text("binary", encoding="utf-8")
             executable.chmod(0o700)
             args = argparse.Namespace(
                 command="dry-run",
-                manifest=str(manifest),
-                authz_config="",
                 authz_migrator=str(executable),
             )
 
@@ -52,12 +50,13 @@ class OrchestrationTest(unittest.TestCase):
             root = Path(directory)
             args = argparse.Namespace(
                 command="apply",
-                source_version="0.1.4",
                 state_file=str(root / "missing.tsv"),
+                namespace="openbkn",
+                expected_context="",
                 report_dir=str(root / "reports"),
             )
 
-            with self.assertRaisesRegex(
+            with patch.object(migrate, "installed_source_version", return_value="0.1.4"), self.assertRaisesRegex(
                 migrate.OrchestrationError, "run the unified stop command first"
             ):
                 migrate.run_migration(args)
@@ -75,8 +74,9 @@ class OrchestrationTest(unittest.TestCase):
             ]
             args = argparse.Namespace(
                 command="apply",
-                source_version="0.1.4",
                 state_file=str(state),
+                namespace="openbkn",
+                expected_context="",
                 report_dir=str(report_dir),
             )
             calls = []
@@ -85,7 +85,7 @@ class OrchestrationTest(unittest.TestCase):
                 calls.append(step.name)
                 step.report_path.write_text("{}", encoding="utf-8")
 
-            with patch.object(migrate, "require_stopped_workloads") as stopped, patch.object(
+            with patch.object(migrate, "installed_source_version", return_value="0.1.4"), patch.object(migrate, "require_stopped_workloads") as stopped, patch.object(
                 migrate, "build_steps", return_value=steps
             ), patch.object(migrate, "run_step", side_effect=complete):
                 self.assertEqual(0, migrate.run_migration(args))
@@ -106,12 +106,13 @@ class OrchestrationTest(unittest.TestCase):
             ]
             args = argparse.Namespace(
                 command="dry-run",
-                source_version="0.1.4",
                 state_file=str(root / "unused.tsv"),
+                namespace="openbkn",
+                expected_context="",
                 report_dir=str(report_dir),
             )
 
-            with patch.object(migrate, "build_steps", return_value=steps), patch.object(
+            with patch.object(migrate, "installed_source_version", return_value="0.1.4"), patch.object(migrate, "build_steps", return_value=steps), patch.object(
                 migrate,
                 "run_step",
                 side_effect=migrate.OrchestrationError("bkn failed"),
@@ -124,10 +125,42 @@ class OrchestrationTest(unittest.TestCase):
             self.assertEqual("bkn failed", summary["error"])
             self.assertFalse(summary["steps"][1]["completed"])
 
-    def test_rejects_every_source_release_except_0_1_4(self):
-        self.assertEqual("0.1.4", migrate.validate_source_version("v0.1.4"))
-        with self.assertRaisesRegex(migrate.OrchestrationError, "only migrates 0.1.4"):
-            migrate.validate_source_version("0.1.5")
+    def test_reads_and_validates_the_installed_bkn_safe_chart_version(self):
+        inventory = '[{"name":"bkn-safe","chart":"bkn-safe-0.1.4"}]'
+        completed = type("Completed", (), {"returncode": 0, "stdout": inventory, "stderr": ""})()
+        with patch.object(migrate.subprocess, "run", return_value=completed):
+            self.assertEqual("0.1.4", migrate.installed_source_version("openbkn"))
+
+        completed.stdout = '[{"name":"bkn-safe","chart":"bkn-safe-0.1.5"}]'
+        with patch.object(migrate.subprocess, "run", return_value=completed), self.assertRaisesRegex(
+            migrate.OrchestrationError, "only migrates 0.1.4"
+        ):
+            migrate.installed_source_version("openbkn")
+
+    def test_upgrade_runs_dry_run_stop_and_apply_without_user_inputs(self):
+        args = argparse.Namespace(
+            namespace="openbkn", expected_context="", authz_migrator="/tmp/authz-migrate"
+        )
+        calls = []
+
+        def record_migration(command):
+            calls.append(command.command)
+            return 0
+
+        def record_control(command):
+            calls.append(command.command)
+            return 0
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            migrate, "automatic_run_directory", return_value=Path(directory)
+        ), patch.object(
+            migrate, "installed_source_version", return_value="0.1.4"
+        ), patch.object(migrate, "run_migration", side_effect=record_migration), patch.object(
+            migrate, "control_services", side_effect=record_control
+        ):
+            self.assertEqual(0, migrate.run_upgrade(args))
+
+        self.assertEqual(["dry-run", "stop", "apply"], calls)
 
 
 if __name__ == "__main__":
