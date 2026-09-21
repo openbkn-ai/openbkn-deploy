@@ -13,6 +13,7 @@ import binascii
 import contextlib
 import json
 import os
+import platform
 import re
 import socket
 import subprocess
@@ -25,9 +26,49 @@ from typing import Any, Iterator, Mapping, Optional, Sequence
 
 
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
-DEFAULT_AUTHZ_MIGRATOR = str(
-    SCRIPT_DIRECTORY / "authz_migrate" / "authz-migrate"
-)
+GO_ARCHITECTURES = {
+    "x86_64": "amd64",
+    "amd64": "amd64",
+    "aarch64": "arm64",
+    "arm64": "arm64",
+}
+
+
+def host_machine(goos: str) -> str:
+    """Return the host CPU architecture, seeing through Rosetta on macOS.
+
+    An x86_64 Python on Apple silicon reports x86_64, but the host can run the
+    native arm64 executable, and only that one is bundled for macOS.
+    """
+    machine = platform.machine()
+    if goos != "darwin" or machine != "x86_64":
+        return machine
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "hw.optional.arm64"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return machine
+    return "arm64" if result.stdout.strip() == "1" else machine
+
+
+def bundled_authz_migrator(system: str = "", machine: str = "") -> Path:
+    """Return the checked-in authorization executable for the running host.
+
+    The executable runs where this script runs, not inside the cluster, so it
+    must match the operator host's platform rather than the node images.
+    """
+    goos = (system or platform.system()).lower()
+    machine = (machine or host_machine(goos)).lower()
+    goarch = GO_ARCHITECTURES.get(machine, machine)
+    executable = f"authz-migrate-{goos}-{goarch}"
+    return SCRIPT_DIRECTORY / "authz_migrate" / executable
+
+
+DEFAULT_AUTHZ_MIGRATOR = str(bundled_authz_migrator())
 DEFAULT_STATE_FILE = "/tmp/openbkn-permission-model-transition-workloads.tsv"
 DEFAULT_RUN_ROOT = Path.home() / ".openbkn-ai" / "migrations"
 TARGET_VERSION = "0.1.5"
@@ -465,7 +506,8 @@ def build_steps(args: argparse.Namespace, report_dir: Path) -> list[Step]:
         raise OrchestrationError(
             f"authorization migration executable is missing or not executable: "
             f"{authz_migrator}; "
-            "run authz_migrate/build.sh first"
+            "the release bundles linux/amd64, linux/arm64 and darwin/arm64, "
+            "build another platform with authz_migrate/build.sh <os>/<arch>"
         )
 
     bkn_report = report_dir / "01-bkn-data.json"

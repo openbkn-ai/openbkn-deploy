@@ -16,13 +16,63 @@ import migrate
 
 
 class StepRegistryTest(unittest.TestCase):
-    def test_bundled_authorization_migrator_is_executable(self):
-        executable = migrate.SCRIPT_DIRECTORY / "authz_migrate" / "authz-migrate"
+    def test_bundled_authorization_migrators_match_their_platform(self):
+        # Executable magic and CPU type fields: ELF e_machine, Mach-O cputype.
+        expected_headers = {
+            "linux-amd64": (b"\x7fELF", slice(18, 20), 0x3E),
+            "linux-arm64": (b"\x7fELF", slice(18, 20), 0xB7),
+            "darwin-arm64": (b"\xcf\xfa\xed\xfe", slice(4, 8), 0x0100000C),
+        }
+        executables = {
+            platform: migrate.SCRIPT_DIRECTORY / "authz_migrate" / f"authz-migrate-{platform}"
+            for platform in expected_headers
+        }
 
-        if not executable.exists():
+        if not any(executable.exists() for executable in executables.values()):
             self.skipTest("source checkout intentionally excludes the release executable")
-        self.assertTrue(executable.is_file())
-        self.assertTrue(os.access(executable, os.X_OK))
+        for platform, executable in executables.items():
+            magic, cpu_field, cpu_type = expected_headers[platform]
+            with self.subTest(platform=platform):
+                self.assertTrue(executable.is_file())
+                self.assertTrue(os.access(executable, os.X_OK))
+                header = executable.read_bytes()[:20]
+                self.assertEqual(magic, header[:4])
+                self.assertEqual(cpu_type, int.from_bytes(header[cpu_field], "little"))
+
+    def test_selects_the_bundled_authorization_migrator_for_the_host(self):
+        directory = migrate.SCRIPT_DIRECTORY / "authz_migrate"
+        cases = {
+            ("Linux", "x86_64"): "authz-migrate-linux-amd64",
+            ("Linux", "aarch64"): "authz-migrate-linux-arm64",
+            ("Linux", "arm64"): "authz-migrate-linux-arm64",
+            ("Darwin", "arm64"): "authz-migrate-darwin-arm64",
+        }
+
+        for (system, machine), name in cases.items():
+            with self.subTest(system=system, machine=machine):
+                self.assertEqual(
+                    directory / name, migrate.bundled_authz_migrator(system, machine)
+                )
+
+    def test_x86_64_python_on_apple_silicon_selects_the_arm64_migrator(self):
+        directory = migrate.SCRIPT_DIRECTORY / "authz_migrate"
+        cases = {"1\n": "authz-migrate-darwin-arm64", "": "authz-migrate-darwin-amd64"}
+
+        for sysctl_output, name in cases.items():
+            completed = MagicMock(returncode=0, stdout=sysctl_output, stderr="")
+            with self.subTest(sysctl_output=sysctl_output), patch.object(
+                migrate.platform, "machine", return_value="x86_64"
+            ), patch.object(migrate.subprocess, "run", return_value=completed) as run:
+                self.assertEqual(directory / name, migrate.bundled_authz_migrator("Darwin"))
+                self.assertEqual(["/usr/sbin/sysctl", "-n", "hw.optional.arm64"], run.call_args.args[0])
+
+        with patch.object(migrate.platform, "machine", return_value="x86_64"), patch.object(
+            migrate.subprocess, "run"
+        ) as run:
+            self.assertEqual(
+                directory / "authz-migrate-linux-amd64", migrate.bundled_authz_migrator("Linux")
+            )
+            run.assert_not_called()
 
     def test_registers_data_steps_before_authorization(self):
         with tempfile.TemporaryDirectory() as directory:
