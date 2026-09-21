@@ -44,8 +44,9 @@ logical-backup client is available, the preceding BKN step also backs up Safe.
 - `helm` and `kubectl` access to the target cluster, including permission to
   read the installed release values, bkn-safe ConfigMap/Secret, control the
   registered Deployments, and port-forward an in-cluster database Service;
-- the checked-in `authz_migrate/authz-migrate` executable for the Linux
-  deployment environment;
+- a Linux amd64/arm64 or Apple silicon macOS host to run the command;
+  `migrate.py` selects the matching checked-in
+  `authz_migrate/authz-migrate-<os>-<arch>` executable;
 - network access to any externally hosted MariaDB/MySQL endpoint.
 
 The normal workflow discovers the namespace, BKN/Vega RDS values, and the
@@ -60,8 +61,10 @@ that location is unsuitable.
 
 ## Workflow
 
-The release includes the authorization executable, so Go is not required to
-run this migration. Rebuild it only when intentionally changing its Go source:
+The release includes the authorization executables, so Go is not required to
+run this migration. Rebuild them only when intentionally changing their Go
+source; the script builds every bundled platform unless given `<os>/<arch>`
+targets:
 
 ```bash
 ./authz_migrate/build.sh
