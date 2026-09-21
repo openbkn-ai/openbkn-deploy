@@ -158,14 +158,27 @@ require_workloads() {
   [[ $missing == false ]]
 }
 
-declare -A saved_replicas=()
+# One "<deployment><TAB><replicas>" line per workload. Bash 3.2 (macOS
+# /bin/bash) has no associative arrays.
+saved_replicas=
 saved_namespace=
 saved_context=
+
+saved_replica_count() {
+  local workload count
+  while IFS=$'\t' read -r workload count; do
+    if [[ $workload == "$1" ]]; then
+      printf '%s\n' "$count"
+      return 0
+    fi
+  done <<< "$saved_replicas"
+  return 1
+}
 
 read_state() {
   local kind first second
   local format=
-  saved_replicas=()
+  saved_replicas=
   saved_namespace=
   saved_context=
   [[ -f $state_file ]] || {
@@ -182,7 +195,7 @@ read_state() {
           echo "invalid replica state for $first" >&2
           return 1
         }
-        saved_replicas["$first"]=$second
+        saved_replicas+="$first"$'\t'"$second"$'\n'
         ;;
       "") ;;
       *)
@@ -205,7 +218,7 @@ read_state() {
   }
   local workload
   for workload in "${WORKLOADS[@]}"; do
-    [[ -n ${saved_replicas[$workload]+present} ]] || {
+    saved_replica_count "$workload" >/dev/null || {
       echo "replica state is missing Deployment: $workload" >&2
       return 1
     }
@@ -304,7 +317,7 @@ start_workloads() {
 
   local workload replicas
   for workload in "${START_ORDER[@]}"; do
-    replicas=${saved_replicas[$workload]}
+    replicas=$(saved_replica_count "$workload")
     echo "Restoring Deployment $namespace/$workload to $replicas replicas"
     kubectl_ns scale "deployment/$workload" --replicas="$replicas" >/dev/null
     if (( replicas > 0 )); then

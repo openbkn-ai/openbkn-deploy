@@ -7,13 +7,14 @@ set -euo pipefail
 
 script_directory=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 control_script="$script_directory/service_control.sh"
-temporary_directory=$(mktemp -d)
+temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/service-control-test.XXXXXX")
 fake_binary_directory="$temporary_directory/bin"
 fake_cluster_directory="$temporary_directory/cluster"
 calls_file="$temporary_directory/calls"
 
 cleanup() {
-  [[ -n $temporary_directory && $temporary_directory == /tmp/* ]] || return
+  # macOS puts TMPDIR under /var/folders, so guard on the template name.
+  [[ $temporary_directory == */service-control-test.* ]] || return 0
   rm -rf -- "$temporary_directory"
 }
 trap cleanup EXIT
