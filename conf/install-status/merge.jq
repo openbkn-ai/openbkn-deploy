@@ -9,8 +9,19 @@
 #
 # Output: the snapshot with per-release appVersion overlaid from the actual
 # running image tags (versionSource=live), readiness refreshed, and
-# generatedAt/liveMergedAt set to $now. Any error aborts jq; the wrapper keeps
-# the previous live file, so failures degrade to pre-existing behaviour.
+# liveMergedAt is set to $now while generatedAt remains the publication time.
+# Any error aborts jq; the wrapper keeps the previous live file, so failures
+# degrade to pre-existing behaviour.
+
+def workload_total($it):
+  if $it.kind == "DaemonSet" then ($it.status.desiredNumberScheduled // 0)
+  elif $it.kind == "Job" then ($it.spec.completions // 1)
+  else ($it.spec.replicas // 1) end;
+
+def workload_ready($it):
+  if $it.kind == "DaemonSet" then ($it.status.numberReady // 0)
+  elif $it.kind == "Job" then ($it.status.succeeded // 0)
+  else ($it.status.readyReplicas // 0) end;
 
 ($snap[0]) as $s
 | ($work[0]) as $w
@@ -29,8 +40,8 @@
            ]) as $tags
         | .[$rel] = {
             tags:  (($e.tags + $tags) | unique),
-            ready: ($e.ready + ($it.status.readyReplicas // 0)),
-            total: ($e.total + ($it.spec.replicas // 1))
+            ready: ($e.ready + workload_ready($it)),
+            total: ($e.total + workload_total($it))
           }
       end)) as $actual
 | $s
@@ -67,5 +78,4 @@
                          else "down" end)}
           end
       else . end))
-| .generatedAt = $now
 | .liveMergedAt = $now

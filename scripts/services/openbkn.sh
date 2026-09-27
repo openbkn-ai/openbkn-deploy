@@ -1525,9 +1525,12 @@ install_openbkn() {
     # 放在装完全部在册 release 之后：确保承接方已就绪，退役旧 release 不留服务空窗。
     _openbkn_uninstall_retired_releases "${namespace}"
 
-    # Publish the non-sensitive install-status snapshot + /install-status endpoint.
-    # Best-effort: never fails the install.
-    gen_install_status_json || true
+    # Publish the install-status snapshot + endpoint and wait for it to become ready.
+    # The install is not complete until its operator-facing verification page works.
+    if ! gen_install_status_json; then
+        log_error "OpenBKN installation did not complete: install-status is unavailable."
+        return 1
+    fi
 
     local _host _port _scheme
     _host="$(_read_access_address_field "host" 2>/dev/null || true)"

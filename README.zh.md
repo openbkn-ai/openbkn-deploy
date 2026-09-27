@@ -115,18 +115,18 @@ sudo bash ./preflight.sh --help         # 全部参数（--role、--skip、--rep
 # 默认体检对齐 k8s/kubeadm；走单节点 k3s 时用：sudo bash ./preflight.sh --distro=k3s
 #（与 deploy 共用环境变量 KUBE_DISTRO=k3s）
 
-# 3. 安装 OpenBKN
-# 安装 OpenBKN 全量服务
-bash ./deploy.sh openbkn install
+# 3. 安装 OpenBKN（同时安装 install-status 运维页）
+# 默认启用容器日志查看；安装成功返回前会等待 install-status 就绪。
+sudo bash ./deploy.sh openbkn install
 # 默认走 kubeadm（k8s）。若改用单节点 k3s（--distro 须写在 openbkn 之前）：
-# bash ./deploy.sh --distro=k3s openbkn install
-# 或：export KUBE_DISTRO=k3s && bash ./deploy.sh openbkn install
+# sudo bash ./deploy.sh --distro=k3s openbkn install
+# 或：export KUBE_DISTRO=k3s；再执行上面的安装命令
 # 脚本会交互式提示输入访问地址，并自动检测 API Server 地址。
 
 # 或显式指定地址（跳过交互提示）：
 #   --access_address       客户端访问 OpenBKN 服务的地址（可以是 IP 或域名）
 #   --api_server_address   K8s API Server 绑定的本机网卡 IP（必须是真实的网卡地址）
-bash ./deploy.sh openbkn install \
+sudo bash ./deploy.sh openbkn install \
   --access_address=<你的IP> \
   --api_server_address=<你的IP>
 
@@ -333,19 +333,33 @@ kubectl get pods -A
 ./deploy.sh --offline=<offline-registry> openbkn publish-status
 ```
 
-同时通过 ingress 以**非敏感**面板对外提供(由一个极小的 nginx 托管 ConfigMap,见
-`conf/install-status/`):
+通过仅管理员可访问的 ingress/端口提供运维面板（由一个极小的 nginx 托管
+ConfigMap，见 `conf/install-status/`）。管理员入口跳转时会将 Studio Access Token
+放在 URL Fragment 中，页面不再提供手工 Token 输入框：
 
 - `GET /install-status` —— HTML 页面,展示各 release、逐服务健康、依赖拓扑(自动刷新;
   纯静态,无构建步骤 / 无 CDN)。
-- `GET /install-status.json` —— 页面消费的原始 JSON 快照。
+- `GET /install-status.json` —— 页面消费的原始 JSON 快照（需要管理员 Token）。
 
 ```bash
-# 浏览器打开面板 https://<access-address>/install-status
-curl -k https://<access-address>/install-status.json
+# 管理员跳转目标： https://<access-address>/install-status#token=<Studio-access-token>
+# 英文界面： https://<access-address>/install-status?lang=en
+# 中文界面： https://<access-address>/install-status?lang=zh （默认）
 ```
 
-其中包含产品/各 release 版本、ready 数、依赖服务连接拓扑、逐服务分类健康 —— 且**刻意不含任何凭据**:
+页面显示容器等待/退出原因、退出码、Deployment/StatefulSet/DaemonSet/Job 的期望与实际状态、最近安全摘要 Warning Event，以及工作负载探针配置摘要。每个 Pod 可展开查看脱敏的 Describe 摘要（生命周期、Pod Conditions、Init Container、容器状态和关联 Warning Event），其中 Init Container 也可查看日志；不包含节点/IP、注解、环境变量、挂载或 Event 原文。页面注明 Pods、Workloads、Events 各自最近一次成功采集时间，超过 90 秒会标为过期。版本、依赖和 HTTP 健康检查来自最近一次发布；Pod、工作负载和 Event 每 30 秒采集。发布版本表区分 Chart 版本和当前镜像版本来源。
+
+每个容器还提供最近日志和上次退出日志入口。跳转 Token 从 URL Fragment 读取（不会发送给 nginx），随即从地址栏清除，只保存在页面内存中；状态、Pods、Workloads、Events 和日志接口都会分别通过 bkn-safe 的 Studio `is_admin` 规则校验。日志不会自动获取，也不会写入 JSON；点击后在模态弹窗中查看，可切换 recent/previous、搜索当前已加载行，按关闭或 Esc 退出时清除显示内容。最多读取 200 行、64 KiB，页面默认请求 100 行。审计记录用户名、目标容器、请求行数和结果，不记录日志内容或凭据；通过 `kubectl -n <namespace> logs deployment/install-status -c log-reader` 查看。
+
+日志读取默认启用，并要求同一个管理员 Token。应用日志可能包含凭据；如该环境不允许管理员在页面读取日志，可显式关闭并重新发布：
+
+```bash
+INSTALL_STATUS_LOGS_ENABLED=false ./deploy.sh openbkn publish-status
+```
+
+仅更新现有 `install-status` Deployment 和 Service，不创建第二个工作负载或通用运维 API；同一 Pod 新增 Python 日志读取容器，在线默认使用 `swr.cn-east-3.myhuaweicloud.com/openbkn-ai/library/python:3.12-alpine`。离线部署前执行镜像同步，或用 `INSTALL_STATUS_PYTHON_IMAGE` 指定可用镜像。若镜像无法拉取，滚动更新会停留在旧版 Pod。原 ServiceAccount 具有本命名空间内读取 Pod 日志、Events、Deployment、StatefulSet、DaemonSet 和 Job 的只读权限。
+
+状态视图包含产品/各 release 版本、ready 数、依赖服务连接拓扑、逐服务分类健康 —— 且**刻意不含任何凭据**:
 采集器([scripts/lib/install_status.py](scripts/lib/install_status.py))按白名单取字段(只留
 host/port/type,丢弃 password/user/key/token),也不暴露健康端点的原始响应体(其中可能含内部
 版本/拓扑)。ConfigMap 每次安装刷新,nginx 每请求读取挂载文件,无需重启 Pod。

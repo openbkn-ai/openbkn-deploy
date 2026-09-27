@@ -1,5 +1,5 @@
-# Static install-status endpoint: a tiny nginx serving a human dashboard at
-# GET /install-status and the raw non-sensitive JSON at GET /install-status.json.
+# Install-status endpoint: a tiny nginx serving the dashboard at
+# GET /install-status and token-gated status data at GET /install-status.json.
 #
 # Two ConfigMaps back it (NOT in this file — created by status.sh so the HTML /
 # nginx conf stay as real, un-escaped files, and the data refreshes per install):
@@ -9,20 +9,23 @@
 #
 # A "refresher" sidecar (kubectl) regenerates LIVE snapshots every ${INTERVAL}s
 # into a shared volume:
-#   - /install-status.pods.json      raw `kubectl get pods -o json`
-#   - /install-status.workloads.json raw `kubectl get deploy,sts -o json` — the
+#   - /install-status.pods.json      whitelisted pod health (admin-token gated)
+#   - /install-status.workloads.json whitelisted workload readiness (admin-token gated) — the
 #     dashboard overlays per-release readiness and service health from it, so
 #     the whole page tracks reality without re-running publish-status.
+#   - /install-status.events.json    whitelisted warning-event summaries (admin-token gated).
 #   - /install-status.live.json      publish-time snapshot merged with actual
 #     image tags + readiness (merge.jq); nginx serves it as /install-status.json
 #     via try_files, falling back to the static snapshot when the refresher is
 #     down — the page's stale-snapshot banner then doubles as the outage alert.
-# It needs a ServiceAccount with a minimal Role (pods/deployments/statefulsets
-# read only — NO secrets, NO helm). The expected release list still comes from
+# The single refresher reads pods, events and deploy/sts/ds/jobs plus bounded
+# pods/log access for the authenticated log viewer.
+# It cannot read Secrets or Helm resources.
+# The release list comes from
 # the publish-time snapshot, mounted read-only from the data ConfigMap.
 #
 # Placeholders __NAMESPACE__ / __INGRESS_CLASS__ / __KUBECTL_IMAGE__ /
-# __NGINX_IMAGE__ are substituted by status.sh.
+# __NGINX_IMAGE__ / __PYTHON_IMAGE__ / config hash are substituted by status.sh.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -43,8 +46,17 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list"]
   - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
     verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -78,8 +90,11 @@ spec:
     metadata:
       labels:
         app: install-status
+      annotations:
+        install-status/config-hash: "__PUBLIC_CONFIG_HASH__"
     spec:
       serviceAccountName: install-status
+      automountServiceAccountToken: false
       containers:
         - name: refresher
           # kubectl image WITH a shell — distroless kubectl images (e.g.
@@ -89,11 +104,24 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
+              umask 022
               while true; do
-                kubectl get pods -n "__NAMESPACE__" -o json > /live/pods.json.tmp 2>/live/err.log \
-                  && mv /live/pods.json.tmp /live/pods.json
-                kubectl get deploy,sts -n "__NAMESPACE__" -o json > /live/workloads.json.tmp 2>>/live/err.log \
-                  && mv /live/workloads.json.tmp /live/workloads.json
+                now="$(date -u +%FT%TZ)"
+                if kubectl get pods -n "__NAMESPACE__" -o json > /live/pods.json.tmp 2>/live/err.log \
+                    && mv /live/pods.json.tmp /live/pods.json \
+                    && jq --arg refreshedAt "$now" -f /scripts/public-pods.jq /live/pods.json > /live/pods.public.json.tmp 2>>/live/err.log \
+                    && mv /live/pods.public.json.tmp /live/pods.public.json; then :; \
+                  else rm -f /live/pods.json.tmp /live/pods.public.json.tmp; fi
+                if kubectl get deploy,sts,ds,jobs -n "__NAMESPACE__" -o json > /live/workloads.json.tmp 2>>/live/err.log \
+                    && mv /live/workloads.json.tmp /live/workloads.json \
+                    && jq --arg refreshedAt "$now" -f /scripts/public-workloads.jq /live/workloads.json > /live/workloads.public.json.tmp 2>>/live/err.log \
+                    && mv /live/workloads.public.json.tmp /live/workloads.public.json; then :; \
+                  else rm -f /live/workloads.json.tmp /live/workloads.public.json.tmp; fi
+                if kubectl get events -n "__NAMESPACE__" -o json > /live/events.json.tmp 2>>/live/err.log \
+                    && mv /live/events.json.tmp /live/events.json \
+                    && jq --arg refreshedAt "$now" -f /scripts/public-events.jq /live/events.json > /live/events.public.json.tmp 2>>/live/err.log \
+                    && mv /live/events.public.json.tmp /live/events.public.json; then :; \
+                  else rm -f /live/events.json.tmp /live/events.public.json.tmp; fi
                 # live-merge the publish-time snapshot with actual image tags;
                 # any failure keeps the previous live file (nginx falls back)
                 jq -n --arg now "$(date -u +%FT%TZ)" \
@@ -106,7 +134,7 @@ spec:
               done
           env:
             - name: INTERVAL
-              value: "60"
+              value: "30"
           resources:
             requests:
               cpu: 5m
@@ -122,6 +150,9 @@ spec:
               readOnly: true
             - name: scripts
               mountPath: /scripts
+              readOnly: true
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
         - name: nginx
           image: __NGINX_IMAGE__
@@ -150,7 +181,63 @@ spec:
               mountPath: /data
             - name: live
               mountPath: /live
+        - name: log-reader
+          image: __PYTHON_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-u", "/app/log_server.py"]
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: INSTALL_STATUS_LOGS_ENABLED
+              value: "__LOGS_ENABLED__"
+            - name: BKN_SAFE_URL
+              value: "http://bkn-safe:3000"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 96Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: log-code
+              mountPath: /app
+              readOnly: true
+            - name: live
+              mountPath: /live
+              readOnly: true
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
       volumes:
+        - name: kube-api-access
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
         - name: conf
           configMap:
             name: install-status-nginx
@@ -163,13 +250,24 @@ spec:
             items:
               - key: index.html
                 path: index.html
+        - name: log-code
+          configMap:
+            name: install-status-nginx
+            items:
+              - key: log_server.py
+                path: log_server.py
         - name: scripts
           configMap:
             name: install-status-nginx
             items:
               - key: merge.jq
                 path: merge.jq
-            optional: true
+              - key: public-pods.jq
+                path: public-pods.jq
+              - key: public-workloads.jq
+                path: public-workloads.jq
+              - key: public-events.jq
+                path: public-events.jq
         - name: data
           configMap:
             name: install-status-data
@@ -226,6 +324,20 @@ spec:
                 port:
                   number: 80
           - path: /install-status.workloads.json
+            pathType: Exact
+            backend:
+              service:
+                name: install-status
+                port:
+                  number: 80
+          - path: /install-status.events.json
+            pathType: Exact
+            backend:
+              service:
+                name: install-status
+                port:
+                  number: 80
+          - path: /install-status/logs
             pathType: Exact
             backend:
               service:

@@ -21,6 +21,10 @@ INSTALL_STATUS_ENDPOINT_TPL="${INSTALL_STATUS_DIR}/endpoint.yaml"
 INSTALL_STATUS_NGINX_CONF="${INSTALL_STATUS_DIR}/nginx.conf"
 INSTALL_STATUS_INDEX_HTML="${INSTALL_STATUS_DIR}/index.html"
 INSTALL_STATUS_MERGE_JQ="${INSTALL_STATUS_DIR}/merge.jq"
+INSTALL_STATUS_PUBLIC_PODS_JQ="${INSTALL_STATUS_DIR}/public-pods.jq"
+INSTALL_STATUS_PUBLIC_WORKLOADS_JQ="${INSTALL_STATUS_DIR}/public-workloads.jq"
+INSTALL_STATUS_PUBLIC_EVENTS_JQ="${INSTALL_STATUS_DIR}/public-events.jq"
+INSTALL_STATUS_LOG_SERVER="${INSTALL_STATUS_DIR}/log_server.py"
 
 # Image for the install-status refresher sidecar (live pod-health snapshot).
 # MUST contain a /bin/sh and kubectl — distroless kubectl images (rancher/kubectl)
@@ -32,6 +36,7 @@ INSTALL_STATUS_MERGE_JQ="${INSTALL_STATUS_DIR}/merge.jq"
 # actually published. `deploy.sh` parses --offline after sourcing this file.
 INSTALL_STATUS_KUBECTL_IMAGE_OVERRIDE="${INSTALL_STATUS_KUBECTL_IMAGE:-}"
 INSTALL_STATUS_NGINX_IMAGE_OVERRIDE="${INSTALL_STATUS_NGINX_IMAGE:-}"
+INSTALL_STATUS_PYTHON_IMAGE_OVERRIDE="${INSTALL_STATUS_PYTHON_IMAGE:-}"
 
 _status_resolve_images() {
     local offline_registry="${OFFLINE_REGISTRY:-registry.openbkn.ai:5000}"
@@ -49,6 +54,14 @@ _status_resolve_images() {
         INSTALL_STATUS_NGINX_IMAGE="${offline_registry}/openbkn-ai/library/nginx:1.27-alpine"
     else
         INSTALL_STATUS_NGINX_IMAGE="swr.cn-east-3.myhuaweicloud.com/openbkn-ai/library/nginx:1.27-alpine"
+    fi
+
+    if [[ -n "${INSTALL_STATUS_PYTHON_IMAGE_OVERRIDE}" ]]; then
+        INSTALL_STATUS_PYTHON_IMAGE="${INSTALL_STATUS_PYTHON_IMAGE_OVERRIDE}"
+    elif [[ "${OFFLINE_MODE:-false}" == "true" ]]; then
+        INSTALL_STATUS_PYTHON_IMAGE="${offline_registry}/openbkn-ai/library/python:3.12-alpine"
+    else
+        INSTALL_STATUS_PYTHON_IMAGE="swr.cn-east-3.myhuaweicloud.com/openbkn-ai/library/python:3.12-alpine"
     fi
 }
 
@@ -97,7 +110,7 @@ _status_apply_endpoint() {
     local namespace="$1"
     if [[ ! -f "${INSTALL_STATUS_ENDPOINT_TPL}" ]]; then
         log_warn "install-status endpoint template missing: ${INSTALL_STATUS_ENDPOINT_TPL}"
-        return 0
+        return 1
     fi
 
     # nginx conf + dashboard HTML + in-cluster merge script ConfigMap (built
@@ -107,6 +120,10 @@ _status_apply_endpoint() {
         local -a cm_files=(
             --from-file=nginx.conf="${INSTALL_STATUS_NGINX_CONF}"
             --from-file=index.html="${INSTALL_STATUS_INDEX_HTML}"
+            --from-file=log_server.py="${INSTALL_STATUS_LOG_SERVER}"
+            --from-file=public-pods.jq="${INSTALL_STATUS_PUBLIC_PODS_JQ}"
+            --from-file=public-workloads.jq="${INSTALL_STATUS_PUBLIC_WORKLOADS_JQ}"
+            --from-file=public-events.jq="${INSTALL_STATUS_PUBLIC_EVENTS_JQ}"
         )
         [[ -f "${INSTALL_STATUS_MERGE_JQ}" ]] \
             && cm_files+=(--from-file=merge.jq="${INSTALL_STATUS_MERGE_JQ}")
@@ -115,9 +132,13 @@ _status_apply_endpoint() {
             -n "${namespace}" \
             --dry-run=client -o yaml 2>/dev/null \
             | kubectl apply -f - >/dev/null 2>&1 \
-            || log_warn "Failed to apply install-status-nginx ConfigMap."
+            || {
+                log_warn "Failed to apply install-status-nginx ConfigMap."
+                return 1
+            }
     else
         log_warn "install-status nginx.conf / index.html missing under ${INSTALL_STATUS_DIR}."
+        return 1
     fi
 
     # Drop the legacy standalone refresher stack (early live-overlay iteration,
@@ -129,32 +150,52 @@ _status_apply_endpoint() {
 
     _status_resolve_images
 
+    # Log diagnostics are part of the default install-status experience.
+    # Administrators can still explicitly disable this for stricter deployments.
+    local logs_enabled="${INSTALL_STATUS_LOGS_ENABLED:-true}"
+    if [[ "${logs_enabled}" != "true" && "${logs_enabled}" != "false" ]]; then
+        log_warn "INSTALL_STATUS_LOGS_ENABLED must be true or false; using true."
+        logs_enabled="true"
+    fi
+
+    # Changing executable ConfigMap content rolls the pod so the Python server
+    # and nginx configuration take effect. Refreshing status data alone does not.
+    local public_config_hash
+    public_config_hash="$(sha256sum "${INSTALL_STATUS_NGINX_CONF}" "${INSTALL_STATUS_INDEX_HTML}" \
+        "${INSTALL_STATUS_MERGE_JQ}" "${INSTALL_STATUS_LOG_SERVER}" \
+        "${INSTALL_STATUS_PUBLIC_PODS_JQ}" "${INSTALL_STATUS_PUBLIC_WORKLOADS_JQ}" \
+        "${INSTALL_STATUS_PUBLIC_EVENTS_JQ}" \
+        | sha256sum | awk '{print $1}')"
+
     local ingress_class
     ingress_class="$(_status_detect_ingress_class)"
     sed -e "s|__NAMESPACE__|${namespace}|g" \
         -e "s|__INGRESS_CLASS__|${ingress_class}|g" \
         -e "s|__KUBECTL_IMAGE__|${INSTALL_STATUS_KUBECTL_IMAGE}|g" \
         -e "s|__NGINX_IMAGE__|${INSTALL_STATUS_NGINX_IMAGE}|g" \
+        -e "s|__PYTHON_IMAGE__|${INSTALL_STATUS_PYTHON_IMAGE}|g" \
+        -e "s|__PUBLIC_CONFIG_HASH__|${public_config_hash}|g" \
+        -e "s|__LOGS_ENABLED__|${logs_enabled}|g" \
         "${INSTALL_STATUS_ENDPOINT_TPL}" \
         | kubectl apply -f - >/dev/null 2>&1 || {
             log_warn "Failed to apply install-status endpoint manifests."
-            return 0
+            return 1
         }
 }
 
 # Layer 2 — regenerate the non-sensitive JSON snapshot and publish the endpoint.
-# Never fails the install: best-effort, warns on error.
+# A successful return means the endpoint resources and Deployment are ready.
 gen_install_status_json() {
     local namespace
     namespace="$(_openbkn_resolve_target_namespace)"
 
     if ! command -v python3 >/dev/null 2>&1; then
-        log_warn "python3 not found; skipping install-status snapshot."
-        return 0
+        log_warn "python3 not found; cannot publish install-status snapshot."
+        return 1
     fi
     if ! _status_require_manifest; then
-        log_warn "Skipping install-status snapshot (no manifest)."
-        return 0
+        log_warn "Cannot publish install-status snapshot (no manifest)."
+        return 1
     fi
 
     local tmp
@@ -165,23 +206,36 @@ gen_install_status_json() {
             --config "${CONFIG_YAML_PATH:-}" \
             --product "openbkn" \
             --format json > "${tmp}" 2>/dev/null; then
-        log_warn "Failed to generate install-status JSON; skipping."
+        log_warn "Failed to generate install-status JSON."
         rm -f "${tmp}"
-        return 0
+        return 1
     fi
 
-    _status_apply_endpoint "${namespace}"
+    if ! _status_apply_endpoint "${namespace}"; then
+        log_warn "install-status endpoint was not updated."
+        rm -f "${tmp}"
+        return 1
+    fi
 
-    # Refresh only the data ConfigMap; nginx reads the mounted file per request,
-    # so no pod restart is needed.
+    # Refresh the data ConfigMap before waiting for the endpoint's Deployment.
     if kubectl create configmap install-status-data \
             --from-file=install-status.json="${tmp}" \
             -n "${namespace}" \
             --dry-run=client -o yaml 2>/dev/null \
             | kubectl apply -f - >/dev/null 2>&1; then
-        log_info "install-status published (ns ${namespace}): page /install-status · json /install-status.json"
+        :
     else
         log_warn "Failed to publish install-status data ConfigMap."
+        rm -f "${tmp}"
+        return 1
     fi
     rm -f "${tmp}"
+
+    local rollout_timeout="${INSTALL_STATUS_ROLLOUT_TIMEOUT:-180s}"
+    if ! kubectl rollout status deployment/install-status -n "${namespace}" \
+            --timeout="${rollout_timeout}"; then
+        log_warn "install-status Deployment did not become ready within ${rollout_timeout}."
+        return 1
+    fi
+    log_info "install-status published and ready (ns ${namespace}): page /install-status · json /install-status.json"
 }
