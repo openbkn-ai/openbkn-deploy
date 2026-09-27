@@ -4,11 +4,11 @@
   snapshot from ./install-status.json (served by the same nginx) and renders it.
   No build step, no CDN — usable on an offline cluster.
 -->
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OpenBKN — Install Status</title>
+  <title>OpenBKN — 服务运维</title>
   <style>
     :root {
       --bg: #0f1419; --panel: #1a212b; --line: #2a3441; --fg: #d8dee9;
@@ -62,37 +62,114 @@
              border-radius: 6px; padding: 5px 12px; cursor: pointer; font: inherit; }
     button:hover { border-color: var(--accent); }
     #err { color: var(--bad); margin: 16px 0; }
+    .scroll { overflow-x: auto; }
+    .loglinks { display: flex; flex-wrap: wrap; gap: 8px; }
+    .loglinks button { color: var(--accent); padding: 3px 8px; white-space: nowrap; }
+    .log-viewer { padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    .log-dialog { width: min(1000px, calc(100% - 32px)); max-width: none; max-height: calc(100vh - 32px); overflow: auto; color: var(--fg); box-shadow: 0 24px 80px rgba(0,0,0,.55); }
+    .log-dialog::backdrop { background: rgba(4,8,12,.76); backdrop-filter: blur(3px); }
+    .log-viewer header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .log-viewer h3 { margin: 0; font-size: 14px; }
+    .log-viewer pre { max-height: min(58vh, 560px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: #091016; border: 1px solid var(--line); }
+    .reason { white-space: normal; min-width: 180px; }
+    #collectionFreshness.stale { color: var(--warn); }
+    .page-head, .toolbar, .freshness, .log-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .toolbar { justify-content: flex-start; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+    .toolbar input[type="search"], .log-tools input { min-width: 220px; padding: 7px 9px; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; font: inherit; }
+    .toolbar label, .log-tools label { display: inline-flex; align-items: center; gap: 6px; }
+    .log-tools > div { display: flex; gap: 8px; flex-wrap: wrap; }
+    .overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 8px; margin: 14px 0; }
+    .overview button { min-height: 66px; text-align: left; }
+    .overview .n { display: block; font-size: 22px; font-weight: 700; }
+    .overview button[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .filterable[hidden] { display: none !important; }
+    .hcard { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+    .hcard .service-main { flex: 1; min-width: 0; }
+    .hcard details { grid-column: 1 / -1; margin-top: 8px; color: var(--fg); }
+    .hcard details summary { color: var(--accent); cursor: pointer; }
+    .detail-list { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+    .detail-list li { margin: 3px 0; }
+    .pod-diagnostics { margin-top: 7px; font-size: 12px; }
+    .pod-diagnostics summary { color: var(--accent); cursor: pointer; }
+    .empty { color: var(--muted); padding: 10px; }
+    .state-note { color: var(--muted); font-size: 12px; }
+    .status-cell { font-weight: 600; }
+    .status-cell.warn { color: var(--warn); }
+    mark { color: #111820; background: var(--warn); }
+    #logOutput { margin-bottom: 0; }
+    #logMatches { color: var(--muted); font-size: 12px; }
+    .muted-btn { color: var(--muted); }
+    @media (max-width: 640px) {
+      body { padding: 12px; }
+      .auth-gate { margin: 6vh auto; padding: 18px; }
+      .auth-gate form { flex-direction: column; }
+      .auth-gate form button { width: 100%; }
+      .toolbar input[type="search"] { flex: 1 1 100%; min-width: 0; }
+      .log-tools input { flex: 1 1 100%; min-width: 0; }
+      .overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .log-dialog { width: calc(100% - 16px); max-height: calc(100vh - 16px); padding: 10px; }
+      .log-viewer pre { max-height: 55vh; padding: 8px; font-size: 12px; }
+      th, td { padding: 6px 8px; }
+    }
   </style>
 </head>
 <body>
-  <h1>OpenBKN — Install Status</h1>
-  <div class="sub" id="meta">loading…</div>
+  <main id="dashboardContent">
+  <div class="page-head"><div><h1 data-en="OpenBKN · Service operations">OpenBKN · 服务运维</h1><div class="sub" id="meta">正在加载…</div></div>
+  </div>
   <div class="sub" id="staleHint" style="color:var(--warn)"></div>
   <div id="err"></div>
+  <div class="overview" id="summary" aria-label="异常概览" data-en-aria-label="Issue overview"></div>
+  <section class="toolbar" aria-label="筛选和刷新" data-en-aria-label="Filtering and refresh">
+    <input id="globalSearch" type="search" placeholder="搜索服务、Pod、工作负载或事件" data-en-placeholder="Search services, Pods, workloads, or events" aria-label="搜索运维数据" data-en-aria-label="Search operational data">
+    <label><input id="problemsOnly" type="checkbox"> <span data-en="Show issues only">仅看异常 / 待关注项</span></label>
+    <button id="refreshAll" type="button" data-en="Refresh now">立即刷新</button>
+    <span id="refreshStatus" class="sub" aria-live="polite" data-en="Auto refreshes every 30 seconds">自动刷新间隔 30 秒</span>
+    <span id="filterState" class="sub"></span>
+  </section>
 
-  <div class="bar" id="summary"></div>
+  <h2><span data-en="Pod status">Pod 状态</span> <span class="sub" style="font-weight:normal" data-en="— live collection">— 实时采集</span></h2>
+  <div class="freshness"><div class="sub" id="collectionFreshness">最近成功采集：等待数据</div><div id="liveErr" role="alert" style="color:var(--bad)"></div></div>
+  <div class="scroll"><table id="livepods"><thead><tr>
+    <th>Pod</th><th data-en="Ready containers">就绪容器</th><th data-en="Status">状态</th><th data-en="Restarts">重启</th><th data-en="Container reason / exit code">容器原因 / 退出码</th><th data-en="Logs">日志</th>
+  </tr></thead><tbody></tbody></table></div>
+  <div class="sub" data-en="Logs load in a dialog only when requested. Each request returns at most 100 lines / 64 KiB; full logs are never loaded automatically.">点击日志后将在弹窗中加载；每次最多 100 行 / 64 KiB，不会自动读取完整日志。</div>
+  <dialog id="logViewer" class="log-viewer log-dialog" aria-labelledby="logTitle">
+    <header><h3 id="logTitle">容器日志</h3><button id="closeLogViewer" type="button" autofocus data-en="Close">关闭</button></header>
+    <div id="logControls" class="log-tools">
+      <div><button id="recentLog" type="button" title="当前容器实例最近输出" data-en="Current instance · latest 100 lines" data-en-title="Latest output from the current container instance">当前实例 · 最近 100 行</button>
+      <button id="previousLog" type="button" title="容器上一次重启前的实例输出" data-en="Previous instance · last 100 lines" data-en-title="Output from the container instance before its last restart">上一次实例 · 最后 100 行</button></div>
+      <input id="logSearch" type="search" placeholder="在已加载日志中查找" data-en-placeholder="Search loaded logs" aria-label="查找日志关键词" data-en-aria-label="Search log text">
+      <label><input id="followLog" type="checkbox" checked> <span data-en="Follow latest output">定位到最新输出</span></label>
+    </div>
+    <div id="logMatches" aria-live="polite"></div>
+    <div id="logError" role="alert" style="color:var(--bad)"></div>
+    <pre id="logOutput" data-en="Choose a container to load its logs.">请选择容器以加载日志。</pre>
+  </dialog>
 
-  <h2>Live pod health <span class="sub" style="font-weight:normal">— in-cluster, auto-refresh 60s <span id="liveAt">—</span></span></h2>
-  <div id="liveErr" style="color:var(--bad)"></div>
-  <table id="livepods"><thead><tr>
-    <th>Pod</th><th>Ready</th><th>Status</th><th>Restarts</th>
-  </tr></thead><tbody></tbody></table>
+  <h2><span data-en="Workload rollout">工作负载发布</span> <span class="sub" style="font-weight:normal" data-en="— Deployment, StatefulSet, DaemonSet, Job">— Deployment、StatefulSet、DaemonSet、Job</span></h2>
+  <div class="scroll"><table id="workloads"><thead><tr>
+    <th data-en="Kind">类型</th><th data-en="Name">名称</th><th data-en="Actual / desired">实际 / 期望</th><th data-en="Ready">就绪</th><th data-en="Available">可用</th><th data-en="Updated">已更新</th><th data-en="Conditions / probes">异常条件 / 健康检查</th>
+  </tr></thead><tbody></tbody></table></div>
 
-  <h2>Releases <span class="sub" style="font-weight:normal">— versions from snapshot; Ready live-updates 60s</span></h2>
-  <table id="releases"><thead><tr>
-    <th>Release</th><th>Deployed</th><th>App</th><th>Status</th><th>Ready</th><th></th>
-  </tr></thead><tbody></tbody></table>
+  <h2><span data-en="Recent Warning Events">近期 Warning Events</span> <span class="sub" style="font-weight:normal" data-en="— sanitized summary">— 脱敏摘要</span></h2>
+  <div class="scroll"><table id="warningEvents"><thead><tr>
+    <th data-en="Last seen">最近发生</th><th data-en="Object">对象</th><th data-en="Reason">原因</th><th data-en="Summary">摘要</th><th data-en="Count">次数</th>
+  </tr></thead><tbody></tbody></table></div>
 
-  <h2>Service health <span class="sub" style="font-weight:normal">— state live-updates 60s</span></h2>
+  <h2><span data-en="Components and versions">组件与版本</span> <span class="sub" style="font-weight:normal" data-en="— versions from the published snapshot; runtime state refreshes live">— 版本来自发布快照；运行状态实时更新</span></h2>
+  <div class="scroll"><table id="releases"><thead><tr>
+    <th data-en="Component">组件</th><th data-en="Chart version">Chart 版本</th><th data-en="Application / image version">应用 / 镜像版本</th><th data-en="Release status">发布状态</th><th data-en="Ready replicas">就绪副本</th><th data-en="Version source">版本来源</th>
+  </tr></thead><tbody></tbody></table></div>
+
+  <h2><span data-en="Service health and troubleshooting">服务健康与排障详情</span> <span class="sub" style="font-weight:normal" data-en="— Pod readiness refreshes live; HTTP health comes from the last publication">— Pod 就绪状态实时更新；HTTP 健康检查来自最近一次发布</span></h2>
   <div class="grid" id="health"></div>
 
-  <h2>Dependency services</h2>
+  <h2 data-en="Dependency services">依赖服务</h2>
   <div class="chips" id="deps"></div>
 
-  <footer>
-    <button onclick="load()">Refresh</button>
-    &nbsp; snapshot: <span id="genAt">—</span> &nbsp;·&nbsp; auto-refresh 30s
-  </footer>
+  <footer><span data-en="Version snapshot time:">版本快照时间：</span><span id="genAt">—</span> <span class="state-note" data-en="· Versions, dependencies, and HTTP health update on publication; Pods, workloads, and Events refresh every 30 seconds">· 版本、依赖与 HTTP 健康检查在发布时更新；Pod、工作负载和 Events 每 30 秒采集</span></footer>
+  </main>
 
   <script>
     function esc(s) {
@@ -107,6 +184,113 @@
       return e;
     }
 
+    var language = /(?:^|[?&])lang=en(?:&|$)/i.test(window.location.search || "") ? "en" : "zh";
+    function t(zh, en) { return language === "en" ? en : zh; }
+    function configureLanguage() {
+      if (document.documentElement) document.documentElement.lang = language === "en" ? "en" : "zh-CN";
+      document.title = t("OpenBKN — 服务运维", "OpenBKN — Service operations");
+      Array.prototype.forEach.call(document.querySelectorAll("[data-en]"), function (node) {
+        if (language === "en") node.textContent = node.getAttribute("data-en");
+      });
+      Array.prototype.forEach.call(document.querySelectorAll("[data-en-placeholder]"), function (node) {
+        if (language === "en") node.placeholder = node.getAttribute("data-en-placeholder");
+      });
+      Array.prototype.forEach.call(document.querySelectorAll("[data-en-title]"), function (node) {
+        if (language === "en") node.title = node.getAttribute("data-en-title");
+      });
+      Array.prototype.forEach.call(document.querySelectorAll("[data-en-aria-label]"), function (node) {
+        if (language === "en") node.setAttribute("aria-label", node.getAttribute("data-en-aria-label"));
+      });
+    }
+    configureLanguage();
+
+    var viewFilter = "all", searchText = "", onlyProblems = false;
+    var lastSnapshot = null, lastSnapshotHealth = [], lastWorkloads = null, lastPods = [], lastEvents = [];
+    var lastLogText = "", logRequestId = 0, refreshing = false, openServiceDetails = {}, openPodDiagnostics = {};
+    function setFilterable(node, category, search, problem) {
+      node.className += (node.className ? " " : "") + "filterable";
+      node.setAttribute("data-category", category);
+      node.setAttribute("data-search", String(search || "").toLocaleLowerCase());
+      node.setAttribute("data-problem", problem ? "true" : "false");
+    }
+    function isReadyWorkload(workload) {
+      var status = workload.status || {}, desired = status.desired || 0;
+      if ((status.conditions || []).length || (status.failed || 0) > 0) return false;
+      return workload.kind === "Job" ? (status.succeeded || 0) >= desired && desired > 0
+        : (status.ready || 0) >= desired && (status.available || 0) >= desired;
+    }
+    function applyFilters() {
+      var all = document.querySelectorAll(".filterable"), visible = 0;
+      Array.prototype.forEach.call(all, function (node) {
+        var category = node.getAttribute("data-category") || "";
+        var matchesCategory = viewFilter === "all" || (viewFilter === "problems" && node.getAttribute("data-problem") === "true") || category === viewFilter;
+        var matchesSearch = !searchText || (node.getAttribute("data-search") || "").indexOf(searchText) !== -1;
+        var show = matchesCategory && matchesSearch && (!onlyProblems || node.getAttribute("data-problem") === "true");
+        node.hidden = !show;
+        if (show) visible++;
+      });
+      document.getElementById("filterState").textContent = (searchText || onlyProblems || viewFilter !== "all")
+        ? t("显示 ", "Showing ") + visible + " / " + all.length + t(" 项", " items")
+        : t("共 ", "Total ") + all.length + t(" 项", " items");
+      document.querySelectorAll("#summary button[data-filter]").forEach(function (button) {
+        button.setAttribute("aria-pressed", button.getAttribute("data-filter") === viewFilter ? "true" : "false");
+      });
+    }
+    function addOverviewButton(container, label, count, filter, tone) {
+      var button = el("button", "overview-card");
+      button.type = "button";
+      button.setAttribute("data-filter", filter);
+      button.setAttribute("aria-pressed", filter === viewFilter ? "true" : "false");
+      if (filter === "problems") button.title = t("跨表累计待关注记录（包含发生过重启的 Pod）；同一故障可能对应多条证据。", "Aggregate issue records across sections; one fault can have multiple pieces of evidence.");
+      button.appendChild(el("span", "n " + tone, String(count)));
+      button.appendChild(document.createTextNode(label));
+      button.addEventListener("click", function () {
+        viewFilter = viewFilter === filter ? "all" : filter;
+        applyFilters();
+        var ids = {pods: "livepods", workloads: "workloads", events: "warningEvents", health: "health", releases: "releases"};
+        var target = ids[filter] && document.getElementById(ids[filter]);
+        if (target && target.scrollIntoView) target.scrollIntoView({behavior: "smooth", block: "start"});
+      });
+      container.appendChild(button);
+    }
+    function renderOverview() {
+      var container = document.getElementById("summary");
+      container.innerHTML = "";
+      var badPods = lastPods.filter(function (p) {
+        var cs = (p.status && p.status.containerStatuses) || [], phase = (p.status && p.status.phase) || "";
+        return phase !== "Succeeded" && (phase !== "Running" || !cs.length || cs.some(function (c) { return !c.ready; }) || cs.some(function (c) { return (c.restartCount || 0) > 0; }));
+      }).length;
+      var badWorkloads = ((lastWorkloads && lastWorkloads.items) || []).filter(function (w) { return !isReadyWorkload(w); }).length;
+      var badHealth = lastSnapshotHealth.filter(function (h) { return h.state !== "up"; }).length;
+      var badReleases = ((lastSnapshot && lastSnapshot.releases) || []).filter(function (r) { return r.status !== "deployed"; }).length;
+      var total = badPods + badWorkloads + badHealth + badReleases + lastEvents.length;
+      addOverviewButton(container, t("待关注记录（可能重复）", "Issue records (may overlap)"), total, "problems", total ? "warn" : "ok");
+      addOverviewButton(container, t("未就绪 / 曾重启 Pod", "Unready / restarted Pods"), badPods, "pods", badPods ? "warn" : "ok");
+      addOverviewButton(container, t("未就绪工作负载", "Unready workloads"), badWorkloads, "workloads", badWorkloads ? "warn" : "ok");
+      addOverviewButton(container, t("Warning Events", "Warning Events"), lastEvents.length, "events", lastEvents.length ? "warn" : "ok");
+      applyFilters();
+    }
+
+    // The administrator entry point redirects here with #token=<Studio access
+    // token>. A fragment never reaches nginx or its access logs. Remove it as
+    // soon as it has been read, then use it only as an in-memory Bearer token.
+    var bearerToken = (function () {
+      var match = /(?:^|&)\s*(?:token|access_token)=([^&]*)/.exec((window.location.hash || "").replace(/^#/, ""));
+      if (!match) return "";
+      var token;
+      try { token = decodeURIComponent(match[1]); } catch (_) { return ""; }
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      }
+      return token;
+    })();
+    function statusFetch(url, options) {
+      if (!bearerToken) return Promise.reject(new Error(t("缺少管理员访问 Token。请从管理入口重新打开页面。", "Missing administrator access token. Reopen this page from the administrator entry point.")));
+      var request = options || {}, headers = Object.assign({}, request.headers || {});
+      headers.Authorization = "Bearer " + bearerToken;
+      return fetch(url, Object.assign({}, request, {headers: headers}));
+    }
+
     function renderReleases(rows) {
       var tb = document.querySelector("#releases tbody");
       tb.innerHTML = "";
@@ -114,6 +298,7 @@
       rows.forEach(function (r) {
         var tr = el("tr");
         tr.setAttribute("data-rel", r.name);
+        setFilterable(tr, "releases", [r.name, r.chartVersion, r.appVersion, r.status].join(" "), r.status !== "deployed");
         tr.appendChild(el("td", null, r.name));
         tr.appendChild(el("td", "v", r.chartVersion));
         var av = el("td", "v", r.appVersion);
@@ -122,14 +307,14 @@
         tr.appendChild(av);
         var st = el("td");
         var stCls = r.status === "deployed" ? "b-ok" : (r.status === "skipped" ? "b-mut" : "b-bad");
-        var sb = el("span", "badge " + stCls, r.status);
+        var statusText = r.status === "deployed" ? t("已部署", "Deployed") : r.status === "skipped" ? t("未启用", "Disabled") : r.status === "missing" ? t("缺失", "Missing") : (r.status || t("未知", "Unknown"));
+        var sb = el("span", "badge " + stCls, statusText);
         st.appendChild(sb); tr.appendChild(st);
         tr.appendChild(el("td", "readyCell", r.ready));
         var flagTd = el("td");
-        if (r.status === "skipped") { flagTd.appendChild(el("span", "badge b-mut", "SKIPPED")); }
-        else if (r.status === "missing") { flagTd.appendChild(el("span", "badge b-bad", "MISSING")); missing++; }
-        else if (r.chartVersion !== "-" && r.appVersion !== "-" &&
-                 r.chartVersion !== r.appVersion) { /* informational only */ ok++; }
+        if (r.status === "skipped") { flagTd.appendChild(el("span", "badge b-mut", t("未启用", "Disabled"))); }
+        else if (r.status === "missing") { flagTd.appendChild(el("span", "badge b-bad", t("缺失", "Missing"))); missing++; }
+        else if (r.versionSource === "live") { flagTd.appendChild(el("span", "badge b-ok", t("集群实时", "Live cluster"))); }
         tr.appendChild(flagTd);
         tb.appendChild(tr);
         if (r.status === "deployed") ok++;
@@ -145,24 +330,87 @@
       (items || []).forEach(function (h) {
         var card = el("div", "hcard");
         card.setAttribute("data-svc", h.name);
-        var left = el("div");
+        var left = el("div", "service-main");
         left.appendChild(el("div", null, h.name));
         // detail: http -> health path; pod -> k8s readiness; else dash
-        var detail = h.source === "http" ? (h.path || "")
-          : h.source === "pod" ? ("pod " + (h.ready || ""))
+        var detail = h.source === "http" ? (t("发布时 HTTP ", "Published HTTP ") + (h.path || ""))
+          : h.source === "pod" ? ("Pod " + (h.ready || ""))
           : "—";
-        if (h.restarts) detail += " · restarts " + h.restarts;
+        if (h.restarts) detail += t(" · 重启 ", " · restarts ") + h.restarts;
         var d = el("div", "p", detail);
         if (h.source) {
           var tag = el("span", "src", h.source);
           left.appendChild(tag);
         }
         left.appendChild(d);
-        var cls = h.state === "up" ? "b-ok" : (h.state === "degraded" ? "b-warn" : "b-mut");
+        var cls = h.state === "up" ? "b-ok" : (h.state === "degraded" ? "b-warn" : "b-bad");
+        var stateLabel = h.state === "up" ? t("正常", "Healthy") : h.state === "degraded" ? t("降级", "Degraded") : h.state === "down" ? t("异常", "Down") : (h.state || t("未知", "Unknown"));
+        setFilterable(card, "health", [h.name, detail, stateLabel].join(" "), h.state !== "up");
         card.appendChild(left);
-        card.appendChild(el("span", "badge stateBadge " + cls, h.state));
+        card.appendChild(el("span", "badge stateBadge " + cls, stateLabel));
+        appendServiceDetails(card, h);
         g.appendChild(card);
       });
+    }
+
+    function appendServiceDetails(card, health) {
+      var serviceName = String(health.name || "");
+      var keys = [serviceName, serviceName.replace(/-svc$/, "")];
+      var workloads = ((lastWorkloads && lastWorkloads.items) || []).filter(function (w) {
+        var md = w.metadata || {}, labels = md.labels || {}, annotations = md.annotations || {};
+        return keys.indexOf(md.name) !== -1 || keys.indexOf(labels["app.kubernetes.io/instance"]) !== -1 || keys.indexOf(annotations["meta.helm.sh/release-name"]) !== -1;
+      });
+      var workloadNames = workloads.map(function (w) { return (w.metadata || {}).name || ""; }).filter(Boolean);
+      var pods = lastPods.filter(function (pod) {
+        var name = (pod.metadata || {}).name || "";
+        return workloadNames.some(function (workloadName) { return name === workloadName || name.indexOf(workloadName + "-") === 0; });
+      });
+      var podNames = pods.map(function (pod) { return (pod.metadata || {}).name || ""; });
+      var events = lastEvents.filter(function (event) {
+        var name = event.objectName || "";
+        return workloadNames.some(function (workloadName) { return name === workloadName || name.indexOf(workloadName + "-") === 0; }) || podNames.indexOf(name) !== -1;
+      });
+      var details = el("details", "service-details");
+      details.open = !!openServiceDetails[serviceName];
+      details.addEventListener("toggle", function () { openServiceDetails[serviceName] = details.open; });
+      details.appendChild(el("summary", null, t("查看关联工作负载、Pod、事件与健康检查", "View related workloads, Pods, Events, and health checks")));
+      var list = el("ul", "detail-list");
+      list.appendChild(el("li", null, t("关联依据为组件 / Release 名称及 Pod 名称前缀；仅作排障导航。", "Resources are associated by component or release name and Pod-name prefix.")));
+      if (health.source === "http" || health.source === "pod") {
+        var healthState = health.state === "up" ? t("正常", "Healthy") : health.state === "degraded" ? t("降级", "Degraded") : health.state === "down" ? t("异常", "Down") : (health.state || t("未知", "Unknown"));
+        list.appendChild(el("li", null, t("健康检查：", "Health check: ") + (health.source === "http" ? t("发布时 HTTP ", "Published HTTP ") + (health.path || t("探测", "probe")) : t("Pod 就绪状态（实时）", "live Pod readiness")) + t("；当前 ", "; current ") + healthState + (health.restarts ? t("，累计重启 ", ", restarts ") + health.restarts : "")));
+      } else {
+        list.appendChild(el("li", null, t("健康检查：暂无可用的检查摘要", "Health check: no summary is available")));
+      }
+      if (!workloads.length) list.appendChild(el("li", null, t("未能按组件名 / Helm Release 名匹配到工作负载；可在下方工作负载列表搜索确认。", "No workload matched this component or Helm release name; use the workload table to search.")));
+      workloads.forEach(function (workload) {
+        var status = workload.status || {}, spec = workload.spec || {};
+        var line = workload.kind + "/" + ((workload.metadata || {}).name || "") + t(" · 就绪 ", " · ready ") + (status.ready || 0) + "/" + (status.desired || spec.desired || 0) + t(" · 可用 ", " · available ") + (status.available || 0);
+        (status.conditions || []).forEach(function (condition) { line += " · " + condition.type + ": " + condition.reason; });
+        list.appendChild(el("li", null, line));
+      });
+      if (!pods.length) list.appendChild(el("li", null, t("没有匹配到关联 Pod。", "No related Pods matched.")));
+      pods.forEach(function (pod) {
+        var podName = (pod.metadata || {}).name || "";
+        var statuses = (pod.status && pod.status.containerStatuses) || [];
+        var restarts = statuses.reduce(function (sum, status) { return sum + (status.restartCount || 0); }, 0);
+        var notReady = statuses.filter(function (status) { return !status.ready; });
+        var line = "Pod/" + podName + " · " + ((pod.status && pod.status.phase) || t("未知", "Unknown")) + t(" · 重启 ", " · restarts ") + restarts;
+        if (notReady.length) line += t(" · 未就绪容器 ", " · unready containers ") + notReady.map(function (status) { return status.name + (status.reason ? " (" + status.reason + ")" : ""); }).join(", ");
+        var item = el("li", null, line);
+        statuses.forEach(function (status) {
+          var log = el("button", null, status.name + t(" · 查看日志", " · View logs"));
+          log.type = "button";
+          log.title = t("打开最近日志；如容器重启过，可在弹窗中查看上一次实例日志", "Open recent logs; previous-instance logs are available after a restart");
+          log.addEventListener("click", function () { openLogViewer(podName, status.name, status.restartCount > 0, false); });
+          item.appendChild(log);
+        });
+        list.appendChild(item);
+      });
+      if (!events.length) list.appendChild(el("li", null, t("没有匹配到近期 Warning Event。", "No recent Warning Events matched.")));
+      events.forEach(function (event) { list.appendChild(el("li", null, "Warning · " + event.reason + " · " + event.summary + " · " + event.objectKind + "/" + event.objectName + " · " + event.count + t(" 次", " times"))); });
+      details.appendChild(list);
+      card.appendChild(details);
     }
 
     function renderDeps(items) {
@@ -181,68 +429,54 @@
       });
     }
 
-    function summary(rel, health) {
-      var s = document.getElementById("summary");
-      s.innerHTML = "";
-      function box(n, label, cls) {
-        var b = el("div");
-        b.appendChild(el("span", "n " + cls, String(n)));
-        b.appendChild(document.createTextNode(" " + label));
-        return b;
-      }
-      var up = (health || []).filter(function (h) { return h.state === "up"; }).length;
-      var deg = (health || []).filter(function (h) { return h.state === "degraded"; }).length;
-      s.appendChild(box(rel.deployed, "deployed", "ok"));
-      if (rel.missing) s.appendChild(box(rel.missing, "missing", "bad"));
-      if (rel.skipped) s.appendChild(box(rel.skipped, "skipped", "mut"));
-      s.appendChild(box(up, "services up", "ok"));
-      if (deg) s.appendChild(box(deg, "degraded", "warn"));
-    }
-
     function load() {
       document.getElementById("err").textContent = "";
-      fetch("install-status.json", { cache: "no-store" })
+      return statusFetch("install-status.json", { cache: "no-store" })
         .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
         .then(function (d) {
-          var authTxt = d.auth ? "  ·  auth on (bkn-safe)" : "";
+          if (!d) return false;
+          lastSnapshot = d;
+          lastSnapshotHealth = (d.serviceHealth || []).slice();
           document.getElementById("meta").textContent =
-            "product " + d.product + " " + d.version + "  ·  ns " + d.namespace +
-            "  ·  " + ((d.accessAddress && d.accessAddress.scheme) || "") + "://" +
+            t("版本 ", "Version ") + d.version + t(" · 命名空间 ", " · Namespace ") + d.namespace +
+            t(" · 访问地址 ", " · Access address ") + ((d.accessAddress && d.accessAddress.scheme) || "") + "://" +
             ((d.accessAddress && d.accessAddress.host) || "") +
-            (d.ingressClass ? "  ·  ingressClass " + d.ingressClass : "") + authTxt;
+            (d.ingressClass ? " · Ingress " + d.ingressClass : "");
           // generatedAt is UTC ISO ("...Z") — render in the viewer's timezone.
           var genTs = Date.parse(d.generatedAt || "");
           var genTxt = genTs ? new Date(genTs).toLocaleString() : (d.generatedAt || "—");
           // liveMergedAt marks the in-cluster auto-refreshed variant (merge.py)
-          if (d.liveMergedAt) genTxt += " · auto (in-cluster)";
+          if (d.liveMergedAt) genTxt += t(" · 集群实时合并", " · live cluster merge");
           document.getElementById("genAt").textContent = genTxt;
-          var rel = renderReleases(d.releases || []);
-          renderHealth(d.serviceHealth);
+          renderReleases(d.releases || []);
+          renderHealth(lastSnapshotHealth);
           renderDeps(d.depServices);
-          summary(rel, d.serviceHealth);
           overlayLive(lastWorkloads); // re-apply live readiness after re-render
           var gen = Date.parse(d.generatedAt || "");
           var hint = document.getElementById("staleHint");
           if (gen && Date.now() - gen > 24 * 3600 * 1000) {
             var days = Math.floor((Date.now() - gen) / 86400000);
-            hint.textContent = "snapshot is " + days + "+ day(s) old — versions/deps update only on publish; " +
-              "run ./deploy.sh foundry publish-status on the install host to refresh. Ready & health are live.";
+            hint.textContent = t("版本快照已超过 ", "The version snapshot is over ") + days + t(" 天：版本与依赖信息只在发布状态快照时更新；副本、健康和 Pod 状态仍为集群实时数据。", " days old. Versions and dependencies update on publication; replica and Pod state remain live.");
           } else {
             hint.textContent = "";
           }
+          renderOverview();
+          return true;
         })
         .catch(function (e) {
-          document.getElementById("err").textContent = "Failed to load install-status.json: " + e.message;
+          document.getElementById("err").textContent = t("概览加载失败：", "Overview load failed: ") + e.message;
+          return false;
         });
     }
-    // Live overlay — the in-cluster refresher also dumps deploy/sts as
+    // Live overlay — the in-cluster refresher also dumps workload summaries as
     // workloads.json; overlay per-release readiness onto the Releases table and
     // service-health cards so the whole page tracks reality, not the snapshot.
-    var lastWorkloads = null;
     function overlayLive(w) {
       if (!w) return;
       var byKey = {}; // helm release name AND workload name -> {ready,total}
-      (w.items || []).forEach(function (it) {
+      (w.items || []).filter(function (it) {
+        return it.kind === "Deployment" || it.kind === "StatefulSet" || it.kind === "DaemonSet";
+      }).forEach(function (it) {
         var md = it.metadata || {};
         var rel = (md.annotations || {})["meta.helm.sh/release-name"] ||
                   (md.labels || {})["app.kubernetes.io/instance"] || md.name;
@@ -263,6 +497,8 @@
         if (!cell) return;
         cell.textContent = agg.ready + "/" + agg.total;
         cell.className = "readyCell " + (agg.ready >= agg.total ? "ok" : "bad");
+        tr.setAttribute("data-problem", tr.getAttribute("data-problem") === "true" || agg.ready < agg.total ? "true" : "false");
+        tr.setAttribute("data-search", ((tr.getAttribute("data-search") || "") + " " + agg.ready + "/" + agg.total).toLocaleLowerCase());
       });
       document.querySelectorAll("#health .hcard").forEach(function (card) {
         var key = card.getAttribute("data-svc") || "";
@@ -273,56 +509,350 @@
         var b = card.querySelector(".stateBadge");
         if (!b) return;
         var state = agg.ready >= agg.total ? "up" : (agg.ready > 0 ? "degraded" : "down");
-        b.textContent = state;
+        b.textContent = state === "up" ? "正常" : state === "degraded" ? "降级" : "异常";
         b.className = "badge stateBadge " +
           (state === "up" ? "b-ok" : state === "degraded" ? "b-warn" : "b-bad");
         var tag = card.querySelector(".src");
         if (tag) tag.textContent = "live";
+        card.setAttribute("data-problem", state === "up" ? "false" : "true");
+      });
+      lastSnapshotHealth = lastSnapshotHealth.map(function (health) {
+        var key = health.name || "";
+        var agg = byKey[key] || byKey[key.replace(/-svc$/, "")];
+        if (!agg || !agg.total) return health;
+        var state = agg.ready >= agg.total ? "up" : (agg.ready > 0 ? "degraded" : "down");
+        return Object.assign({}, health, {state: state});
+      });
+      renderHealth(lastSnapshotHealth);
+      renderOverview();
+    }
+
+    var selectedLogTarget = null;
+    function openLogViewer(pod, container, hasPrevious, previous) {
+      selectedLogTarget = {pod: pod, container: container, hasPrevious: hasPrevious};
+      document.getElementById("logTitle").textContent = pod + " · " + container + " · " + t("容器日志", "Container logs");
+      document.getElementById("previousLog").hidden = !hasPrevious;
+      var logViewer = document.getElementById("logViewer");
+      if (!logViewer.open) logViewer.showModal();
+      document.getElementById("logError").textContent = "";
+      document.getElementById("logOutput").textContent = "";
+      lastLogText = "";
+      document.getElementById("logSearch").value = "";
+      document.getElementById("logMatches").textContent = "";
+      if (bearerToken) loadLogs(!!previous);
+    }
+
+    function dismissLogViewer() {
+      var logViewer = document.getElementById("logViewer");
+      if (logViewer.open) logViewer.close();
+      logRequestId++;
+      selectedLogTarget = null;
+      lastLogText = "";
+      document.getElementById("logOutput").textContent = "";
+      document.getElementById("logError").textContent = "";
+      document.getElementById("logMatches").textContent = "";
+      document.getElementById("logSearch").value = "";
+    }
+
+    function renderLogOutput() {
+      var output = document.getElementById("logOutput"), term = document.getElementById("logSearch").value.trim();
+      output.innerHTML = "";
+      var lines = lastLogText ? lastLogText.replace(/\n$/, "").split(/\r?\n/) : [];
+      var matches = term ? lines.filter(function (line) { return line.toLocaleLowerCase().indexOf(term.toLocaleLowerCase()) !== -1; }) : lines;
+      document.getElementById("logMatches").textContent = term ? (t("匹配 ", "Matches ") + matches.length + " / " + lines.length + t(" 行", " lines")) : (lines.length + t(" 行 · 最多返回 100 行", " lines · at most 100 returned"));
+      if (!matches.length) {
+        output.textContent = term ? t("没有匹配的日志行。", "No matching log lines.") : t("暂无日志输出。", "No log output.");
+        return;
+      }
+      matches.forEach(function (line, index) {
+        if (term) {
+          var lowerLine = line.toLocaleLowerCase(), lowerTerm = term.toLocaleLowerCase(), from = 0, at;
+          while ((at = lowerLine.indexOf(lowerTerm, from)) !== -1) {
+            output.appendChild(document.createTextNode(line.slice(from, at)));
+            var mark = el("mark", null, line.slice(at, at + term.length));
+            output.appendChild(mark);
+            from = at + term.length;
+          }
+          output.appendChild(document.createTextNode(line.slice(from)));
+        } else {
+          output.appendChild(document.createTextNode(line));
+        }
+        if (index < matches.length - 1) output.appendChild(document.createTextNode("\n"));
+      });
+      if (document.getElementById("followLog").checked) output.scrollTop = output.scrollHeight;
+    }
+
+    function loadLogs(previous) {
+      if (!selectedLogTarget || !bearerToken) return;
+      var requestId = ++logRequestId;
+      var target = selectedLogTarget;
+      var query = "pod=" + encodeURIComponent(target.pod) + "&container=" +
+        encodeURIComponent(target.container) + "&previous=" + previous + "&tail=100";
+      var output = document.getElementById("logOutput");
+      var error = document.getElementById("logError");
+      output.textContent = t("正在加载日志…", "Loading logs…");
+      error.textContent = "";
+      document.getElementById("logMatches").textContent = previous
+        ? t("读取容器上一次重启前的实例日志（previous）", "Loading the container instance before its last restart (previous)")
+        : t("读取当前容器实例的最近日志（recent）", "Loading recent logs from the current container instance");
+      statusFetch("/install-status/logs?" + query, {cache: "no-store"}).then(function (r) {
+        if (requestId !== logRequestId) return null;
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.text();
+      }).then(function (text) {
+        if (requestId !== logRequestId || text == null) return;
+        lastLogText = text || "";
+        renderLogOutput();
+      }).catch(function (e) {
+        if (requestId !== logRequestId) return;
+        output.textContent = "";
+        error.textContent = t("日志读取失败：", "Log read failed: ") + e.message;
       });
     }
 
-    // Live pod health — polls the in-cluster refresher's pods.json (raw
-    // `kubectl get pods -o json`). Independent of the publish-time snapshot above.
-    function loadLive() {
-      fetch("install-status.workloads.json", { cache: "no-store" })
-        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-        .then(function (d) { lastWorkloads = d; overlayLive(d); })
-        .catch(function () { /* older refresher without workloads.json — snapshot values stay */ });
-      fetch("install-status.pods.json", { cache: "no-store" })
-        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-        .then(function (d) {
-          var tb = document.querySelector("#livepods tbody");
-          tb.innerHTML = "";
-          (d.items || []).forEach(function (p) {
-            var cs = (p.status && p.status.containerStatuses) || [];
-            var ready = cs.filter(function (c) { return c.ready; }).length;
-            var total = cs.length;
-            var restarts = cs.reduce(function (a, c) { return a + (c.restartCount || 0); }, 0);
-            var ok = total > 0 && ready === total;
-            var phase = (p.status && p.status.phase) || "";
-            // Completed Job pods (Succeeded) have 0 ready containers by design —
-            // neutral, not red.
-            var readyCls = phase === "Succeeded" ? "" : (ok ? "ok" : "bad");
-            var tr = document.createElement("tr");
-            tr.innerHTML =
-              "<td>" + esc(p.metadata && p.metadata.name) + "</td>" +
-              '<td class="' + readyCls + '">' + (phase === "Succeeded" ? "done" : ready + "/" + total) + "</td>" +
-              "<td>" + esc(phase) + "</td>" +
-              "<td>" + restarts + "</td>";
-            tb.appendChild(tr);
-          });
-          document.getElementById("liveErr").textContent = "";
-          document.getElementById("liveAt").textContent = "@ " + new Date().toLocaleTimeString();
-        })
-        .catch(function (e) {
-          document.getElementById("liveErr").textContent = "live pods unavailable: " + e.message;
+    document.getElementById("refreshAll").addEventListener("click", refreshAll);
+    document.getElementById("globalSearch").addEventListener("input", function (event) {
+      searchText = event.target.value.trim().toLocaleLowerCase();
+      applyFilters();
+    });
+    document.getElementById("problemsOnly").addEventListener("change", function (event) {
+      onlyProblems = event.target.checked;
+      applyFilters();
+    });
+    document.getElementById("logSearch").addEventListener("input", renderLogOutput);
+    document.getElementById("recentLog").addEventListener("click", function () { loadLogs(false); });
+    document.getElementById("previousLog").addEventListener("click", function () { loadLogs(true); });
+    document.getElementById("closeLogViewer").addEventListener("click", function () {
+      dismissLogViewer();
+    });
+    document.getElementById("logViewer").addEventListener("click", function (event) {
+      if (event.target === event.currentTarget) dismissLogViewer();
+    });
+    document.getElementById("logViewer").addEventListener("close", function () {
+      if (selectedLogTarget) dismissLogViewer();
+    });
+    document.getElementById("logViewer").addEventListener("cancel", function (event) {
+      event.preventDefault();
+      dismissLogViewer();
+    });
+
+    // Live status stays in the same authorized refresh cycle as the release snapshot.
+    var collectionTimes = {Pods: 0, Workloads: 0, Events: 0};
+    var collectionErrors = {};
+    function statusLabel(value) {
+      var zh = {Running: "运行中", Pending: "等待中", Failed: "失败", Succeeded: "已完成", Unknown: "未知",
+        waiting: "等待中", terminated: "已终止", running: "运行中", unknown: "未知",
+        CrashLoopBackOff: "反复崩溃", ImagePullBackOff: "镜像拉取失败", ErrImagePull: "镜像拉取失败",
+        OOMKilled: "内存超限终止", ContainerCreating: "容器创建中", CreateContainerConfigError: "容器配置错误",
+        RunContainerError: "容器启动失败", Error: "错误", Completed: "已完成"};
+      var en = {Running: "Running", Pending: "Pending", Failed: "Failed", Succeeded: "Succeeded", Unknown: "Unknown",
+        waiting: "Waiting", terminated: "Terminated", running: "Running", unknown: "Unknown",
+        CrashLoopBackOff: "Crash looping", ImagePullBackOff: "Image pull backoff", ErrImagePull: "Image pull failed",
+        OOMKilled: "Killed for memory limit", ContainerCreating: "Creating container", CreateContainerConfigError: "Container configuration error",
+        RunContainerError: "Container start error", Error: "Error", Completed: "Completed"};
+      var label = (language === "en" ? en : zh)[value];
+      return label ? label + " (" + value + ")" : (value || t("未知", "Unknown"));
+    }
+    function updateFreshness() {
+      var stale = false, now = Date.now();
+      var labels = Object.keys(collectionTimes).map(function (key) {
+        var ts = collectionTimes[key], error = collectionErrors[key];
+        if (error) { stale = true; return key + t("：采集失败", ": collection failed"); }
+        if (!ts || now - ts > 90000) stale = true;
+        var age = ts ? Math.max(0, Math.floor((now - ts) / 1000)) : null;
+        return key + t("：", ": ") + (age == null ? t("暂无数据", "no data") : age < 60 ? age + t(" 秒前", " seconds ago") : Math.floor(age / 60) + t(" 分钟前", " minutes ago"));
+      });
+      var element = document.getElementById("collectionFreshness");
+      element.textContent = t("最近成功采集 · ", "Last successful collection · ") + labels.join(" · ") + (stale ? t(" · 数据可能已过期，请检查刷新状态", " · data may be stale; check refresh status") : "");
+      element.className = stale ? "sub stale" : "sub";
+      var errors = Object.keys(collectionErrors).map(function (key) { return key + "：" + collectionErrors[key]; });
+      document.getElementById("liveErr").textContent = errors.join(" · ");
+    }
+    function updateCollectionTime(source, refreshedAt) {
+      collectionTimes[source] = Date.parse(refreshedAt || "") || 0;
+      delete collectionErrors[source];
+      updateFreshness();
+    }
+    function collectionFailed(source, error) {
+      collectionErrors[source] = error.message || "请求失败";
+      updateFreshness();
+    }
+    function displayTime(value) {
+      var time = Date.parse(value || "");
+      return time ? new Date(time).toLocaleString() : t("未提供", "Not available");
+    }
+    function containerDiagnosticText(container, prefix) {
+      var text = prefix + container.name + t("：", ": ") + statusLabel(container.reason || container.state || "unknown") + t(" · 重启 ", " · restarts ") + (container.restartCount || 0);
+      if (container.exitCode != null) text += t(" · 退出码 ", " · exit code ") + container.exitCode;
+      if (container.startedAt) text += t(" · 启动 ", " · started ") + displayTime(container.startedAt);
+      if (container.lastTermination) text += t(" · 上次终止 ", " · previous termination ") + statusLabel(container.lastTermination.reason) + t("（退出码 ", " (exit code ") + container.lastTermination.exitCode + "）";
+      return text;
+    }
+    function appendPodDiagnostics(parent, pod) {
+      var status = pod.status || {}, metadata = pod.metadata || {};
+      var podName = metadata.name || "";
+      var details = el("details", "pod-diagnostics");
+      details.open = !!openPodDiagnostics[podName];
+      details.addEventListener("toggle", function () { openPodDiagnostics[podName] = details.open; });
+      details.appendChild(el("summary", null, t("Describe 摘要（脱敏）", "Describe summary (sanitized)")));
+      var list = el("ul", "detail-list");
+      list.appendChild(el("li", null, t("生命周期：创建 ", "Lifecycle: created ") + displayTime(metadata.createdAt) + t(" · 启动 ", " · started ") + displayTime(status.startTime)));
+      var conditions = status.conditions || [];
+      list.appendChild(el("li", null, conditions.length
+        ? t("Pod Conditions：", "Pod Conditions: ") + conditions.map(function (condition) {
+          return condition.type + "=" + condition.status + (condition.reason && condition.reason !== "Other" ? " (" + condition.reason + ")" : "");
+        }).join(" · ")
+        : t("Pod Conditions：未提供", "Pod Conditions: not available")));
+      var init = status.initContainerStatuses || [];
+      if (init.length) init.forEach(function (container) {
+        var initItem = el("li", null, containerDiagnosticText(container, "Init Container/"));
+        var initLog = el("button", null, container.name + t(" · 查看日志", " · View logs"));
+        initLog.type = "button";
+        initLog.title = t("打开 Init Container 最近日志；如曾重启，可在弹窗中查看上一次实例日志", "Open recent Init Container logs; previous-instance logs are available after a restart");
+        initLog.addEventListener("click", function () { openLogViewer(podName, container.name, container.restartCount > 0, false); });
+        initItem.appendChild(initLog);
+        list.appendChild(initItem);
+      });
+      else list.appendChild(el("li", null, t("Init Container：无", "Init Containers: none")));
+      var containers = status.containerStatuses || [];
+      if (containers.length) containers.forEach(function (container) {
+        list.appendChild(el("li", null, containerDiagnosticText(container, "Container/")));
+      });
+      var events = lastEvents.filter(function (event) { return event.objectKind === "Pod" && event.objectName === podName; });
+      if (events.length) events.forEach(function (event) {
+        list.appendChild(el("li", null, t("Warning Event：", "Warning Event: ") + event.reason + " · " + event.summary + " · " + event.count + t(" 次", " times")));
+      });
+      else list.appendChild(el("li", null, t("Warning Event：无近期记录", "Warning Events: no recent records")));
+      details.appendChild(list);
+      parent.appendChild(details);
+    }
+    function renderPods(items) {
+      var tb = document.querySelector("#livepods tbody");
+      tb.innerHTML = "";
+      (items || []).forEach(function (pod) {
+        var cs = (pod.status && pod.status.containerStatuses) || [];
+        var ready = cs.filter(function (container) { return container.ready; }).length;
+        var total = cs.length;
+        var restarts = cs.reduce(function (sum, container) { return sum + (container.restartCount || 0); }, 0);
+        var phase = (pod.status && pod.status.phase) || "Unknown";
+        var name = (pod.metadata && pod.metadata.name) || "";
+        var problem = phase !== "Succeeded" && (phase !== "Running" || !total || ready !== total || restarts > 0);
+        var tr = document.createElement("tr");
+        setFilterable(tr, "pods", [name, phase, cs.map(function (container) { return [container.name, container.reason, container.state].join(" "); }).join(" ")].join(" "), problem);
+        tr.appendChild(el("td", null, name));
+        tr.appendChild(el("td", "status-cell " + (phase === "Succeeded" || ready === total && total ? "ok" : "bad"), phase === "Succeeded" ? t("已完成", "Completed") : ready + "/" + total));
+        tr.appendChild(el("td", null, statusLabel(phase)));
+        tr.appendChild(el("td", restarts ? "status-cell warn" : "", String(restarts)));
+        var reasons = el("td", "reason"), links = el("td", "loglinks");
+        cs.forEach(function (container) {
+          var summary = container.name + t("：", ": ") + statusLabel(container.reason || container.state || "unknown");
+          if (container.exitCode != null) summary += t("（退出码 ", " (exit code ") + container.exitCode + ")";
+          if (container.lastTermination) summary += t("；上次终止 ", "; previous termination ") + statusLabel(container.lastTermination.reason) + t("（退出码 ", " (exit code ") + container.lastTermination.exitCode + ")";
+          reasons.appendChild(el("div", null, summary));
+          var button = el("button", null, container.name + t(" · 查看日志", " · View logs"));
+          button.type = "button";
+          button.title = t("打开最近日志；如容器重启过，可在弹窗中查看上一次实例日志", "Open recent logs; previous-instance logs are available after a restart");
+          button.addEventListener("click", function () { openLogViewer(name, container.name, container.restartCount > 0, false); });
+          links.appendChild(button);
         });
+        appendPodDiagnostics(reasons, pod);
+        tr.appendChild(reasons);
+        tr.appendChild(links);
+        tb.appendChild(tr);
+      });
+      if (!items || !items.length) {
+        var empty = document.createElement("tr");
+        empty.appendChild(el("td", "empty", t("当前命名空间未采集到 Pod。", "No Pods were collected in this namespace.")));
+        tb.appendChild(empty);
+      }
+      renderHealth(lastSnapshotHealth);
+      renderOverview();
+    }
+    function renderWorkloads(data) {
+      var tb = document.querySelector("#workloads tbody");
+      tb.innerHTML = "";
+      (data.items || []).forEach(function (workload) {
+        var status = workload.status || {}, spec = workload.spec || {};
+        var desired = status.desired != null ? status.desired : (spec.desired || 0);
+        var name = (workload.metadata && workload.metadata.name) || "";
+        var ready = isReadyWorkload(workload);
+        var readiness = workload.kind === "Job"
+          ? (status.succeeded || 0) + "/" + desired + t(" 完成 · ", " completed · ") + (status.active || 0) + t(" 运行 · ", " active · ") + (status.failed || 0) + t(" 失败", " failed")
+          : (status.ready || 0) + "/" + desired + (ready ? t(" · 正常", " · healthy") : t(" · 未就绪", " · unready"));
+        var evidence = [];
+        (status.conditions || []).forEach(function (condition) { evidence.push(condition.type + ": " + condition.reason); });
+        (spec.containers || []).forEach(function (container) {
+          var probes = container.probes || {};
+          ["readiness", "liveness", "startup"].forEach(function (kind) { if (probes[kind]) evidence.push(container.name + " " + kind + t(" 探针已配置", " probe configured")); });
+        });
+        var row = document.createElement("tr");
+        setFilterable(row, "workloads", [workload.kind, name, evidence.join(" "), readiness].join(" "), !ready);
+        [workload.kind, name, (status.actual || 0) + "/" + desired,
+          readiness, (status.available || 0) + "/" + desired, (status.updated || 0) + "/" + desired,
+          evidence.length ? evidence.join(" · ") : t("未报告失败条件；未配置健康检查", "No failed conditions reported; no probes configured")].forEach(function (value) {
+            row.appendChild(el("td", null, value == null ? "—" : value));
+          });
+        tb.appendChild(row);
+      });
+      if (!(data.items || []).length) {
+        var empty = document.createElement("tr");
+        empty.appendChild(el("td", "empty", t("当前命名空间未采集到工作负载。", "No workloads were collected in this namespace.")));
+        tb.appendChild(empty);
+      }
+    }
+    function renderWarningEvents(data) {
+      lastEvents = data.items || [];
+      var tb = document.querySelector("#warningEvents tbody");
+      tb.innerHTML = "";
+      lastEvents.forEach(function (event) {
+        var row = document.createElement("tr");
+        setFilterable(row, "events", [event.lastSeen, event.objectKind, event.objectName, event.reason, event.summary].join(" "), true);
+        var when = Date.parse(event.lastSeen || "");
+        [(when ? new Date(when).toLocaleString() : event.lastSeen), (event.objectKind || "Resource") + "/" + (event.objectName || "unknown"),
+          event.reason, event.summary, event.count].forEach(function (value) { row.appendChild(el("td", null, value)); });
+        tb.appendChild(row);
+      });
+      if (!lastEvents.length) {
+        var empty = document.createElement("tr");
+        empty.appendChild(el("td", "empty", t("没有近期、已脱敏的 Warning Event。", "No recent sanitized Warning Events.")));
+        tb.appendChild(empty);
+      }
+      renderPods(lastPods);
+    }
+    function loadLive() {
+      var tasks = [
+        statusFetch("install-status.workloads.json", {cache: "no-store"})
+          .then(function (response) { if (!response.ok) throw new Error("HTTP " + response.status); return response.json(); })
+          .then(function (data) { if (!data) return; lastWorkloads = data; renderWorkloads(data); overlayLive(data); updateCollectionTime("Workloads", data.refreshedAt); })
+          .catch(function (error) { collectionFailed("Workloads", error); }),
+        statusFetch("install-status.pods.json", {cache: "no-store"})
+          .then(function (response) { if (!response.ok) throw new Error("HTTP " + response.status); return response.json(); })
+          .then(function (data) { if (!data) return; lastPods = data.items || []; renderPods(lastPods); updateCollectionTime("Pods", data.refreshedAt); })
+          .catch(function (error) { collectionFailed("Pods", error); }),
+        statusFetch("install-status.events.json", {cache: "no-store"})
+          .then(function (response) { if (!response.ok) throw new Error("HTTP " + response.status); return response.json(); })
+          .then(function (data) { if (!data) return; renderWarningEvents(data); updateCollectionTime("Events", data.refreshedAt); })
+          .catch(function (error) { collectionFailed("Events", error); })
+      ];
+      return Promise.all(tasks);
+    }
+    function refreshAll() {
+      if (refreshing) return Promise.resolve(false);
+      refreshing = true;
+      document.getElementById("refreshAll").disabled = true;
+      document.getElementById("refreshStatus").textContent = t("正在刷新概览与实时采集…", "Refreshing overview and live data…");
+      return Promise.all([load(), loadLive()]).then(function () {
+        return true;
+      }).finally(function () {
+        refreshing = false;
+        document.getElementById("refreshAll").disabled = false;
+        document.getElementById("refreshStatus").textContent = t("最近刷新：", "Last refreshed: ") + new Date().toLocaleTimeString() + t(" · 自动刷新间隔 30 秒", " · auto refreshes every 30 seconds");
+      });
     }
 
-    load();
-    setInterval(load, 30000);
-    loadLive();
-    setInterval(loadLive, 60000);
+    refreshAll();
+    setInterval(refreshAll, 30000);
+    setInterval(updateFreshness, 5000);
   </script>
 </body>
 </html>

@@ -17,10 +17,12 @@ resolve_images() {
     local mode="$1"
     local kubectl_override="${2:-}"
     local nginx_override="${3:-}"
+    local python_override="${4:-}"
     env \
         "TEST_MODE=${mode}" \
         "TEST_KUBECTL_OVERRIDE=${kubectl_override}" \
         "TEST_NGINX_OVERRIDE=${nginx_override}" \
+        "TEST_PYTHON_OVERRIDE=${python_override}" \
         bash -c '
             SCRIPT_DIR="$1"
             OFFLINE_MODE=false
@@ -31,11 +33,14 @@ resolve_images() {
             if [[ -n "${TEST_NGINX_OVERRIDE}" ]]; then
                 INSTALL_STATUS_NGINX_IMAGE="${TEST_NGINX_OVERRIDE}"
             fi
+            if [[ -n "${TEST_PYTHON_OVERRIDE}" ]]; then
+                INSTALL_STATUS_PYTHON_IMAGE="${TEST_PYTHON_OVERRIDE}"
+            fi
             source "${SCRIPT_DIR}/scripts/services/status.sh"
             # Simulate deploy.sh parsing --offline after status.sh is sourced.
             OFFLINE_MODE="${TEST_MODE}"
             _status_resolve_images
-            printf "%s\n%s\n" "${INSTALL_STATUS_KUBECTL_IMAGE}" "${INSTALL_STATUS_NGINX_IMAGE}"
+            printf "%s\n%s\n%s\n" "${INSTALL_STATUS_KUBECTL_IMAGE}" "${INSTALL_STATUS_NGINX_IMAGE}" "${INSTALL_STATUS_PYTHON_IMAGE}"
         ' bash "${SCRIPT_DIR}"
 }
 
@@ -44,16 +49,21 @@ assert_eq "offline-kubectl" "$(sed -n '1p' <<<"${offline_images}")" \
     "registry.test:5000/openbkn-ai/portainer/kubectl-shell:latest"
 assert_eq "offline-nginx" "$(sed -n '2p' <<<"${offline_images}")" \
     "registry.test:5000/openbkn-ai/library/nginx:1.27-alpine"
+assert_eq "offline-python" "$(sed -n '3p' <<<"${offline_images}")" \
+    "registry.test:5000/openbkn-ai/library/python:3.12-alpine"
 
 online_images="$(resolve_images false)"
 assert_eq "online-kubectl" "$(sed -n '1p' <<<"${online_images}")" \
     "swr.cn-east-3.myhuaweicloud.com/openbkn-ai/portainer/kubectl-shell:latest"
 assert_eq "online-nginx" "$(sed -n '2p' <<<"${online_images}")" \
     "swr.cn-east-3.myhuaweicloud.com/openbkn-ai/library/nginx:1.27-alpine"
+assert_eq "online-python" "$(sed -n '3p' <<<"${online_images}")" \
+    "swr.cn-east-3.myhuaweicloud.com/openbkn-ai/library/python:3.12-alpine"
 
-override_images="$(resolve_images true custom/kubectl:tag custom/nginx:tag)"
+override_images="$(resolve_images true custom/kubectl:tag custom/nginx:tag custom/python:tag)"
 assert_eq "kubectl-override" "$(sed -n '1p' <<<"${override_images}")" "custom/kubectl:tag"
 assert_eq "nginx-override" "$(sed -n '2p' <<<"${override_images}")" "custom/nginx:tag"
+assert_eq "python-override" "$(sed -n '3p' <<<"${override_images}")" "custom/python:tag"
 
 if [[ "${FAIL}" -eq 0 ]]; then
     echo "status_test: all ${PASS} checks passed"

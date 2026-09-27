@@ -95,6 +95,7 @@ OPENSEARCH_IMAGES=(
 OTHER_IMAGES=(
     "openbkn-ai/portainer/kubectl-shell:latest"
     "openbkn-ai/library/nginx:1.27-alpine"
+    "openbkn-ai/library/python:3.12-alpine"
 )
 
 # Required images for OpenBKN Applications

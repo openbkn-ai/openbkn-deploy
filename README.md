@@ -116,18 +116,19 @@ sudo bash ./preflight.sh --help         # all flags (--role, --skip, --report, -
 # Default checks match k8s/kubeadm; for single-node k3s use: sudo bash ./preflight.sh --distro=k3s
 # (same as env KUBE_DISTRO=k3s — shared with deploy.sh)
 
-# 3. Install OpenBKN
-# Install the OpenBKN full stack
-bash ./deploy.sh openbkn install
+# 3. Install OpenBKN (this also installs the install-status dashboard)
+# Container-log viewing is enabled by default. The command waits until
+# install-status is ready before it succeeds.
+sudo bash ./deploy.sh openbkn install
 # Default is kubeadm (k8s). For single-node k3s instead (--distro must appear before openbkn):
-# bash ./deploy.sh --distro=k3s openbkn install
-# or: export KUBE_DISTRO=k3s && bash ./deploy.sh openbkn install
+# sudo bash ./deploy.sh --distro=k3s openbkn install
+# or: export KUBE_DISTRO=k3s, then run the installation command above
 # The script will interactively prompt for the access address and auto-detect the API server address.
 
 # Or specify addresses explicitly (skips interactive prompts):
 #   --access_address       Address for clients to reach OpenBKN services (can be IP or domain)
 #   --api_server_address   IP bound to a local network interface for K8s API server (must be a real NIC IP)
-bash ./deploy.sh openbkn install \
+sudo bash ./deploy.sh openbkn install \
   --access_address=<your-ip> \
   --api_server_address=<your-ip>
 
@@ -341,19 +342,63 @@ pass the offline flag to `publish-status`:
 ./deploy.sh --offline=<offline-registry> openbkn publish-status
 ```
 
-A **non-sensitive** dashboard is also served, unauthenticated, through the ingress
-(a tiny nginx serving ConfigMaps — see `conf/install-status/`):
+A dashboard is served through the administrator-only ingress/port (a tiny nginx
+serving ConfigMaps — see `conf/install-status/`). The administrator entry point
+redirects with a Studio access token in the URL fragment; there is no manual
+token-entry form:
 
 - `GET /install-status` — an HTML page rendering releases, per-service health, and
   dependency topology (auto-refreshes; static, no build step / CDN).
-- `GET /install-status.json` — the raw JSON snapshot the page consumes.
+- `GET /install-status.json` — the raw JSON snapshot the page consumes (admin token required).
 
 ```bash
-# Browse the dashboard at https://<access-address>/install-status
-curl -k https://<access-address>/install-status.json
+# Administrator redirect target: https://<access-address>/install-status#token=<Studio-access-token>
+# English UI: https://<access-address>/install-status?lang=en
+# Chinese UI: https://<access-address>/install-status?lang=zh (default)
 ```
 
-It carries product/release versions, ready counts, dependency-service connection
+The existing `/install-status` page now shows whitelisted container waiting and
+termination reasons, exit codes, rollout counts for Deployments, StatefulSets,
+DaemonSets and Jobs, safe Warning Event summaries, and probe-method summaries.
+Each Pod also has an expandable sanitized Describe summary covering lifecycle,
+Pod Conditions, init containers, container state, and related Warning Events;
+init-container logs are available from that summary. It excludes nodes/IPs,
+annotations, environment, mounts, and raw Event messages. Version, dependency,
+and HTTP-health data comes from the latest publication; Pod, workload, and
+Event data refreshes every 30 seconds.
+It displays the last successful collection time for Pod, workload and Event
+snapshots, flags data older than 90 seconds, and distinguishes chart versions
+from the live image-tag source. The redirect token is read from the URL fragment
+(which is never sent to nginx), immediately removed from the address bar, and
+kept only in page memory. All snapshot, Pod, workload, Event and log endpoints
+independently validate it through bkn-safe's Studio `is_admin` rule. Logs are
+never fetched automatically or included in public JSON. Clicking a log button
+opens a modal dialog, where operators can switch between recent and previous
+logs or search loaded lines; closing it clears the displayed log content. The
+reader returns at most 200 lines / 64 KiB; page links request 100 lines. Access
+audit entries (Studio account, target, line bound and result) are written to the
+reader container log without log content or credentials; inspect them with
+`kubectl -n <namespace> logs deployment/install-status -c log-reader`.
+
+Log access is enabled by default and requires the same administrator Token.
+Application logs can contain secrets that the status service cannot reliably
+redact; disable it and republish where this exposure is unacceptable:
+
+```bash
+INSTALL_STATUS_LOGS_ENABLED=false ./deploy.sh openbkn publish-status
+```
+
+Only the existing `install-status` Deployment and Service are used; there is no
+second workload or public operations API. A Python reader container is added to
+the same Pod, using `swr.cn-east-3.myhuaweicloud.com/openbkn-ai/library/python:3.12-alpine`
+online. Sync this
+image for offline deployment or override it with `INSTALL_STATUS_PYTHON_IMAGE`.
+Because this is a single-Pod design, an image pull failure can block the whole
+Deployment rollout. This change also grants namespace-scoped `pods/log get` to
+the existing ServiceAccount, and read access to Events, Deployments,
+StatefulSets, DaemonSets and Jobs in the namespace.
+
+The authenticated status view carries product/release versions, ready counts, dependency-service connection
 topology, and classified per-service health — and **deliberately no credentials**:
 the collector ([scripts/lib/install_status.py](scripts/lib/install_status.py))
 whitelists fields (host/port/type only; passwords, users, keys, tokens are
