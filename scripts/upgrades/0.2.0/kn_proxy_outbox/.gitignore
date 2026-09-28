@@ -1,0 +1,4 @@
+# Local reports are operational evidence and must not be committed.
+reports/
+__pycache__/
+*.pyc
