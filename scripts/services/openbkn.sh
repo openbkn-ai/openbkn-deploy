@@ -1542,12 +1542,13 @@ install_openbkn() {
 
     echo ""
     echo "============================================"
-    echo "  Verify your installation (open in a browser):"
+    echo "  Open Studio to verify your installation:"
+    echo "  (sign in, then administrators can open Service Operations from the user menu)"
     echo ""
     if [[ "${_port}" == "443" || "${_port}" == "80" ]]; then
-        echo "    ${_scheme}://${_host}/install-status"
+        echo "    ${_scheme}://${_host}/studio"
     else
-        echo "    ${_scheme}://${_host}:${_port}/install-status"
+        echo "    ${_scheme}://${_host}:${_port}/studio"
     fi
     # Platform account credentials (NOT database passwords): the console admin
     # initial password, which is also the initial password handed to users
