@@ -23,9 +23,6 @@ releases:
   mf-model-api:
     chart: mf-model-api
     version: main
-  kafka-connect:
-    chart: kafka-connect
-    version: main
   # Installed before every Evidence producer. The producers deliver trace
   # envelopes to agent-observability, and each release relaxes the owner
   # contract in lockstep: a producer that ships ahead of agent-observability
