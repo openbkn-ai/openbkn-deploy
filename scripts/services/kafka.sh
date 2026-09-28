@@ -13,9 +13,19 @@ install_kafka() {
 
     local fresh_install="true"
     if is_helm_installed "${KAFKA_RELEASE_NAME}" "${KAFKA_NAMESPACE}"; then
+        local limit_status
+        if bkn_helm_release_has_resource_limits "${KAFKA_RELEASE_NAME}" "${KAFKA_NAMESPACE}"; then
+            log_info "Kafka has resource limits. Reconciling chart values to remove them."
+        else
+            limit_status=$?
+            if [[ "${limit_status}" == "1" ]]; then
+                log_info "Kafka is already installed without resource limits. Skipping upgrade."
+                return 0
+            fi
+            log_error "Could not inspect Kafka Helm manifest for resource limits; skipping upgrade."
+            return 1
+        fi
         fresh_install="false"
-        log_info "Kafka is already installed. Skipping installation."
-        return 0
     fi
 
     # Kafka password handling
@@ -196,6 +206,21 @@ EOF
         --set listeners.client.protocol="${KAFKA_PROTOCOL}"
         --set listeners.controller.protocol=PLAINTEXT
         --set listeners.interbroker.protocol="${KAFKA_PROTOCOL}"
+        # Disable all chart resource presets and clear retained explicit limits.
+        --set controller.resourcesPreset=none
+        --set broker.resourcesPreset=none
+        --set metrics.jmx.resourcesPreset=none
+        --set provisioning.resourcesPreset=none
+        --set defaultInitContainers.volumePermissions.resourcesPreset=none
+        --set defaultInitContainers.prepareConfig.resourcesPreset=none
+        --set defaultInitContainers.autoDiscovery.resourcesPreset=none
+        --set-json controller.resources.limits=null
+        --set-json broker.resources.limits=null
+        --set-json metrics.jmx.resources.limits=null
+        --set-json provisioning.resources.limits=null
+        --set-json defaultInitContainers.volumePermissions.resources.limits=null
+        --set-json defaultInitContainers.prepareConfig.resources.limits=null
+        --set-json defaultInitContainers.autoDiscovery.resources.limits=null
         --wait --timeout="${KAFKA_HELM_TIMEOUT}"
     )
 
@@ -213,14 +238,8 @@ EOF
         )
     fi
 
-    if [[ -n "${KAFKA_MEMORY_REQUEST}" || -n "${KAFKA_MEMORY_LIMIT}" ]]; then
-        helm_args+=(--set controller.resourcesPreset=none --set broker.resourcesPreset=none)
-        if [[ -n "${KAFKA_MEMORY_REQUEST}" ]]; then
-            helm_args+=(--set controller.resources.requests.memory="${KAFKA_MEMORY_REQUEST}" --set broker.resources.requests.memory="${KAFKA_MEMORY_REQUEST}")
-        fi
-        if [[ -n "${KAFKA_MEMORY_LIMIT}" ]]; then
-            helm_args+=(--set controller.resources.limits.memory="${KAFKA_MEMORY_LIMIT}" --set broker.resources.limits.memory="${KAFKA_MEMORY_LIMIT}")
-        fi
+    if [[ -n "${KAFKA_MEMORY_REQUEST}" ]]; then
+        helm_args+=(--set controller.resources.requests.memory="${KAFKA_MEMORY_REQUEST}" --set broker.resources.requests.memory="${KAFKA_MEMORY_REQUEST}")
     fi
 
     if [[ "${use_local_chart}" != "true" ]]; then
@@ -248,7 +267,11 @@ EOF
 
     local helm_out=""
     set +e
-    helm_out="$(helm "${helm_args[@]}" 2>&1)"
+    if [[ "${fresh_install}" == "true" ]]; then
+        helm_out="$(helm "${helm_args[@]}" 2>&1)"
+    else
+        helm_out="$(bkn_helm_upgrade_without_resource_limits "${KAFKA_RELEASE_NAME}" "${KAFKA_NAMESPACE}" "${helm_args[@]}" 2>&1)"
+    fi
     local helm_rc=$?
     set -e
     rm -f "${tmp_values}" 2>/dev/null || true

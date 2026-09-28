@@ -34,9 +34,19 @@ install_redis_sentinel_local() {
 
     local fresh_install="true"
     if is_helm_installed "${redis_release_name}" "${ns}"; then
+        local limit_status
+        if bkn_helm_release_has_resource_limits "${redis_release_name}" "${ns}"; then
+            log_info "Redis has resource limits. Reconciling chart values to remove them."
+        else
+            limit_status=$?
+            if [[ "${limit_status}" == "1" ]]; then
+                log_info "Redis is already installed without resource limits. Skipping upgrade."
+                return 0
+            fi
+            log_error "Could not inspect Redis Helm manifest for resource limits; skipping upgrade."
+            return 1
+        fi
         fresh_install="false"
-        log_info "Redis is already installed. Skipping installation."
-        return 0
     fi
     log_info "Installing Redis in sentinel mode using redis chart..."
 
@@ -104,6 +114,9 @@ install_redis_sentinel_local() {
         --set service.enableDualStack=false
         --set service.sentinel.port=26379
         --set storage.storageClassName="${redis_sc}"
+        # Keep the rendered container limit empty on a new install and after
+        # an upgrade using sanitized effective values.
+        --set-json resources.limits=null
         --wait --timeout=600s
     )
 
@@ -125,21 +138,14 @@ install_redis_sentinel_local() {
         helm_args+=(--set redis.maxmemory="${REDIS_MAXMEMORY}")
     fi
 
-    # K8s container resources (chart only wires `resources` into the redis container;
-    # sentinel/exporter have no resources block in the template).
+    # K8s container requests (the chart only wires `resources` into the Redis
+    # container; sentinel/exporter have no resources block in the template).
     if [[ -n "${REDIS_MEMORY_REQUEST}" ]]; then
         helm_args+=(--set resources.requests.memory="${REDIS_MEMORY_REQUEST}")
     fi
     if [[ -n "${REDIS_CPU_REQUEST}" ]]; then
         helm_args+=(--set resources.requests.cpu="${REDIS_CPU_REQUEST}")
     fi
-    if [[ -n "${REDIS_MEMORY_LIMIT}" ]]; then
-        helm_args+=(--set resources.limits.memory="${REDIS_MEMORY_LIMIT}")
-    fi
-    if [[ -n "${REDIS_CPU_LIMIT}" ]]; then
-        helm_args+=(--set resources.limits.cpu="${REDIS_CPU_LIMIT}")
-    fi
-
     log_info "Installing Redis with values:"
     log_info "  Chart: ${chart_ref}"
     log_info "  Namespace: ${ns}"
@@ -149,9 +155,13 @@ install_redis_sentinel_local() {
     log_info "  Storage Class: ${redis_sc}"
     log_info "  maxmemory: ${REDIS_MAXMEMORY:-<chart default>}"
     log_info "  resources.requests: cpu=${REDIS_CPU_REQUEST:-<unset>} memory=${REDIS_MEMORY_REQUEST:-<unset>}"
-    log_info "  resources.limits:   cpu=${REDIS_CPU_LIMIT:-<unset>} memory=${REDIS_MEMORY_LIMIT:-<unset>}"
+    log_info "  resources.limits:   cleared"
 
-    helm "${helm_args[@]}"
+    if [[ "${fresh_install}" == "true" ]]; then
+        helm "${helm_args[@]}" || return 1
+    else
+        bkn_helm_upgrade_without_resource_limits "${redis_release_name}" "${ns}" "${helm_args[@]}" || return 1
+    fi
 
     # ACL self-heal patch (opt-out: REDIS_AUTO_PATCH_ACL=false).
     [[ "${REDIS_AUTO_PATCH_ACL}" == "true" ]] && \

@@ -94,6 +94,104 @@ is_helm_installed() {
     echo "${out}" | grep -q '^STATUS: deployed$'
 }
 
+# Return whether a deployed Helm release renders a container resource limit.
+# Return 2 if the manifest cannot be read or parsed; callers must not upgrade
+# blindly in that case.
+bkn_helm_release_has_resource_limits() {
+    local release="$1"
+    local namespace="$2"
+    local manifest resources_json has_limits
+
+    if ! manifest="$(helm get manifest "${release}" --namespace "${namespace}" 2>/dev/null)"; then
+        return 2
+    fi
+
+    # kubectl parses the YAML locally; no objects are created. Inspect only
+    # Pod specs, so a ConfigMap's unrelated `limits` key cannot trigger an
+    # upgrade. Helm can output multiple JSON documents here.
+    if ! resources_json="$(printf '%s\n' "${manifest}" \
+        | kubectl create --dry-run=client --validate=false -f - -o json 2>/dev/null)"; then
+        return 2
+    fi
+    [[ -n "${resources_json}" ]] || return 2
+    if ! has_limits="$(jq -sr '
+        [ .[]
+          | if .kind == "CronJob" then .spec.jobTemplate.spec.template.spec
+            elif (.kind == "Deployment" or .kind == "StatefulSet" or
+                  .kind == "DaemonSet" or .kind == "Job" or
+                  .kind == "ReplicaSet" or .kind == "ReplicationController")
+              then .spec.template.spec
+            elif .kind == "Pod" then .spec
+            else empty end
+          | (.containers[]?, .initContainers[]?, .ephemeralContainers[]?)
+          | .resources.limits // {}
+          | select(type == "object" and length > 0)
+        ] | length > 0
+    ' <<<"${resources_json}")"; then
+        return 2
+    fi
+    [[ "${has_limits}" == "true" ]]
+}
+
+# Export current effective Helm values after deleting Kubernetes resource
+# limits. Other keys named `limits` (such as application settings) are kept.
+bkn_export_helm_values_without_limits() {
+    local release="$1"
+    local namespace="$2"
+    local output_file="$3"
+
+    if ! command -v jq >/dev/null 2>&1; then
+        log_error "jq is required to remove persisted Helm resource limits."
+        return 1
+    fi
+
+    local values_json
+    if ! values_json="$(helm get values "${release}" --namespace "${namespace}" --all -o json 2>/dev/null)"; then
+        log_error "Could not read Helm values for ${release} in ${namespace}."
+        return 1
+    fi
+    if [[ -z "${values_json}" ]]; then
+        log_error "Helm returned empty values for ${release} in ${namespace}."
+        return 1
+    fi
+    if ! printf '%s\n' "${values_json}" \
+        | jq -e 'if type == "object" then
+            delpaths([paths | select(.[-1] == "limits" and
+                (.[-2] == "resources" or .[-2] == "initResources" or .[-2] == "sidecarResources"))])
+          else error("Helm values must be a JSON object") end' >"${output_file}"; then
+        log_error "Could not export sanitized Helm values for ${release} in ${namespace}."
+        return 1
+    fi
+    if [[ ! -s "${output_file}" ]]; then
+        log_error "Helm values for ${release} in ${namespace} contained no JSON object."
+        return 1
+    fi
+}
+
+# Upgrade with the sanitized effective values and always remove the temporary
+# copy, including when Helm fails. Helm's --reuse-values deep-merges old limits
+# back into the release, so the cleaned values must be supplied as a file.
+bkn_helm_upgrade_without_resource_limits() {
+    local release="$1"
+    local namespace="$2"
+    shift 2
+
+    local values_file helm_status
+    values_file="$(mktemp)" || return 1
+    if ! bkn_export_helm_values_without_limits "${release}" "${namespace}" "${values_file}"; then
+        rm -f "${values_file}"
+        return 1
+    fi
+
+    if helm "$@" -f "${values_file}"; then
+        helm_status=0
+    else
+        helm_status=$?
+    fi
+    rm -f "${values_file}"
+    return "${helm_status}"
+}
+
 # When a release is failed or pending-*, helm upgrade --install often errors with
 # "has no deployed releases". Uninstall the stuck release so install can proceed.
 # Does not set --wait; chart-managed Pods/STS may be removed; PVCs typically remain.
@@ -1282,11 +1380,10 @@ MARIADB_USER="${MARIADB_USER:-openbkn}"
 MARIADB_PASSWORD="${MARIADB_PASSWORD:-}"
 MARIADB_STORAGE_SIZE="${MARIADB_STORAGE_SIZE:-10Gi}"
 MARIADB_MAX_CONNECTIONS="${MARIADB_MAX_CONNECTIONS:-5000}"
-# Container resources: empty means requests only; limits are added only when explicitly configured.
+# Container resource requests are optional.  Do not configure limits here: the
+# installer deliberately clears them on both installs and upgrades.
 MARIADB_MEMORY_REQUEST="${MARIADB_MEMORY_REQUEST:-}"
-MARIADB_MEMORY_LIMIT="${MARIADB_MEMORY_LIMIT:-}"
 MARIADB_CPU_REQUEST="${MARIADB_CPU_REQUEST:-}"
-MARIADB_CPU_LIMIT="${MARIADB_CPU_LIMIT:-}"
 
 # Redis Configuration
 REDIS_NAMESPACE="${REDIS_NAMESPACE:-${RESOURCE_NAMESPACE}}"
@@ -1310,8 +1407,9 @@ REDIS_REPLICA_COUNT="${REDIS_REPLICA_COUNT:-1}"
 REDIS_SENTINEL_QUORUM="${REDIS_SENTINEL_QUORUM:-1}"
 # Auto-patch StatefulSet to self-heal ACL drift on Pod restart; set false to opt out.
 REDIS_AUTO_PATCH_ACL="${REDIS_AUTO_PATCH_ACL:-true}"
-# Resource overrides for the redis chart. Empty = don't pass --set, keep chart defaults
-# (chart default: redis.maxmemory=4GB, resources.requests=cpu 100m/memory 512Mi, no limits).
+# Resource-request overrides for the redis chart. Empty = don't pass --set,
+# keep chart defaults (redis.maxmemory=4GB, requests=cpu 100m/memory 512Mi).
+# Resource limits are intentionally cleared by the installer.
 # Lower defaults for resource-constrained environments are layered on top:
 #   - mac dev: see deploy/dev/lib/mac_common.sh (mac_common_init)
 #   - k3s    : see bkn_apply_k3s_lightweight_defaults below (KUBE_DISTRO=k3s)
@@ -1319,9 +1417,7 @@ REDIS_AUTO_PATCH_ACL="${REDIS_AUTO_PATCH_ACL:-true}"
 # `resources` into the sentinel/exporter sidecars.
 REDIS_MAXMEMORY="${REDIS_MAXMEMORY:-}"
 REDIS_MEMORY_REQUEST="${REDIS_MEMORY_REQUEST:-}"
-REDIS_MEMORY_LIMIT="${REDIS_MEMORY_LIMIT:-}"
 REDIS_CPU_REQUEST="${REDIS_CPU_REQUEST:-}"
-REDIS_CPU_LIMIT="${REDIS_CPU_LIMIT:-}"
 
 # BKN Foundry Core Resource Configuration
 # These environment variables allow setting resources.requests/limits for all Core releases uniformly.
@@ -1339,19 +1435,17 @@ bkn_apply_k3s_lightweight_defaults() {
     # redis (chart default 4GB / 512Mi req)
     : "${REDIS_MAXMEMORY:=1gb}"
     : "${REDIS_MEMORY_REQUEST:=256Mi}"
-    : "${REDIS_MEMORY_LIMIT:=512Mi}"
     : "${REDIS_CPU_REQUEST:=50m}"
-    # opensearch (k8s default below: req=512Mi, lim=2048Mi)
+    # opensearch (request only; limits are intentionally disabled)
     : "${OPENSEARCH_MEMORY_REQUEST:=512Mi}"
-    : "${OPENSEARCH_MEMORY_LIMIT:=1024Mi}"
     # bkn-foundry app services (chart defaults: limits=4-8Gi, mostly request=0)
     # Loose ceiling so heavier services (agent-retrieval, ontology-query) still have headroom.
     : "${OPENBKN_CORE_REQ_CPU:=100m}"
     : "${OPENBKN_CORE_REQ_MEM:=128Mi}"
     : "${OPENBKN_CORE_LIM_CPU:=2}"
     : "${OPENBKN_CORE_LIM_MEM:=2Gi}"
-    export REDIS_MAXMEMORY REDIS_MEMORY_REQUEST REDIS_MEMORY_LIMIT REDIS_CPU_REQUEST \
-           OPENSEARCH_MEMORY_REQUEST OPENSEARCH_MEMORY_LIMIT \
+    export REDIS_MAXMEMORY REDIS_MEMORY_REQUEST REDIS_CPU_REQUEST \
+           OPENSEARCH_MEMORY_REQUEST \
            OPENBKN_CORE_REQ_CPU OPENBKN_CORE_REQ_MEM OPENBKN_CORE_LIM_CPU OPENBKN_CORE_LIM_MEM
 }
 bkn_apply_k3s_lightweight_defaults
@@ -1376,7 +1470,6 @@ KAFKA_HELM_ATOMIC="${KAFKA_HELM_ATOMIC:-false}"
 KAFKA_READY_TIMEOUT="${KAFKA_READY_TIMEOUT:-600s}"
 KAFKA_HEAP_OPTS="${KAFKA_HEAP_OPTS:--Xms256m -Xmx256m}"
 KAFKA_MEMORY_REQUEST="${KAFKA_MEMORY_REQUEST:-256Mi}"
-KAFKA_MEMORY_LIMIT="${KAFKA_MEMORY_LIMIT:-512Mi}"
 KAFKA_PERSISTENCE_ENABLED="${KAFKA_PERSISTENCE_ENABLED:-true}"
 KAFKA_STORAGE_CLASS="${KAFKA_STORAGE_CLASS:-}"
 KAFKA_STORAGE_SIZE="${KAFKA_STORAGE_SIZE:-8Gi}"
@@ -1416,9 +1509,6 @@ OPENSEARCH_INIT_IMAGE_REPOSITORY="${OPENSEARCH_INIT_IMAGE_REPOSITORY:-busybox}"
 OPENSEARCH_INIT_IMAGE_TAG="${OPENSEARCH_INIT_IMAGE_TAG:-1.36.1}"
 OPENSEARCH_JAVA_OPTS="${OPENSEARCH_JAVA_OPTS:--Xms512m -Xmx512m -XX:MaxDirectMemorySize=128m}"
 OPENSEARCH_MEMORY_REQUEST="${OPENSEARCH_MEMORY_REQUEST:-512Mi}"
-# NOTE: OpenSearch uses heap + direct memory + native overhead. 768Mi is too tight for -Xmx512m.
-# Increased to 2Gi to support plugin installation (IK analyzer, etc.)
-OPENSEARCH_MEMORY_LIMIT="${OPENSEARCH_MEMORY_LIMIT:-2048Mi}"
 OPENSEARCH_PROTOCOL="${OPENSEARCH_PROTOCOL:-http}" # http (default) or https (requires enabling security)
 OPENSEARCH_DISABLE_SECURITY="${OPENSEARCH_DISABLE_SECURITY:-}"
 OPENSEARCH_SINGLE_NODE="${OPENSEARCH_SINGLE_NODE:-true}"
