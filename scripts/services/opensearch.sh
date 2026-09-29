@@ -68,6 +68,7 @@ _opensearch_upgrade_legacy_image() {
         --set image.tag="${os_image_tag}"
         --wait --timeout=900s
     )
+
     if [[ "${OPENSEARCH_HELM_ATOMIC}" == "true" ]]; then
         helm_args+=(--atomic)
     fi
@@ -92,8 +93,19 @@ install_opensearch() {
     local fresh_install="true"
 
     if is_helm_installed "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}"; then
-        _opensearch_upgrade_legacy_image || return 1
-        return 0
+        local limit_status
+        if bkn_helm_release_has_resource_limits "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}"; then
+            log_info "OpenSearch has resource limits. Reconciling chart values to remove them."
+        else
+            limit_status=$?
+            if [[ "${limit_status}" == "1" ]]; then
+                log_info "OpenSearch is already installed without resource limits. Skipping upgrade."
+                return 0
+            fi
+            log_error "Could not inspect OpenSearch Helm manifest for resource limits; skipping upgrade."
+            return 1
+        fi
+        fresh_install="false"
     fi
 
     # OpenSearch password handling
@@ -209,6 +221,11 @@ EOF
         --set sysctlVmMaxMapCount="${OPENSEARCH_SYSCTL_VM_MAX_MAP_COUNT}"
         --set-string extraEnvs[0].name=OPENSEARCH_INITIAL_ADMIN_PASSWORD
         --set-string extraEnvs[0].value="${OPENSEARCH_INITIAL_ADMIN_PASSWORD}"
+        # Keep main, init, and sidecar container limits empty on new installs
+        # and after upgrades using sanitized effective values.
+        --set-json resources.limits=null
+        --set-json initResources.limits=null
+        --set-json sidecarResources.limits=null
         --wait --timeout=900s
     )
 
@@ -235,14 +252,14 @@ EOF
     if [[ -n "${OPENSEARCH_MEMORY_REQUEST}" ]]; then
         helm_args+=(--set resources.requests.memory="${OPENSEARCH_MEMORY_REQUEST}")
     fi
-    if [[ -n "${OPENSEARCH_MEMORY_LIMIT}" ]]; then
-        helm_args+=(--set resources.limits.memory="${OPENSEARCH_MEMORY_LIMIT}")
-    fi
-
     bkn_helm_uninstall_if_not_deployed "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}"
 
-    helm "${helm_args[@]}"
-    local helm_ec=$?
+    local helm_ec=0
+    if [[ "${fresh_install}" == "true" ]]; then
+        helm "${helm_args[@]}" || helm_ec=$?
+    else
+        bkn_helm_upgrade_without_resource_limits "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}" "${helm_args[@]}" || helm_ec=$?
+    fi
     rm -f "${tmp_os_yml}" 2>/dev/null || true
     if [[ "${helm_ec}" -ne 0 ]]; then
         log_error "OpenSearch Helm install/upgrade failed (exit ${helm_ec})."

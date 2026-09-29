@@ -192,9 +192,20 @@ install_mariadb_helm() {
 
     # Check if MariaDB is already installed
     if helm status mariadb -n "${ns}" >/dev/null 2>&1; then
+        local limit_status
+        if bkn_helm_release_has_resource_limits mariadb "${ns}"; then
+            log_info "MariaDB has resource limits. Reconciling chart values to remove them."
+        else
+            limit_status=$?
+            if [[ "${limit_status}" == "1" ]]; then
+                log_info "MariaDB is already installed without resource limits. Skipping upgrade."
+                return 0
+            fi
+            log_error "Could not inspect MariaDB Helm manifest for resource limits; skipping upgrade."
+            return 1
+        fi
         fresh_install="false"
         reuse_existing_values="true"
-        log_info "MariaDB is already installed (Helm release exists). Reconciling chart values."
     fi
 
     # MariaDB password handling
@@ -274,10 +285,6 @@ install_mariadb_helm() {
         --set mariadb.persistence.enabled="${persistence_enabled}"
     )
 
-    if [[ "${reuse_existing_values}" == "true" ]]; then
-        helm_args+=(--reuse-values)
-    fi
-
     if [[ "${persistence_enabled}" == "true" ]]; then
         helm_args+=(--set mariadb.persistence.size="${MARIADB_STORAGE_SIZE}")
         if [[ -n "${MARIADB_STORAGE_CLASS}" ]]; then
@@ -285,26 +292,16 @@ install_mariadb_helm() {
         fi
     fi
 
-    # Container resources: empty means requests only; limits are opt-in.
+    # Requests remain configurable, but limits must stay unset.  Passing JSON
+    # null is important on upgrades: Helm otherwise retains a limit from the
+    # previous release values.
     if [[ -n "${MARIADB_MEMORY_REQUEST}" ]]; then
         helm_args+=(--set resources.requests.memory="${MARIADB_MEMORY_REQUEST}")
     fi
     if [[ -n "${MARIADB_CPU_REQUEST}" ]]; then
         helm_args+=(--set resources.requests.cpu="${MARIADB_CPU_REQUEST}")
     fi
-    local resource_limits_json="null"
-    if [[ -n "${MARIADB_CPU_LIMIT}" || -n "${MARIADB_MEMORY_LIMIT}" ]]; then
-        resource_limits_json="{"
-        if [[ -n "${MARIADB_CPU_LIMIT}" ]]; then
-            resource_limits_json+="\"cpu\":\"${MARIADB_CPU_LIMIT}\""
-        fi
-        if [[ -n "${MARIADB_MEMORY_LIMIT}" ]]; then
-            [[ "${resource_limits_json}" != "{" ]] && resource_limits_json+=","
-            resource_limits_json+="\"memory\":\"${MARIADB_MEMORY_LIMIT}\""
-        fi
-        resource_limits_json+="}"
-    fi
-    helm_args+=(--set-json "resources.limits=${resource_limits_json}")
+    helm_args+=(--set-json "resources.limits=null")
 
     helm_args+=(--wait --timeout=600s)
 
@@ -315,7 +312,11 @@ install_mariadb_helm() {
     log_info "  Max Connections: ${MARIADB_MAX_CONNECTIONS}"
     log_info "  Storage: ${persistence_enabled}"
 
-    helm "${helm_args[@]}"
+    if [[ "${reuse_existing_values}" == "true" ]]; then
+        bkn_helm_upgrade_without_resource_limits mariadb "${ns}" "${helm_args[@]}" || return 1
+    else
+        helm "${helm_args[@]}" || return 1
+    fi
 
     # Wait for MariaDB Pod to be ready
     log_info "Waiting for MariaDB Pod to be ready..."
