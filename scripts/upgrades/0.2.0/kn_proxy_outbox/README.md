@@ -7,40 +7,37 @@ the OpenBKN 0.2.0 BKN proxy outbox transition. Schema DDL remains owned by
 `bkn-foundry/migrations/bkn-backend/mariadb/0.2.0/` and is executed by the
 normal data migrator; this tool does not duplicate that DDL.
 
-Use a stopped upgrade. Repair all non-ready proxy mappings first, stop BKN
-workloads, drain requests, take the normal database backup, and run the Schema
-migration. Database credentials must be supplied through the deployment
+Use a stopped data transition after the normal deployment has taken the database
+backup and run the Schema migration. Repair all non-ready proxy mappings first.
+Database credentials must be supplied through the deployment
 environment as `BKN_DB_HOST`, `BKN_DB_PORT`, `BKN_DB_USER`, `BKN_DB_PASSWORD`,
 and `BKN_DB_NAME`; reports never contain the password or authorization payloads.
 
 ```bash
-./migrate.py dry-run --report ./reports/proxy-outbox-precheck.json
-./migrate.py stop --namespace openbkn --expected-context YOUR_CONTEXT
-# Run the normal bkn-foundry 0.2.0 data migrator and database backup procedure.
 ./migrate.py apply
-./migrate.py start --namespace openbkn --expected-context YOUR_CONTEXT
 ```
 
-`apply` initializes `published_generation` from `sync_generation`, copies only
-ready networks' published snapshots into the planned table, and verifies that
-the Outbox is empty and both snapshots are identical. It is idempotent and
+`apply` is the normal zero-argument entry point. It runs the database preflight,
+records and stops the `bkn-backend` workload, verifies that desired, observed,
+and ready replicas are all zero, initializes `published_generation` from
+`sync_generation`, copies only ready networks' published snapshots into the
+planned table, verifies that the Outbox is empty and both snapshots are
+identical, writes the report, and restores the recorded replica count. It is
+idempotent and
 automatically writes the initialization and verification result to a UTC-stamped
 `~/.openbkn-ai/migrations/0.2.0/kn_proxy_outbox/proxy-outbox-apply-*.json`
 file without overwriting an existing report.
-Before opening the database, `apply` automatically runs `verify-stopped` with
-the standard namespace and state file; it refuses to migrate unless the earlier
-`stop` step is still in effect. The report destination is also checked before
-the transaction starts. If an exceptional filesystem failure occurs only after
-the transaction commits, the command explicitly reports that the migration
-completed and only the report write failed.
-Do not start the new BKN version if any check fails. After deployment, enable the
-fixed worker pool and perform one network mutation smoke test before reopening
-normal traffic.
+The report destination is checked before the workflow starts. If any step fails
+after BKN is stopped, BKN remains stopped for investigation; rerunning `apply`
+resumes from that recorded stopped state. If an exceptional filesystem failure
+occurs only after the transaction commits, the command explicitly reports that
+the migration completed and still restores BKN. After deployment, perform one
+network mutation smoke test before reopening normal traffic.
 
-`stop` stores the existing `bkn-backend` replica count in a context- and
-namespace-bound state file. `start` restores that exact count and removes the
-state file only after all replicas are ready. Database backup and Schema
-execution stay in the normal deployment/data-migrator workflow.
+`dry-run`, `stop`, `verify-stopped`, `verify`, and `start` remain available only
+for diagnosis and recovery. Database backup and Schema execution stay in the
+normal deployment/data-migrator workflow and are not repeated by this data
+transition.
 
 Focused tests:
 

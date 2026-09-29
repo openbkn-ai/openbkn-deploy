@@ -63,18 +63,37 @@ def control_services(args: argparse.Namespace) -> int:
     return subprocess.run(command, check=False).returncode
 
 
-def verify_bkn_stopped() -> None:
-    """Verify the standard stopped-upgrade state without operator-supplied flags."""
-    args = argparse.Namespace(
-        command="verify-stopped",
+def standard_control_args(command: str) -> argparse.Namespace:
+    return argparse.Namespace(
+        command=command,
         namespace=DEFAULT_NAMESPACE,
         expected_context="",
         state_file=DEFAULT_STATE_FILE,
         timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
     )
-    if control_services(args) != 0:
+
+
+def verify_bkn_stopped() -> None:
+    """Verify the standard stopped-upgrade state without operator-supplied flags."""
+    if control_services(standard_control_args("verify-stopped")) != 0:
         raise kn_proxy_outbox.MigrationError(
-            "BKN is not in the recorded stopped state; run the deployment stop step first"
+            "BKN did not remain in the recorded stopped state"
+        )
+
+
+def stop_bkn() -> None:
+    """Stop BKN or resume from an already recorded stopped state."""
+    if Path(DEFAULT_STATE_FILE).exists():
+        return
+    if control_services(standard_control_args("stop")) != 0:
+        raise kn_proxy_outbox.MigrationError("failed to stop BKN workloads")
+
+
+def start_bkn() -> None:
+    """Restore the replica count recorded by the stop step."""
+    if control_services(standard_control_args("start")) != 0:
+        raise kn_proxy_outbox.MigrationError(
+            "migration committed, but BKN workloads could not be restarted"
         )
 
 
@@ -140,20 +159,34 @@ def main() -> int:
     try:
         prepare_report_destination(report_path)
         if args.command == "apply":
+            preflight = run(argparse.Namespace(command="dry-run"))
+            stop_bkn()
             verify_bkn_stopped()
         report = run(args)
+        if args.command == "apply":
+            report["preflight"] = preflight
     except kn_proxy_outbox.MigrationError as exc:
         print(f"migration refused: {exc}")
         return 1
+    report_write_failed = False
     try:
         write_report(report_path, report)
         print(f"migration report: {Path(report_path).resolve()}")
     except (kn_proxy_outbox.MigrationError, OSError) as exc:
         if args.command == "apply":
             print(f"migration completed, but the report could not be written: {exc}")
+            report_write_failed = True
+        else:
+            print(f"migration report failed: {exc}")
+            return 1
+    if args.command == "apply":
+        try:
+            start_bkn()
+        except kn_proxy_outbox.MigrationError as exc:
+            print(f"migration completed: {exc}")
+            return 1
+        if report_write_failed:
             return 0
-        print(f"migration report failed: {exc}")
-        return 1
     return 0
 
 
