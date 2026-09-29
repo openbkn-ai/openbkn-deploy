@@ -105,19 +105,33 @@ spec:
           args:
             - |
               umask 022
+              # kubectl does not infer in-cluster credentials from a projected
+              # ServiceAccount volume. Keep automount disabled for this multi-
+              # container Pod, but pass this sidecar's scoped credentials
+              # explicitly on every request (and reread the rotating token).
+              kube_api() {
+                kubectl \
+                  --server="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT_HTTPS:-443}" \
+                  --certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+                  --token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+                  "$@"
+              }
               while true; do
                 now="$(date -u +%FT%TZ)"
-                if kubectl get pods -n "__NAMESPACE__" -o json > /live/pods.json.tmp 2>/live/err.log \
+                # Bound API requests. Without this, a stalled apiserver connection
+                # leaves the loop blocked forever while this container still looks
+                # healthy, and the dashboard can only keep showing its old data.
+                if kube_api get pods -n "__NAMESPACE__" --request-timeout=15s -o json > /live/pods.json.tmp 2>/live/err.log \
                     && mv /live/pods.json.tmp /live/pods.json \
                     && jq --arg refreshedAt "$now" -f /scripts/public-pods.jq /live/pods.json > /live/pods.public.json.tmp 2>>/live/err.log \
                     && mv /live/pods.public.json.tmp /live/pods.public.json; then :; \
                   else rm -f /live/pods.json.tmp /live/pods.public.json.tmp; fi
-                if kubectl get deploy,sts,ds,jobs -n "__NAMESPACE__" -o json > /live/workloads.json.tmp 2>>/live/err.log \
+                if kube_api get deploy,sts,ds,jobs -n "__NAMESPACE__" --request-timeout=15s -o json > /live/workloads.json.tmp 2>>/live/err.log \
                     && mv /live/workloads.json.tmp /live/workloads.json \
                     && jq --arg refreshedAt "$now" -f /scripts/public-workloads.jq /live/workloads.json > /live/workloads.public.json.tmp 2>>/live/err.log \
                     && mv /live/workloads.public.json.tmp /live/workloads.public.json; then :; \
                   else rm -f /live/workloads.json.tmp /live/workloads.public.json.tmp; fi
-                if kubectl get events -n "__NAMESPACE__" -o json > /live/events.json.tmp 2>>/live/err.log \
+                if kube_api get events -n "__NAMESPACE__" --request-timeout=15s -o json > /live/events.json.tmp 2>>/live/err.log \
                     && mv /live/events.json.tmp /live/events.json \
                     && jq --arg refreshedAt "$now" -f /scripts/public-events.jq /live/events.json > /live/events.public.json.tmp 2>>/live/err.log \
                     && mv /live/events.public.json.tmp /live/events.public.json; then :; \

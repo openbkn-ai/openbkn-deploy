@@ -4,6 +4,18 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# The refresher reads its explicitly projected ServiceAccount credentials on
+# every call. `kubectl` otherwise falls back to localhost and leaves no files
+# for nginx to serve. Requests also need a deadline: a running shell alone is
+# not evidence of fresh dashboard data.
+rg -q 'kube_api()' "${script_dir}/endpoint.yaml"
+rg -Fq -- '--server="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT_HTTPS:-443}"' "${script_dir}/endpoint.yaml"
+rg -Fq -- '--certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt' "${script_dir}/endpoint.yaml"
+rg -Fq -- '--token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"' "${script_dir}/endpoint.yaml"
+for resource in pods 'deploy,sts,ds,jobs' events; do
+  rg -q "kube_api get ${resource} -n .* --request-timeout=15s -o json" "${script_dir}/endpoint.yaml"
+done
+
 pods='{"items":[{"metadata":{"name":"api-abc","creationTimestamp":"2026-09-01T10:00:00Z","labels":{"app":"api"},"annotations":{"unsafe":"do-not-return"}},"spec":{"nodeName":"private-node","containers":[{"env":[{"name":"TOKEN","value":"do-not-return"}]}]},"status":{"phase":"Running","startTime":"2026-09-01T10:01:00Z","podIP":"10.0.0.1","conditions":[{"type":"PodScheduled","status":"True","reason":"","message":"private-node"},{"type":"Ready","status":"False","reason":"ContainersNotReady","message":"token=secret"}],"initContainerStatuses":[{"name":"setup","ready":true,"restartCount":1,"state":{"terminated":{"reason":"Completed","exitCode":0,"startedAt":"2026-09-01T10:00:30Z"}}}],"containerStatuses":[{"name":"api","ready":false,"restartCount":4,"state":{"waiting":{"reason":"CrashLoopBackOff","message":"token=secret 10.0.0.1"}},"lastState":{"terminated":{"reason":"Error","exitCode":1,"message":"do-not-return"}}}]}}]}'
 workloads='{"items":[{"kind":"Deployment","metadata":{"name":"api","labels":{"app.kubernetes.io/instance":"api"},"annotations":{"meta.helm.sh/release-name":"api"}},"spec":{"replicas":2,"selector":{"matchLabels":{"app":"api"}},"template":{"spec":{"containers":[{"name":"api","image":"registry.internal/api:1.2.3","env":[{"name":"TOKEN","value":"do-not-return"}],"readinessProbe":{"exec":{"command":["cat","/secret"]}}}]}}},"status":{"replicas":2,"readyReplicas":1,"availableReplicas":1,"updatedReplicas":1,"conditions":[{"type":"Progressing","status":"False","reason":"ProgressDeadlineExceeded","message":"secret=hidden"}]}},{"kind":"DaemonSet","metadata":{"name":"node-agent","labels":{},"annotations":{}},"spec":{"selector":{"matchLabels":{"app":"node-agent"}},"template":{"spec":{"containers":[{"name":"agent","image":"secret.registry/agent:4","livenessProbe":{"httpGet":{"path":"/internal-secret"}}}]}}},"status":{"desiredNumberScheduled":3,"currentNumberScheduled":3,"numberReady":2,"numberAvailable":2,"updatedNumberScheduled":3}},{"kind":"Job","metadata":{"name":"batch","labels":{},"annotations":{}},"spec":{"completions":1,"selector":{"matchLabels":{"job":"batch"}},"template":{"spec":{"containers":[{"name":"worker","image":"secret.registry/worker:1"}]}}},"status":{"active":0,"succeeded":0,"failed":1,"conditions":[{"type":"Failed","status":"True","reason":"BackoffLimitExceeded","message":"secret"}]}}]}'
 events='{"items":[{"type":"Warning","reason":"BackOff","message":"token=secret 10.0.0.1","count":3,"lastTimestamp":"2026-09-01T12:00:00Z","involvedObject":{"kind":"Pod","name":"api-abc"}},{"type":"Warning","reason":"UnlistedSensitiveReason","message":"secret=hidden","count":1,"lastTimestamp":"2026-09-01T12:02:00Z","involvedObject":{"kind":"Pod","name":"api-def"}}]}'
