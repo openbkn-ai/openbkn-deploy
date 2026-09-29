@@ -6,33 +6,31 @@
 Schema DDL 仍由 `bkn-foundry/migrations/bkn-backend/mariadb/0.2.0/` 维护，并由
 现有 data migrator 执行；本工具不重复维护 DDL。
 
-本次升级采用停机方式：先修复所有非 `ready` 的 proxy mapping，停止 BKN
-工作负载并排空请求，完成常规数据库备份，再执行 Schema migration。数据库
+本次数据转换在标准部署完成数据库备份和 Schema migration 后执行，采用停机
+方式，并要求先修复所有非 `ready` 的 proxy mapping。数据库
 连接通过部署环境中的 `BKN_DB_HOST`、`BKN_DB_PORT`、`BKN_DB_USER`、
 `BKN_DB_PASSWORD` 和 `BKN_DB_NAME` 提供；报告不会记录密码或完整授权 payload。
 
 ```bash
-./migrate.py dry-run --report ./reports/proxy-outbox-precheck.json
-./migrate.py stop --namespace openbkn --expected-context YOUR_CONTEXT
-# 执行常规数据库备份和 bkn-foundry 0.2.0 data migrator。
 ./migrate.py apply
-./migrate.py start --namespace openbkn --expected-context YOUR_CONTEXT
 ```
 
-`apply` 将 `published_generation` 初始化为 `sync_generation`，只为 `ready`
-网络复制 published snapshot 到 planned 表，并校验 Outbox 为空、两个快照一致。
-执行是幂等的，并自动把初始化及校验结果写入用户状态目录下带 UTC 时间戳的
+`apply` 是正常操作的无参数统一入口。它会依次执行数据库预检查、记录并停止
+`bkn-backend`、确认期望/实际/就绪副本数全部为 0、将
+`published_generation` 初始化为 `sync_generation`、只为 `ready` 网络复制
+published snapshot 到 planned 表、校验 Outbox 为空且两个快照一致、写入报告，
+最后恢复升级前记录的副本数。执行是幂等的，并自动把初始化及校验结果写入用户状态目录下带 UTC 时间戳的
 `~/.openbkn-ai/migrations/0.2.0/kn_proxy_outbox/proxy-outbox-apply-*.json`；
-已有报告不会被覆盖。连接数据库前，
-`apply` 会使用标准 namespace 和状态文件自动执行 `verify-stopped`，只有此前
-`stop` 操作仍然有效时才允许迁移，同时提前检查报告目录是否可写。如果事务
-提交后才发生极端的文件系统错误，命令会明确提示迁移已经完成、仅报告写入失败。
-任何校验失败时都不要启动新版 BKN。部署后
-启用固定 Worker 池，并先完成一次知识网络变更冒烟验证，再恢复正常流量。
+已有报告不会被覆盖。流程开始前会检查报告目录是否可写；BKN 停止后的任一步骤
+失败都会保持停服，排查后重新运行 `apply` 会从已记录的停服状态继续。停服失败
+会输出底层 Kubernetes 错误并在修改数据库前退出，同时保留原副本记录，修复环境
+后重新执行 `apply` 可以安全重试停服。如果事务提交后才发生极端的文件系统错误，
+命令会明确提示迁移已经完成，并仍然恢复 BKN。
+部署后先完成一次知识网络变更冒烟验证，再恢复正常流量。
 
-`stop` 会把 `bkn-backend` 当前副本数写入同时绑定 kubectl context 和 namespace
-的状态文件。`start` 只在原副本数全部 ready 后删除状态文件。数据库备份和
-Schema 执行继续复用部署与 data migrator 的标准流程。
+`dry-run`、`stop`、`verify-stopped`、`verify` 和 `start` 仅保留用于诊断与恢复。
+数据库备份和 Schema 执行继续复用标准部署与 data migrator 流程，本数据转换
+不会重复执行。
 
 定向测试：
 

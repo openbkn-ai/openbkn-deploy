@@ -38,6 +38,11 @@ class MigrationEntryTest(unittest.TestCase):
                 """#!/usr/bin/env bash
 if [[ $1 == config && $2 == current-context ]]; then
   echo test-context
+elif [[ \" $* \" == *\" scale deployment \"* ]]; then
+  if [[ -n ${FAKE_SCALE_FAILURE:-} ]]; then
+    echo \"simulated scale failure\" >&2
+    exit 1
+  fi
 elif [[ \" $* \" == *\" -o jsonpath=\"* ]]; then
   echo \"${FAKE_DEPLOYMENT_STATE}\"
 fi
@@ -76,9 +81,33 @@ fi
                 text=True,
                 env=environment,
             )
+            stop_command = [*command]
+            stop_command[1] = "stop"
+            environment["FAKE_DEPLOYMENT_STATE"] = "0 0 0"
+            original_state = state_file.read_text(encoding="utf-8")
+            retried_stop = subprocess.run(
+                stop_command,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            state_after_retry = state_file.read_text(encoding="utf-8")
+            environment["FAKE_SCALE_FAILURE"] = "1"
+            failed_stop = subprocess.run(
+                stop_command,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
         self.assertEqual(0, stopped.returncode, stopped.stderr)
         self.assertNotEqual(0, scaling_up.returncode)
         self.assertIn("desired=1", scaling_up.stderr)
+        self.assertEqual(0, retried_stop.returncode, retried_stop.stderr)
+        self.assertEqual(original_state, state_after_retry)
+        self.assertNotEqual(0, failed_stop.returncode)
+        self.assertIn("simulated scale failure", failed_stop.stderr)
 
     def test_apply_accepts_no_command_options(self):
         args = migrate.build_parser().parse_args(["apply"])
@@ -109,51 +138,152 @@ fi
         self.assertEqual("openbkn", args.namespace)
         self.assertEqual(migrate.DEFAULT_STATE_FILE, args.state_file)
 
+    def test_stop_and_start_use_the_recorded_standard_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = str(Path(directory) / "state.tsv")
+            with patch.object(migrate, "DEFAULT_STATE_FILE", state_file):
+                with patch.object(migrate, "control_services", return_value=0) as control:
+                    migrate.stop_bkn()
+                    migrate.start_bkn()
+        self.assertEqual("stop", control.call_args_list[0].args[0].command)
+        self.assertEqual("start", control.call_args_list[1].args[0].command)
+        self.assertEqual(state_file, control.call_args_list[0].args[0].state_file)
+        self.assertEqual(state_file, control.call_args_list[1].args[0].state_file)
+
+    def test_stop_retries_with_an_existing_state_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "state.tsv"
+            state_file.write_text("recorded state", encoding="utf-8")
+            with patch.object(migrate, "DEFAULT_STATE_FILE", str(state_file)):
+                with patch.object(migrate, "control_services", return_value=0) as control:
+                    migrate.stop_bkn()
+        self.assertEqual(1, control.call_count)
+        self.assertEqual("stop", control.call_args.args[0].command)
+        self.assertEqual(str(state_file), control.call_args.args[0].state_file)
+
+    def test_stop_failure_reports_an_actionable_error(self):
+        with patch.object(migrate, "control_services", return_value=1):
+            with self.assertRaisesRegex(
+                migrate.kn_proxy_outbox.MigrationError,
+                "fix the reported Kubernetes error and rerun apply",
+            ):
+                migrate.stop_bkn()
+
     def test_apply_main_uses_generated_report_path(self):
+        def run(command):
+            return {"command": command.command}
+
         with patch("sys.argv", ["migrate.py", "apply"]):
-            with patch.object(migrate, "run", return_value={"command": "apply"}):
+            with patch.object(migrate, "run", side_effect=run):
                 with patch.object(
                     migrate,
                     "default_report_path",
                     return_value="/tmp/proxy-outbox-apply-generated.json",
                 ):
                     with patch.object(migrate, "prepare_report_destination"):
-                        with patch.object(migrate, "verify_bkn_stopped") as stopped:
-                            with patch.object(migrate, "write_report") as write_report:
-                                self.assertEqual(0, migrate.main())
+                        with patch.object(migrate, "stop_bkn") as stop:
+                            with patch.object(migrate, "verify_bkn_stopped") as stopped:
+                                with patch.object(migrate, "start_bkn") as start:
+                                    with patch.object(
+                                        migrate, "write_report"
+                                    ) as write_report:
+                                        self.assertEqual(0, migrate.main())
+        stop.assert_called_once_with()
         stopped.assert_called_once_with()
+        start.assert_called_once_with()
         write_report.assert_called_once_with(
-            "/tmp/proxy-outbox-apply-generated.json", {"command": "apply"}
+            "/tmp/proxy-outbox-apply-generated.json",
+            {
+                "command": "apply",
+                "preflight": {"command": "dry-run"},
+            },
         )
 
-    def test_apply_refuses_to_run_when_bkn_is_not_stopped(self):
+    def test_apply_leaves_bkn_stopped_when_stopped_verification_fails(self):
+        commands = []
+
+        def run(command):
+            commands.append(command.command)
+            return {"command": command.command}
+
         with patch("sys.argv", ["migrate.py", "apply"]):
             with patch.object(migrate, "prepare_report_destination"):
-                with patch.object(
-                    migrate,
-                    "verify_bkn_stopped",
-                    side_effect=migrate.kn_proxy_outbox.MigrationError("not stopped"),
-                ):
-                    with patch.object(migrate, "run") as run:
-                        self.assertEqual(1, migrate.main())
-        run.assert_not_called()
+                with patch.object(migrate, "run", side_effect=run):
+                    with patch.object(migrate, "stop_bkn"):
+                        with patch.object(
+                            migrate,
+                            "verify_bkn_stopped",
+                            side_effect=migrate.kn_proxy_outbox.MigrationError(
+                                "not stopped"
+                            ),
+                        ):
+                            with patch.object(migrate, "start_bkn") as start:
+                                self.assertEqual(1, migrate.main())
+        self.assertEqual(["dry-run"], commands)
+        start.assert_not_called()
 
     def test_apply_report_failure_does_not_misreport_committed_migration(self):
+        def run(command):
+            return {"command": command.command}
+
         with patch("sys.argv", ["migrate.py", "apply"]):
             with patch.object(migrate, "default_report_path", return_value="report.json"):
                 with patch.object(migrate, "prepare_report_destination"):
-                    with patch.object(migrate, "verify_bkn_stopped"):
-                        with patch.object(
-                            migrate, "run", return_value={"command": "apply"}
-                        ):
-                            with patch.object(
-                                migrate,
-                                "write_report",
-                                side_effect=OSError("disk full"),
-                            ):
-                                with patch("builtins.print") as output:
-                                    self.assertEqual(0, migrate.main())
+                    with patch.object(migrate, "stop_bkn"):
+                        with patch.object(migrate, "verify_bkn_stopped"):
+                            with patch.object(migrate, "run", side_effect=run):
+                                with patch.object(
+                                    migrate,
+                                    "write_report",
+                                    side_effect=OSError("disk full"),
+                                ):
+                                    with patch.object(migrate, "start_bkn") as start:
+                                        with patch("builtins.print") as output:
+                                            self.assertEqual(0, migrate.main())
         self.assertIn("migration completed", output.call_args.args[0])
+        start.assert_called_once_with()
+
+    def test_apply_runs_the_full_workflow_in_order(self):
+        events = []
+
+        def run(command):
+            events.append(f"run:{command.command}")
+            return {"command": command.command}
+
+        with patch("sys.argv", ["migrate.py", "apply"]):
+            with patch.object(migrate, "default_report_path", return_value="report.json"):
+                with patch.object(migrate, "prepare_report_destination"):
+                    with patch.object(
+                        migrate, "stop_bkn", side_effect=lambda: events.append("stop")
+                    ):
+                        with patch.object(
+                            migrate,
+                            "verify_bkn_stopped",
+                            side_effect=lambda: events.append("verify-stopped"),
+                        ):
+                            with patch.object(migrate, "run", side_effect=run):
+                                with patch.object(
+                                    migrate,
+                                    "write_report",
+                                    side_effect=lambda *_: events.append("write-report"),
+                                ):
+                                    with patch.object(
+                                        migrate,
+                                        "start_bkn",
+                                        side_effect=lambda: events.append("start"),
+                                    ):
+                                        self.assertEqual(0, migrate.main())
+        self.assertEqual(
+            [
+                "run:dry-run",
+                "stop",
+                "verify-stopped",
+                "run:apply",
+                "write-report",
+                "start",
+            ],
+            events,
+        )
 
     def test_apply_runs_initialize_and_verify_before_commit(self):
         args = argparse.Namespace(command="apply")
