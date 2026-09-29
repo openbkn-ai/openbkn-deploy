@@ -71,21 +71,22 @@ kubectl_target() {
 }
 
 wait_for_replicas() {
-  local expected=$1 deadline status replicas ready
+  local expected=$1 deadline status desired replicas ready
   deadline=$(( $(date +%s) + timeout_seconds ))
   while true; do
-    status=$(kubectl_target get deployment "$WORKLOAD" -o jsonpath='{.status.replicas}{" "}{.status.readyReplicas}')
-    read -r replicas ready <<< "$status"
+    status=$(kubectl_target get deployment "$WORKLOAD" -o jsonpath='{.spec.replicas}{" "}{.status.replicas}{" "}{.status.readyReplicas}')
+    read -r desired replicas ready <<< "$status"
+    desired=${desired:-0}
     replicas=${replicas:-0}
     ready=${ready:-0}
-    if [[ $expected == 0 && $replicas == 0 && $ready == 0 ]]; then
+    if [[ $expected == 0 && $desired == 0 && $replicas == 0 && $ready == 0 ]]; then
       return 0
     fi
-    if [[ $expected != 0 && $ready == "$expected" ]]; then
+    if [[ $expected != 0 && $desired == "$expected" && $ready == "$expected" ]]; then
       return 0
     fi
     if (( $(date +%s) >= deadline )); then
-      echo "Deployment did not reach $expected ready replicas: $namespace/$WORKLOAD" >&2
+      echo "Deployment did not reach $expected desired/ready replicas: $namespace/$WORKLOAD (desired=$desired replicas=$replicas ready=$ready)" >&2
       return 1
     fi
     sleep 2
