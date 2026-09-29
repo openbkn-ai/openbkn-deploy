@@ -10,10 +10,21 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import kn_proxy_outbox
+
+
+DEFAULT_NAMESPACE = "openbkn"
+DEFAULT_STATE_FILE = "/tmp/openbkn-kn-proxy-outbox-workload.tsv"
+DEFAULT_TIMEOUT_SECONDS = 300
+DEFAULT_REPORT_DIRECTORY = (
+    Path.home() / ".openbkn-ai" / "migrations" / "0.2.0" / "kn_proxy_outbox"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,21 +35,15 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("dry-run", "verify"):
         command = commands.add_parser(name)
         command.add_argument("--report", required=True)
-    apply = commands.add_parser("apply")
-    apply.add_argument("--report", required=True)
-    apply.add_argument(
-        "--confirm-bkn-stopped",
-        action="store_true",
-        help="confirm BKN workloads are stopped and requests are drained",
-    )
+    commands.add_parser("apply")
     for name in ("stop", "verify-stopped", "start"):
         control = commands.add_parser(name)
-        control.add_argument("--namespace", default="openbkn")
+        control.add_argument("--namespace", default=DEFAULT_NAMESPACE)
         control.add_argument("--expected-context", default="")
+        control.add_argument("--state-file", default=DEFAULT_STATE_FILE)
         control.add_argument(
-            "--state-file", default="/tmp/openbkn-kn-proxy-outbox-workload.tsv"
+            "--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS
         )
-        control.add_argument("--timeout-seconds", type=int, default=300)
     return parser
 
 
@@ -58,6 +63,21 @@ def control_services(args: argparse.Namespace) -> int:
     return subprocess.run(command, check=False).returncode
 
 
+def verify_bkn_stopped() -> None:
+    """Verify the standard stopped-upgrade state without operator-supplied flags."""
+    args = argparse.Namespace(
+        command="verify-stopped",
+        namespace=DEFAULT_NAMESPACE,
+        expected_context="",
+        state_file=DEFAULT_STATE_FILE,
+        timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+    )
+    if control_services(args) != 0:
+        raise kn_proxy_outbox.MigrationError(
+            "BKN is not in the recorded stopped state; run the deployment stop step first"
+        )
+
+
 def write_report(path: str, report: dict[str, object]) -> None:
     target = Path(path).resolve()
     if target.exists():
@@ -66,11 +86,28 @@ def write_report(path: str, report: dict[str, object]) -> None:
     target.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def run(args: argparse.Namespace) -> dict[str, object]:
-    if args.command == "apply" and not args.confirm_bkn_stopped:
+def prepare_report_destination(path: str) -> None:
+    """Fail before database work when the report destination is not writable."""
+    target = Path(path).resolve()
+    if target.exists():
+        raise kn_proxy_outbox.MigrationError(f"refusing to overwrite report: {target}")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=target.parent):
+            pass
+    except OSError as exc:
         raise kn_proxy_outbox.MigrationError(
-            "apply requires --confirm-bkn-stopped after deployment workloads are stopped"
-        )
+            f"report directory is not writable: {target.parent}: {exc}"
+        ) from exc
+
+
+def default_report_path(command: str, now: Optional[datetime] = None) -> str:
+    moment = now or datetime.now(timezone.utc)
+    timestamp = moment.strftime("%Y%m%dT%H%M%S%fZ")
+    return str(DEFAULT_REPORT_DIRECTORY / f"proxy-outbox-{command}-{timestamp}.json")
+
+
+def run(args: argparse.Namespace) -> dict[str, object]:
     connection = kn_proxy_outbox.connect(kn_proxy_outbox.DBConfig.from_environment())
     try:
         with connection.cursor() as cursor:
@@ -99,11 +136,23 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.command in {"stop", "verify-stopped", "start"}:
         return control_services(args)
+    report_path = getattr(args, "report", "") or default_report_path(args.command)
     try:
+        prepare_report_destination(report_path)
+        if args.command == "apply":
+            verify_bkn_stopped()
         report = run(args)
-        write_report(args.report, report)
     except kn_proxy_outbox.MigrationError as exc:
         print(f"migration refused: {exc}")
+        return 1
+    try:
+        write_report(report_path, report)
+        print(f"migration report: {Path(report_path).resolve()}")
+    except (kn_proxy_outbox.MigrationError, OSError) as exc:
+        if args.command == "apply":
+            print(f"migration completed, but the report could not be written: {exc}")
+            return 0
+        print(f"migration report failed: {exc}")
         return 1
     return 0
 

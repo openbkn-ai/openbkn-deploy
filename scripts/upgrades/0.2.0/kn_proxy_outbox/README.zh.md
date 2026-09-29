@@ -15,14 +15,19 @@ Schema DDL 仍由 `bkn-foundry/migrations/bkn-backend/mariadb/0.2.0/` 维护，�
 ./migrate.py dry-run --report ./reports/proxy-outbox-precheck.json
 ./migrate.py stop --namespace openbkn --expected-context YOUR_CONTEXT
 # 执行常规数据库备份和 bkn-foundry 0.2.0 data migrator。
-./migrate.py apply --confirm-bkn-stopped --report ./reports/proxy-outbox-apply.json
-./migrate.py verify --report ./reports/proxy-outbox-verify.json
+./migrate.py apply
 ./migrate.py start --namespace openbkn --expected-context YOUR_CONTEXT
 ```
 
 `apply` 将 `published_generation` 初始化为 `sync_generation`，只为 `ready`
 网络复制 published snapshot 到 planned 表，并校验 Outbox 为空、两个快照一致。
-执行是幂等的，但不会覆盖已有报告。任何校验失败时都不要启动新版 BKN。部署后
+执行是幂等的，并自动把初始化及校验结果写入用户状态目录下带 UTC 时间戳的
+`~/.openbkn-ai/migrations/0.2.0/kn_proxy_outbox/proxy-outbox-apply-*.json`；
+已有报告不会被覆盖。连接数据库前，
+`apply` 会使用标准 namespace 和状态文件自动执行 `verify-stopped`，只有此前
+`stop` 操作仍然有效时才允许迁移，同时提前检查报告目录是否可写。如果事务
+提交后才发生极端的文件系统错误，命令会明确提示迁移已经完成、仅报告写入失败。
+任何校验失败时都不要启动新版 BKN。部署后
 启用固定 Worker 池，并先完成一次知识网络变更冒烟验证，再恢复正常流量。
 
 `stop` 会把 `bkn-backend` 当前副本数写入同时绑定 kubectl context 和 namespace

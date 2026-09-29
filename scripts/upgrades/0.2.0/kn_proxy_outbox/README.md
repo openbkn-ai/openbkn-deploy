@@ -17,17 +17,25 @@ and `BKN_DB_NAME`; reports never contain the password or authorization payloads.
 ./migrate.py dry-run --report ./reports/proxy-outbox-precheck.json
 ./migrate.py stop --namespace openbkn --expected-context YOUR_CONTEXT
 # Run the normal bkn-foundry 0.2.0 data migrator and database backup procedure.
-./migrate.py apply --confirm-bkn-stopped --report ./reports/proxy-outbox-apply.json
-./migrate.py verify --report ./reports/proxy-outbox-verify.json
+./migrate.py apply
 ./migrate.py start --namespace openbkn --expected-context YOUR_CONTEXT
 ```
 
 `apply` initializes `published_generation` from `sync_generation`, copies only
 ready networks' published snapshots into the planned table, and verifies that
-the Outbox is empty and both snapshots are identical. It is idempotent, but a
-report path is never overwritten. Do not start the new BKN version if any check
-fails. After deployment, enable the fixed worker pool and perform one network
-mutation smoke test before reopening normal traffic.
+the Outbox is empty and both snapshots are identical. It is idempotent and
+automatically writes the initialization and verification result to a UTC-stamped
+`~/.openbkn-ai/migrations/0.2.0/kn_proxy_outbox/proxy-outbox-apply-*.json`
+file without overwriting an existing report.
+Before opening the database, `apply` automatically runs `verify-stopped` with
+the standard namespace and state file; it refuses to migrate unless the earlier
+`stop` step is still in effect. The report destination is also checked before
+the transaction starts. If an exceptional filesystem failure occurs only after
+the transaction commits, the command explicitly reports that the migration
+completed and only the report write failed.
+Do not start the new BKN version if any check fails. After deployment, enable the
+fixed worker pool and perform one network mutation smoke test before reopening
+normal traffic.
 
 `stop` stores the existing `bkn-backend` replica count in a context- and
 namespace-bound state file. `start` restores that exact count and removes the
