@@ -38,6 +38,11 @@ class MigrationEntryTest(unittest.TestCase):
                 """#!/usr/bin/env bash
 if [[ $1 == config && $2 == current-context ]]; then
   echo test-context
+elif [[ \" $* \" == *\" scale deployment \"* ]]; then
+  if [[ -n ${FAKE_SCALE_FAILURE:-} ]]; then
+    echo \"simulated scale failure\" >&2
+    exit 1
+  fi
 elif [[ \" $* \" == *\" -o jsonpath=\"* ]]; then
   echo \"${FAKE_DEPLOYMENT_STATE}\"
 fi
@@ -76,9 +81,33 @@ fi
                 text=True,
                 env=environment,
             )
+            stop_command = [*command]
+            stop_command[1] = "stop"
+            environment["FAKE_DEPLOYMENT_STATE"] = "0 0 0"
+            original_state = state_file.read_text(encoding="utf-8")
+            retried_stop = subprocess.run(
+                stop_command,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            state_after_retry = state_file.read_text(encoding="utf-8")
+            environment["FAKE_SCALE_FAILURE"] = "1"
+            failed_stop = subprocess.run(
+                stop_command,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
         self.assertEqual(0, stopped.returncode, stopped.stderr)
         self.assertNotEqual(0, scaling_up.returncode)
         self.assertIn("desired=1", scaling_up.stderr)
+        self.assertEqual(0, retried_stop.returncode, retried_stop.stderr)
+        self.assertEqual(original_state, state_after_retry)
+        self.assertNotEqual(0, failed_stop.returncode)
+        self.assertIn("simulated scale failure", failed_stop.stderr)
 
     def test_apply_accepts_no_command_options(self):
         args = migrate.build_parser().parse_args(["apply"])
@@ -121,14 +150,24 @@ fi
         self.assertEqual(state_file, control.call_args_list[0].args[0].state_file)
         self.assertEqual(state_file, control.call_args_list[1].args[0].state_file)
 
-    def test_stop_reuses_an_existing_state_file_without_overwriting_it(self):
+    def test_stop_retries_with_an_existing_state_file(self):
         with tempfile.TemporaryDirectory() as directory:
             state_file = Path(directory) / "state.tsv"
             state_file.write_text("recorded state", encoding="utf-8")
             with patch.object(migrate, "DEFAULT_STATE_FILE", str(state_file)):
-                with patch.object(migrate, "control_services") as control:
+                with patch.object(migrate, "control_services", return_value=0) as control:
                     migrate.stop_bkn()
-        control.assert_not_called()
+        self.assertEqual(1, control.call_count)
+        self.assertEqual("stop", control.call_args.args[0].command)
+        self.assertEqual(str(state_file), control.call_args.args[0].state_file)
+
+    def test_stop_failure_reports_an_actionable_error(self):
+        with patch.object(migrate, "control_services", return_value=1):
+            with self.assertRaisesRegex(
+                migrate.kn_proxy_outbox.MigrationError,
+                "fix the reported Kubernetes error and rerun apply",
+            ):
+                migrate.stop_bkn()
 
     def test_apply_main_uses_generated_report_path(self):
         def run(command):

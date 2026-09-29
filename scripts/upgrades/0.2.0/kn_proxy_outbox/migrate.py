@@ -83,10 +83,10 @@ def verify_bkn_stopped() -> None:
 
 def stop_bkn() -> None:
     """Stop BKN or resume from an already recorded stopped state."""
-    if Path(DEFAULT_STATE_FILE).exists():
-        return
     if control_services(standard_control_args("stop")) != 0:
-        raise kn_proxy_outbox.MigrationError("failed to stop BKN workloads")
+        raise kn_proxy_outbox.MigrationError(
+            "failed to stop BKN workloads; fix the reported Kubernetes error and rerun apply"
+        )
 
 
 def start_bkn() -> None:

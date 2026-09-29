@@ -107,13 +107,17 @@ read_state() {
 kubectl_target get deployment "$WORKLOAD" >/dev/null
 case "$action" in
   stop)
-    [[ ! -e $state_file ]] || { echo "state file already exists: $state_file" >&2; exit 1; }
-    replicas=$(kubectl_target get deployment "$WORKLOAD" -o jsonpath='{.spec.replicas}')
-    replicas=${replicas:-1}
-    [[ $replicas =~ ^[0-9]+$ ]] || { echo "invalid replica count: $replicas" >&2; exit 1; }
-    temporary_state=$(mktemp "${state_file}.tmp.XXXXXX")
-    printf '%s\t%s\t%s\t%s\t%s\n' "$STATE_FORMAT" "$namespace" "$expected_context" "$WORKLOAD" "$replicas" > "$temporary_state"
-    mv -- "$temporary_state" "$state_file"
+    if [[ -e $state_file ]]; then
+      read_state
+      replicas=$saved_replicas
+    else
+      replicas=$(kubectl_target get deployment "$WORKLOAD" -o jsonpath='{.spec.replicas}')
+      replicas=${replicas:-1}
+      [[ $replicas =~ ^[0-9]+$ ]] || { echo "invalid replica count: $replicas" >&2; exit 1; }
+      temporary_state=$(mktemp "${state_file}.tmp.XXXXXX")
+      printf '%s\t%s\t%s\t%s\t%s\n' "$STATE_FORMAT" "$namespace" "$expected_context" "$WORKLOAD" "$replicas" > "$temporary_state"
+      mv -- "$temporary_state" "$state_file"
+    fi
     kubectl_target scale deployment "$WORKLOAD" --replicas=0 >/dev/null
     wait_for_replicas 0
     ;;

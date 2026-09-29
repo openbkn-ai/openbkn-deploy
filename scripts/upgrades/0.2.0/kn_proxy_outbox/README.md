@@ -29,10 +29,13 @@ automatically writes the initialization and verification result to a UTC-stamped
 file without overwriting an existing report.
 The report destination is checked before the workflow starts. If any step fails
 after BKN is stopped, BKN remains stopped for investigation; rerunning `apply`
-resumes from that recorded stopped state. If an exceptional filesystem failure
-occurs only after the transaction commits, the command explicitly reports that
-the migration completed and still restores BKN. After deployment, perform one
-network mutation smoke test before reopening normal traffic.
+resumes from that recorded stopped state. A stop failure prints the underlying
+Kubernetes error, exits before database changes, and preserves the original
+replica record so `apply` can retry the stop safely. If an exceptional
+filesystem failure occurs only after the transaction commits, the command
+explicitly reports that the migration completed and still restores BKN. After
+deployment, perform one network mutation smoke test before reopening normal
+traffic.
 
 `dry-run`, `stop`, `verify-stopped`, `verify`, and `start` remain available only
 for diagnosis and recovery. Database backup and Schema execution stay in the
