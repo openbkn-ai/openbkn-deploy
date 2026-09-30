@@ -57,6 +57,7 @@ usage() {
     echo "  data-services install         Install MariaDB, Redis, Kafka, OpenSearch (cluster must exist)"
     echo "  data-services uninstall       Uninstall those bundles (ingress only if AUTO_INSTALL_INGRESS_NGINX=true)"
     echo "  opensearch install            Install single-node OpenSearch"
+    echo "  opensearch set-memory <size> Set JVM heap; request is calculated automatically (1Gi|2Gi|4Gi|8Gi|16Gi)"
     echo "  opensearch uninstall          Uninstall OpenSearch (optionally purge PVC)"
     echo "  ingress-nginx install         Install ingress-nginx-controller"
     echo "  ingress-nginx uninstall       Uninstall ingress-nginx-controller"
@@ -88,6 +89,7 @@ usage() {
     echo "  $0 data-services uninstall                        # Tear down bundled data-layer charts"
     echo "  $0 data-services uninstall --delete-data           # Same; also purge MariaDB PVC (data loss!)"
     echo "  $0 opensearch install         # Install OpenSearch"
+    echo "  $0 opensearch set-memory 2Gi # Set heap=2g, request=4Gi, direct=512m (restarts OpenSearch)"
     echo "  $0 opensearch uninstall       # Uninstall OpenSearch"
     echo "  OPENSEARCH_PURGE_PVC=true $0 opensearch uninstall  # Uninstall OpenSearch and delete PVC (data loss!)"
     echo "  $0 ingress-nginx install      # Install ingress-nginx-controller"
@@ -735,6 +737,10 @@ main() {
             install|init)
                 require_root_for_helm_cluster_addons_only
                 install_opensearch
+                ;;
+            set-memory)
+                require_root_for_helm_cluster_addons_only
+                set_opensearch_memory "$@"
                 ;;
             uninstall)
                 require_root_for_helm_cluster_addons_only
