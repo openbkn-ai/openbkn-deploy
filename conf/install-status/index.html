@@ -681,12 +681,19 @@
       var time = Date.parse(value || "");
       return time ? new Date(time).toLocaleString() : t("未提供", "Not available");
     }
-    function containerDiagnosticText(container, prefix) {
+    function containerDiagnosticText(container, prefix, image) {
       var text = prefix + container.name + t("：", ": ") + statusLabel(container.reason || container.state || "unknown") + t(" · 重启 ", " · restarts ") + (container.restartCount || 0);
+      if (image) text += t(" · 镜像 ", " · image ") + image;
       if (container.exitCode != null) text += t(" · 退出码 ", " · exit code ") + container.exitCode;
       if (container.startedAt) text += t(" · 启动 ", " · started ") + displayTime(container.startedAt);
       if (container.lastTermination) text += t(" · 上次终止 ", " · previous termination ") + statusLabel(container.lastTermination.reason) + t("（退出码 ", " (exit code ") + container.lastTermination.exitCode + "）";
       return text;
+    }
+    function podContainerImage(pod, name, init) {
+      var spec = pod.spec || {};
+      var containers = init ? (spec.initContainers || []) : (spec.containers || []);
+      var match = containers.find(function (container) { return container.name === name; });
+      return match && match.image || "";
     }
     function appendPodDiagnostics(parent, pod) {
       var status = pod.status || {}, metadata = pod.metadata || {};
@@ -705,7 +712,7 @@
         : t("Pod Conditions：未提供", "Pod Conditions: not available")));
       var init = status.initContainerStatuses || [];
       if (init.length) init.forEach(function (container) {
-        var initItem = el("li", null, containerDiagnosticText(container, "Init Container/"));
+        var initItem = el("li", null, containerDiagnosticText(container, "Init Container/", podContainerImage(pod, container.name, true)));
         var initLog = el("button", null, container.name + t(" · 查看日志", " · View logs"));
         initLog.type = "button";
         initLog.title = t("打开 Init Container 最近日志；如曾重启，可在弹窗中查看上一次实例日志", "Open recent Init Container logs; previous-instance logs are available after a restart");
@@ -716,7 +723,7 @@
       else list.appendChild(el("li", null, t("Init Container：无", "Init Containers: none")));
       var containers = status.containerStatuses || [];
       if (containers.length) containers.forEach(function (container) {
-        list.appendChild(el("li", null, containerDiagnosticText(container, "Container/")));
+        list.appendChild(el("li", null, containerDiagnosticText(container, "Container/", podContainerImage(pod, container.name, false))));
       });
       var events = lastEvents.filter(function (event) { return event.objectKind === "Pod" && event.objectName === podName; });
       if (events.length) events.forEach(function (event) {

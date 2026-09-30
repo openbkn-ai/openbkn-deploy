@@ -34,6 +34,10 @@ def container_status:
 
 {items: [(.items // [])[] | {
   metadata: {name: (.metadata.name // ""), createdAt: (.metadata.creationTimestamp // null)},
+  spec: {
+    containers: [(.spec.containers // [])[] | {name: (.name // ""), image: (.image // "")}],
+    initContainers: [(.spec.initContainers // [])[] | {name: (.name // ""), image: (.image // "")}]
+  },
   status: {
     phase: (.status.phase // "Unknown"),
     startTime: (.status.startTime // null),

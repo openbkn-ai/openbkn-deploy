@@ -42,6 +42,7 @@ const fetch = async (url, options = {}) => {
   if (String(url).includes('/logs?')) return {ok: true, status: 200, text: async () => 'safe test log line\n'};
   const data = url.includes('pods.json') ? {items: [{
     metadata: {name: 'api-abc'},
+    spec: {containers: [{name: 'server', image: 'registry.example.test/api:1.2.3'}], initContainers: [{name: 'setup', image: 'registry.example.test/setup:1.2.3'}]},
     status: {phase: 'Running', startTime: '2026-09-27T08:01:00Z', conditions: [
       {type: 'PodScheduled', status: 'True', reason: ''},
       {type: 'Ready', status: 'False', reason: 'ContainersNotReady'}
@@ -96,8 +97,8 @@ setImmediate(async () => {
   const diagnostics = row.children[4].children.find(child => child.tag === 'details');
   assert.ok(diagnostics, 'pod row includes an expandable sanitized describe summary');
   assert.match(diagnostics.textContent, /Pod Conditions：.*Ready=False.*ContainersNotReady/);
-  assert.match(diagnostics.textContent, /Init Container\/setup.*重启 1/);
-  assert.match(diagnostics.textContent, /Container\/server.*反复崩溃/);
+  assert.match(diagnostics.textContent, /Init Container\/setup.*重启 1.*镜像.*registry\.example\.test\/setup:1\.2\.3/);
+  assert.match(diagnostics.textContent, /Container\/server.*反复崩溃.*镜像.*registry\.example\.test\/api:1\.2\.3/);
   assert.match(diagnostics.textContent, /Warning Event：BackOff/);
   const initItem = diagnostics.children[1].children.find(child => child.textContent.includes('Init Container/setup'));
   assert.ok(initItem.children.some(child => child.tag === 'button' && child.textContent.includes('查看日志')), 'init container can open its logs');
