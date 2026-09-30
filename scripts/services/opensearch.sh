@@ -11,6 +11,120 @@ _opensearch_resolve_image_defaults() {
     fi
 }
 
+_opensearch_memory_profile_for_allocatable_mib() {
+    local allocatable_mib="$1"
+    [[ "${allocatable_mib}" =~ ^[0-9]+$ ]] || return 1
+
+    if (( allocatable_mib <= 8192 )); then
+        OPENSEARCH_MEMORY_REQUEST="512Mi"
+        OPENSEARCH_JAVA_OPTS="-Xms512m -Xmx512m -XX:MaxDirectMemorySize=128m"
+    elif (( allocatable_mib <= 16384 )); then
+        OPENSEARCH_MEMORY_REQUEST="2Gi"
+        OPENSEARCH_JAVA_OPTS="-Xms1g -Xmx1g -XX:MaxDirectMemorySize=256m"
+    elif (( allocatable_mib <= 32768 )); then
+        OPENSEARCH_MEMORY_REQUEST="4Gi"
+        OPENSEARCH_JAVA_OPTS="-Xms2g -Xmx2g -XX:MaxDirectMemorySize=512m"
+    else
+        OPENSEARCH_MEMORY_REQUEST="8Gi"
+        OPENSEARCH_JAVA_OPTS="-Xms4g -Xmx4g -XX:MaxDirectMemorySize=512m"
+    fi
+}
+
+# On a fresh install, use the smallest schedulable node's allocatable memory.
+# Explicit request/JVM overrides keep their previous independent semantics.
+_opensearch_apply_fresh_install_memory_defaults() {
+    if [[ -n "${OPENSEARCH_MEMORY_REQUEST}" || -n "${OPENSEARCH_JAVA_OPTS}" ]]; then
+        : "${OPENSEARCH_MEMORY_REQUEST:=512Mi}"
+        : "${OPENSEARCH_JAVA_OPTS:=-Xms512m -Xmx512m -XX:MaxDirectMemorySize=128m}"
+        log_info "Using explicit OpenSearch memory settings: request=${OPENSEARCH_MEMORY_REQUEST}; JVM=${OPENSEARCH_JAVA_OPTS}."
+        return 0
+    fi
+
+    local node_memory allocatable allocatable_mib min_allocatable_mib="" unschedulable quantity
+    node_memory="$(kubectl get nodes -o jsonpath='{range .items[*]}{.spec.unschedulable}{"|"}{.status.allocatable.memory}{"\n"}{end}' 2>/dev/null || true)"
+    while IFS='|' read -r unschedulable allocatable; do
+        [[ -z "${allocatable}" || "${unschedulable}" == "true" ]] && continue
+        case "${allocatable}" in
+            *Ki) quantity="${allocatable%Ki}"; [[ "${quantity}" =~ ^[0-9]+$ ]] || continue; allocatable_mib=$(( quantity / 1024 )) ;;
+            *Mi) quantity="${allocatable%Mi}"; [[ "${quantity}" =~ ^[0-9]+$ ]] || continue; allocatable_mib=${quantity} ;;
+            *Gi) quantity="${allocatable%Gi}"; [[ "${quantity}" =~ ^[0-9]+$ ]] || continue; allocatable_mib=$(( quantity * 1024 )) ;;
+            *) continue ;;
+        esac
+        if [[ -z "${min_allocatable_mib}" ]] || (( allocatable_mib < min_allocatable_mib )); then
+            min_allocatable_mib="${allocatable_mib}"
+        fi
+    done <<< "${node_memory}"
+
+    if [[ -z "${min_allocatable_mib}" ]]; then
+        min_allocatable_mib=0
+        log_warn "Could not determine schedulable node allocatable memory; using OpenSearch compatibility profile."
+    fi
+    _opensearch_memory_profile_for_allocatable_mib "${min_allocatable_mib}"
+    log_info "OpenSearch memory profile: node allocatable=${min_allocatable_mib}Mi, request=${OPENSEARCH_MEMORY_REQUEST}, JVM=${OPENSEARCH_JAVA_OPTS}."
+}
+
+_opensearch_memory_settings_for_heap() {
+    local heap_size="$1" heap request direct_memory
+    case "${heap_size}" in
+        1Gi)  heap="1g";  request="2Gi";  direct_memory="256m" ;;
+        2Gi)  heap="2g";  request="4Gi";  direct_memory="512m" ;;
+        4Gi)  heap="4g";  request="8Gi";  direct_memory="512m" ;;
+        8Gi)  heap="8g";  request="16Gi"; direct_memory="512m" ;;
+        16Gi) heap="16g"; request="32Gi"; direct_memory="512m" ;;
+        *) return 1 ;;
+    esac
+    OPENSEARCH_MEMORY_REQUEST="${request}"
+    OPENSEARCH_JAVA_OPTS="-Xms${heap} -Xmx${heap} -XX:MaxDirectMemorySize=${direct_memory}"
+}
+
+set_opensearch_memory() {
+    if [[ "$#" -ne 1 ]] || ! _opensearch_memory_settings_for_heap "${1:-}"; then
+        log_error "Usage: deploy.sh opensearch set-memory <1Gi|2Gi|4Gi|8Gi|16Gi>"
+        log_error "Supported values: 1Gi, 2Gi, 4Gi, 8Gi, 16Gi"
+        return 2
+    fi
+    if ! is_helm_installed "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}"; then
+        log_error "OpenSearch release ${OPENSEARCH_RELEASE_NAME} is not deployed in namespace ${OPENSEARCH_NAMESPACE}."
+        return 1
+    fi
+
+    local chart_ref="opensearch/opensearch" use_local_chart="false"
+    if [[ -f "${OPENSEARCH_CHART_TGZ}" ]]; then
+        chart_ref="${OPENSEARCH_CHART_TGZ}"
+        use_local_chart="true"
+    elif [[ "${OFFLINE_MODE}" == "true" ]]; then
+        log_error "Offline mode requires local OpenSearch chart: ${OPENSEARCH_CHART_TGZ}"
+        return 1
+    else
+        helm repo add --force-update opensearch "${HELM_REPO_OPENSEARCH}"
+        helm repo update
+    fi
+
+    local -a helm_args=(
+        upgrade "${OPENSEARCH_RELEASE_NAME}" "${chart_ref}"
+        --namespace "${OPENSEARCH_NAMESPACE}"
+        --reset-values
+        --set-string "opensearchJavaOpts=${OPENSEARCH_JAVA_OPTS}"
+        --set "resources.requests.memory=${OPENSEARCH_MEMORY_REQUEST}"
+        --wait --timeout=900s
+    )
+    [[ "${OPENSEARCH_HELM_ATOMIC}" == "true" ]] && helm_args+=(--atomic)
+    [[ "${use_local_chart}" == "true" ]] || helm_args+=(--version "${OPENSEARCH_CHART_VERSION}")
+
+    log_warn "Updating OpenSearch memory (heap=${1}, request=${OPENSEARCH_MEMORY_REQUEST}); the single-node service will restart."
+    if ! bkn_helm_upgrade_without_resource_limits "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}" "${helm_args[@]}"; then
+        log_error "OpenSearch memory update failed."
+        return 1
+    fi
+
+    local statefulset_name="${OPENSEARCH_CLUSTER_NAME}-${OPENSEARCH_NODE_GROUP}"
+    if ! kubectl rollout status statefulset "${statefulset_name}" -n "${OPENSEARCH_NAMESPACE}" --timeout=900s; then
+        log_error "OpenSearch memory update did not become ready within 900s."
+        return 1
+    fi
+    log_info "OpenSearch memory updated: heap=${1}, request=${OPENSEARCH_MEMORY_REQUEST}, JVM=${OPENSEARCH_JAVA_OPTS}, limit unset."
+}
+
 # Upgrade only the stock OpenSearch 2.19.4 image installed before the platform
 # image became the default. Other image tags are intentionally left alone: they
 # may be user-pinned builds and must not be overwritten by a regular install.
@@ -95,15 +209,27 @@ install_opensearch() {
     if is_helm_installed "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}"; then
         local limit_status
         if bkn_helm_release_has_resource_limits "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}"; then
-            log_info "OpenSearch has resource limits. Reconciling chart values to remove them."
+            log_info "OpenSearch has resource limits. Reconciling limits while retaining its existing memory request and JVM settings."
+            local existing_values
+            if ! existing_values="$(helm get values "${OPENSEARCH_RELEASE_NAME}" --namespace "${OPENSEARCH_NAMESPACE}" --all -o json)"; then
+                log_error "Could not read existing OpenSearch values; skipping upgrade."
+                return 1
+            fi
+            if ! OPENSEARCH_JAVA_OPTS="$(jq -er '.opensearchJavaOpts | strings | select(length > 0)' <<< "${existing_values}")" \
+                || ! OPENSEARCH_MEMORY_REQUEST="$(jq -er '.resources.requests.memory | strings | select(length > 0)' <<< "${existing_values}")"; then
+                log_error "Could not determine existing OpenSearch request and JVM settings; skipping upgrade."
+                return 1
+            fi
         else
             limit_status=$?
             if [[ "${limit_status}" == "1" ]]; then
                 log_info "OpenSearch is already installed without resource limits. Skipping upgrade."
+                log_info "Existing OpenSearch memory settings retained. To adjust them, run: deploy.sh opensearch set-memory <1Gi|2Gi|4Gi|8Gi|16Gi>"
                 return 0
+            else
+                log_error "Could not inspect OpenSearch Helm manifest for resource limits; skipping upgrade."
+                return 1
             fi
-            log_error "Could not inspect OpenSearch Helm manifest for resource limits; skipping upgrade."
-            return 1
         fi
         fresh_install="false"
     fi
@@ -125,6 +251,9 @@ install_opensearch() {
 
     kubectl create namespace "${OPENSEARCH_NAMESPACE}" 2>/dev/null || true
 
+    if [[ "${fresh_install}" == "true" ]]; then
+        _opensearch_apply_fresh_install_memory_defaults
+    fi
     _opensearch_resolve_image_defaults
 
     local persistence_enabled="${OPENSEARCH_PERSISTENCE_ENABLED}"
@@ -282,6 +411,9 @@ EOF
     if [[ "${fresh_install}" == "true" && "${AUTO_GENERATE_CONFIG}" == "true" ]]; then
         log_info "Updating conf/config.yaml after OpenSearch fresh install..."
         generate_config_yaml
+    fi
+    if [[ "${fresh_install}" != "true" ]]; then
+        log_info "Existing OpenSearch memory settings retained. To adjust them, run: deploy.sh opensearch set-memory <1Gi|2Gi|4Gi|8Gi|16Gi>"
     fi
 }
 

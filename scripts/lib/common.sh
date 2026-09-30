@@ -1436,8 +1436,7 @@ bkn_apply_k3s_lightweight_defaults() {
     : "${REDIS_MAXMEMORY:=1gb}"
     : "${REDIS_MEMORY_REQUEST:=256Mi}"
     : "${REDIS_CPU_REQUEST:=50m}"
-    # opensearch (request only; limits are intentionally disabled)
-    : "${OPENSEARCH_MEMORY_REQUEST:=512Mi}"
+    # OpenSearch chooses a memory profile from node allocatable memory on new installs.
     # bkn-foundry app services (chart defaults: limits=4-8Gi, mostly request=0)
     # Loose ceiling so heavier services (agent-retrieval, ontology-query) still have headroom.
     : "${OPENBKN_CORE_REQ_CPU:=100m}"
@@ -1507,8 +1506,8 @@ OPENSEARCH_IMAGE_TAG="${OPENSEARCH_IMAGE_TAG:-2.19.4-main.20260818163046.shaaeb5
 OPENSEARCH_INIT_IMAGE="${OPENSEARCH_INIT_IMAGE:-}"
 OPENSEARCH_INIT_IMAGE_REPOSITORY="${OPENSEARCH_INIT_IMAGE_REPOSITORY:-busybox}"
 OPENSEARCH_INIT_IMAGE_TAG="${OPENSEARCH_INIT_IMAGE_TAG:-1.36.1}"
-OPENSEARCH_JAVA_OPTS="${OPENSEARCH_JAVA_OPTS:--Xms512m -Xmx512m -XX:MaxDirectMemorySize=128m}"
-OPENSEARCH_MEMORY_REQUEST="${OPENSEARCH_MEMORY_REQUEST:-512Mi}"
+OPENSEARCH_JAVA_OPTS="${OPENSEARCH_JAVA_OPTS:-}"
+OPENSEARCH_MEMORY_REQUEST="${OPENSEARCH_MEMORY_REQUEST:-}"
 OPENSEARCH_PROTOCOL="${OPENSEARCH_PROTOCOL:-http}" # http (default) or https (requires enabling security)
 OPENSEARCH_DISABLE_SECURITY="${OPENSEARCH_DISABLE_SECURITY:-}"
 OPENSEARCH_SINGLE_NODE="${OPENSEARCH_SINGLE_NODE:-true}"

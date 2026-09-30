@@ -41,9 +41,8 @@ mac_common_init() {
     export REDIS_CPU_REQUEST="${REDIS_CPU_REQUEST:-50m}"
     # mariadb (chart default lim 375m/384Mi is too tight for example imports / migrations)
     export MARIADB_MEMORY_LIMIT="${MARIADB_MEMORY_LIMIT:-768Mi}"
-    # opensearch (k8s default: req=512Mi, lim=2048Mi)
-    export OPENSEARCH_MEMORY_REQUEST="${OPENSEARCH_MEMORY_REQUEST:-512Mi}"
-    export OPENSEARCH_MEMORY_LIMIT="${OPENSEARCH_MEMORY_LIMIT:-1024Mi}"
+    # OpenSearch selects a fresh-install profile from the kind node's
+    # allocatable memory; explicit operator settings still take precedence.
     # bkn-foundry app services (chart defaults: limits=4-8Gi, mostly request=0).
     # Tiny request keeps QoS=Burstable (not BestEffort) without hogging scheduling budget;
     # generous 2Gi limit so heavier services (agent-retrieval, ontology-query) don't OOM
