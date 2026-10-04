@@ -215,11 +215,13 @@ install_opensearch() {
                 log_error "Could not read existing OpenSearch values; skipping upgrade."
                 return 1
             fi
-            if ! OPENSEARCH_JAVA_OPTS="$(jq -er '.opensearchJavaOpts | strings | select(length > 0)' <<< "${existing_values}")" \
-                || ! OPENSEARCH_MEMORY_REQUEST="$(jq -er '.resources.requests.memory | strings | select(length > 0)' <<< "${existing_values}")"; then
+            local existing_settings
+            if ! existing_settings="$(printf '%s' "${existing_values}" | python3 "${HELM_JSON_HELPER}" opensearch-settings)"; then
                 log_error "Could not determine existing OpenSearch request and JVM settings; skipping upgrade."
                 return 1
             fi
+            OPENSEARCH_JAVA_OPTS="${existing_settings%%$'\n'*}"
+            OPENSEARCH_MEMORY_REQUEST="${existing_settings#*$'\n'}"
         else
             limit_status=$?
             if [[ "${limit_status}" == "1" ]]; then
