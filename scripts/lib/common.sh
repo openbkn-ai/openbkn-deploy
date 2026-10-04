@@ -15,6 +15,7 @@
 # =============================================================================
 # Script directory (used for local chart paths)
 SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+HELM_JSON_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/helm_json.py"
 
 # Local config/manifest directory (vendored files to avoid runtime fetching)
 CONF_DIR="${CONF_DIR:-${SCRIPT_DIR}/conf}"
@@ -114,20 +115,9 @@ bkn_helm_release_has_resource_limits() {
         return 2
     fi
     [[ -n "${resources_json}" ]] || return 2
-    if ! has_limits="$(jq -sr '
-        [ .[]
-          | if .kind == "CronJob" then .spec.jobTemplate.spec.template.spec
-            elif (.kind == "Deployment" or .kind == "StatefulSet" or
-                  .kind == "DaemonSet" or .kind == "Job" or
-                  .kind == "ReplicaSet" or .kind == "ReplicationController")
-              then .spec.template.spec
-            elif .kind == "Pod" then .spec
-            else empty end
-          | (.containers[]?, .initContainers[]?, .ephemeralContainers[]?)
-          | .resources.limits // {}
-          | select(type == "object" and length > 0)
-        ] | length > 0
-    ' <<<"${resources_json}")"; then
+    # Python 3 is already required by the deployment's install-status tooling.
+    # Use its standard JSON library here so normal upgrades do not require jq.
+    if ! has_limits="$(printf '%s' "${resources_json}" | python3 "${HELM_JSON_HELPER}" has-resource-limits)"; then
         return 2
     fi
     [[ "${has_limits}" == "true" ]]
@@ -140,8 +130,8 @@ bkn_export_helm_values_without_limits() {
     local namespace="$2"
     local output_file="$3"
 
-    if ! command -v jq >/dev/null 2>&1; then
-        log_error "jq is required to remove persisted Helm resource limits."
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_error "python3 is required to remove persisted Helm resource limits."
         return 1
     fi
 
@@ -155,10 +145,7 @@ bkn_export_helm_values_without_limits() {
         return 1
     fi
     if ! printf '%s\n' "${values_json}" \
-        | jq -e 'if type == "object" then
-            delpaths([paths | select(.[-1] == "limits" and
-                (.[-2] == "resources" or .[-2] == "initResources" or .[-2] == "sidecarResources"))])
-          else error("Helm values must be a JSON object") end' >"${output_file}"; then
+        | python3 "${HELM_JSON_HELPER}" sanitize-values >"${output_file}"; then
         log_error "Could not export sanitized Helm values for ${release} in ${namespace}."
         return 1
     fi

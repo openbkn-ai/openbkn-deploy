@@ -131,7 +131,7 @@ done
         while [[ $# -gt 0 ]]; do
             if [[ "$1" == -f ]]; then
                 TEST_HELM_VALUES_FILE="$2"
-                jq -e '(.resources | has("limits") | not) and .resources.requests.cpu == "100m" and .app.limits.retries == 3' "${TEST_HELM_VALUES_FILE}" >/dev/null || fail 'resource-only limit removal changed other values'
+                python3 -c 'import json, sys; values = json.load(open(sys.argv[1])); assert "limits" not in values["resources"]; assert values["resources"]["requests"]["cpu"] == "100m"; assert values["app"]["limits"]["retries"] == 3' "${TEST_HELM_VALUES_FILE}" || fail 'resource-only limit removal changed other values'
                 shift 2
             else
                 shift

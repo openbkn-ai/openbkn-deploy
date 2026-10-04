@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/opensearch.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${SCRIPT_DIR}/scripts/lib/common.sh"
+source "${SCRIPT_DIR}/scripts/services/opensearch.sh"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 log_info() { :; }
@@ -13,7 +14,7 @@ OPENSEARCH_RELEASE_NAME=opensearch
 OPENSEARCH_NAMESPACE=resource
 OPENSEARCH_CLUSTER_NAME=opensearch-cluster
 OPENSEARCH_NODE_GROUP=master
-OPENSEARCH_CHART_TGZ="${SCRIPT_DIR}/../../charts/opensearch-2.36.0.tgz"
+OPENSEARCH_CHART_TGZ="${SCRIPT_DIR}/charts/opensearch-2.36.0.tgz"
 OPENSEARCH_CHART_VERSION=2.36.0
 OPENSEARCH_HELM_ATOMIC=false
 OFFLINE_MODE=false
@@ -118,7 +119,7 @@ install_opensearch
 # upgrade itself is intercepted, but its temporary values file is rendered
 # with the vendored chart and parsed client-side, so this verifies the final
 # StatefulSet contains no container resource limits.
-source "${SCRIPT_DIR}/../lib/common.sh"
+source "${SCRIPT_DIR}/scripts/lib/common.sh"
 SANITIZED_VALUES_RENDERED=false
 TEST_VALUES='{"resources":{"requests":{"memory":"2Gi"},"limits":{"memory":"3Gi"}},"initResources":{"limits":{"memory":"1Gi"}},"sidecarResources":{"limits":{"memory":"1Gi"}},"custom":{"keep":true}}'
 is_helm_installed() { return 0; }
@@ -147,20 +148,12 @@ helm() {
         esac
     done
     [[ -n "${values_file}" && -f "${values_file}" ]] || fail "sanitized Helm values file is missing"
-    jq -e '
-        (.resources | has("limits") | not)
-        and (.initResources | has("limits") | not)
-        and (.sidecarResources | has("limits") | not)
-        and .custom.keep == true
-    ' "${values_file}" >/dev/null || fail "sanitized values must remove only resource limits"
+    python3 -c 'import json, sys; values = json.load(open(sys.argv[1])); assert "limits" not in values["resources"]; assert "limits" not in values["initResources"]; assert "limits" not in values["sidecarResources"]; assert values["custom"]["keep"] is True' "${values_file}" || fail "sanitized values must remove only resource limits"
 
     command helm template opensearch "${OPENSEARCH_CHART_TGZ}" -f "${values_file}" "${render_set_args[@]}" \
         | command kubectl create --dry-run=client --validate=false -f - -o json \
-        | jq -sr '[ .[] | select(.kind == "StatefulSet") | .spec.template.spec
-            | (.containers[]?, .initContainers[]?, .ephemeralContainers[]?)
-            | .resources.limits // {} | select(type == "object" and length > 0)
-          ] | length == 0' \
-        | grep -qx true || fail "rendered OpenSearch containers must not have resource limits"
+        | python3 "${HELM_JSON_HELPER}" has-resource-limits \
+        | grep -qx false || fail "rendered OpenSearch containers must not have resource limits"
     SANITIZED_VALUES_RENDERED=true
 }
 set_opensearch_memory 2Gi
