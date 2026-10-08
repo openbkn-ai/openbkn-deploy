@@ -349,7 +349,7 @@ ConfigMap，见 `conf/install-status/`）。管理员入口跳转时会将 Studi
 
 页面显示容器等待/退出原因、退出码、Deployment/StatefulSet/DaemonSet/Job 的期望与实际状态、最近安全摘要 Warning Event，以及工作负载探针配置摘要。每个 Pod 可展开查看脱敏的 Describe 摘要（生命周期、Pod Conditions、Init Container、容器状态和关联 Warning Event），其中 Init Container 也可查看日志；不包含节点/IP、注解、环境变量、挂载或 Event 原文。页面注明 Pods、Workloads、Events 各自最近一次成功采集时间，超过 90 秒会标为过期。版本、依赖和 HTTP 健康检查来自最近一次发布；Pod、工作负载和 Event 每 30 秒采集。发布版本表区分 Chart 版本和当前镜像版本来源。
 
-每个容器还提供最近日志和上次退出日志入口。跳转 Token 从 URL Fragment 读取（不会发送给 nginx），随即从地址栏清除，只保存在页面内存中；状态、Pods、Workloads、Events 和日志接口都会分别通过 bkn-safe 的 Studio `is_admin` 规则校验。日志不会自动获取，也不会写入 JSON；点击后在模态弹窗中查看，可切换 recent/previous、搜索当前已加载行，按关闭或 Esc 退出时清除显示内容。最多读取 200 行、64 KiB，页面默认请求 100 行。审计记录用户名、目标容器、请求行数和结果，不记录日志内容或凭据；通过 `kubectl -n <namespace> logs deployment/install-status -c log-reader` 查看。
+每个容器还提供最近日志和上次退出日志入口。跳转 Token 从 URL Fragment 读取（不会发送给 nginx），随即从地址栏清除；为支持当前标签页刷新，页面将 Token 暂存在 `sessionStorage` 中，最多保留 15 分钟，不写入长期存储。运维页与 Studio 必须同源；Studio 退出、Cookie 中的 Token 变化、超过期限或接口返回 401/403 后会删除暂存 Token，并提示从 Studio 管理员菜单重新打开。状态、Pods、Workloads、Events 和日志接口都会分别通过 bkn-safe 的 Studio `is_admin` 规则校验。日志不会自动获取，也不会写入 JSON；点击后在模态弹窗中查看，可切换 recent/previous、搜索当前已加载行，按关闭或 Esc 退出时清除显示内容。最多读取 200 行、64 KiB，页面默认请求 100 行。审计记录用户名、目标容器、请求行数和结果，不记录日志内容或凭据；通过 `kubectl -n <namespace> logs deployment/install-status -c log-reader` 查看。
 
 日志读取默认启用，并要求同一个管理员 Token。应用日志可能包含凭据；如该环境不允许管理员在页面读取日志，可显式关闭并重新发布：
 

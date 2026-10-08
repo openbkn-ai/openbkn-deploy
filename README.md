@@ -357,6 +357,14 @@ token-entry form:
 # Chinese UI: https://<access-address>/install-status?lang=zh (default)
 ```
 
+The token is read from the URL fragment and removed from the address bar
+immediately. A tab-scoped `sessionStorage` copy permits refresh for up to 15
+minutes while the same-origin Studio access-token cookie still matches.
+Studio logout, cookie rotation, expiry, or a 401/403 response clears the copy.
+This dashboard requires Studio and `/install-status` on the same origin. Reopen Service
+operations from the Studio administrator menu when authorization is required.
+Every status and log request still uses the bkn-safe administrator check.
+
 The existing `/install-status` page now shows whitelisted container waiting and
 termination reasons, exit codes, rollout counts for Deployments, StatefulSets,
 DaemonSets and Jobs, safe Warning Event summaries, and probe-method summaries.
