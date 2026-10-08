@@ -599,3 +599,25 @@ See [bkn-safe/docs/oauth-redirect-uris.md](../bkn-safe/docs/oauth-redirect-uris.
 ## 📄 License
 
 [Apache License 2.0](../LICENSE)
+
+## Internal Trace Admission protocol upgrade
+
+This install profile targets the protocol in Foundry PR #2047. Policy, configuration, heartbeat and ACK use `agent-observability-internal:8081` without Admission OAuth credentials or Ed25519 keys. Upgrade the server, publishers, Collector and Charts as a compatible set; there is no legacy client compatibility layer.
+
+The complete install enables five Kafka Evidence publishers. Kafka SASL still requires credentials: the installer copies the first client password from `resource/kafka-sasl` into `bkn-trace-evidence-kafka` in the application namespace, using `KAFKA_CLIENT_USER` as the username. For external Kafka, provision the target Secret with `username` and `password`; `OPENBKN_TRACE_KAFKA_SECRET` overrides its name. Artifact credentials remain separate.
+
+Before upgrading, review `networkPolicy.allowedClients` for all six callers and the actual namespace/Pod labels. The resource-limit cleanup path exports old effective Helm values, so an old allowlist can survive even without `--reuse-values`. Explicitly update it. Same-version installs reconcile missing or outdated publisher/control values.
+
+The default kubeadm installer uses Flannel, whose data plane does not enforce NetworkPolicy by itself. Configure a policy enforcement component and verify it in the target environment. See https://github.com/flannel-io/flannel/blob/master/Documentation/netpol.md . Verify enforcement on k3s and other distributions as well.
+
+Acceptance requires all six callers to read policy/configuration and send heartbeat/ACK, an unlisted Pod to fail access to port 8081, public internal routes to return 404, and an enable/disable operation to converge with Evidence delivery. Test fresh installation and existing-version upgrades before closing Foundry #2043/#2046. Roll back the server, clients, Collector and Charts together, restoring the OAuth/signing configuration required by the old version.
+
+Cluster-free regressions:
+
+```bash
+bash scripts/services/openbkn_trace_control_test.sh
+bash scripts/services/openbkn_trace_profile_test.sh
+bash scripts/services/openbkn_trace_prerequisites_test.sh
+```
+
+Set `FOUNDRY_ROOT` to a compatible checkout for additional index and data-migrator contract checks. A standalone checkout explicitly reports those cross-repository checks as skipped. These checks do not replace Chart rendering or cluster acceptance.
