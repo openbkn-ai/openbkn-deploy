@@ -509,6 +509,14 @@ _openbkn_trace_profile_sets() {
                 "evidence.store=opensearch"
                 "evidence.ingestAuth.existingSecret=${OPENBKN_TRACE_INGEST_SECRET}"
                 "evidence.ingestAuth.secretKey=token"
+                "kafkaConsumers.evidence.enabled=true"
+                "kafkaConsumers.evidence.brokers[0]=$(_openbkn_trace_kafka_brokers)"
+                "kafkaConsumers.evidence.topic=openbkn.evidence.v1"
+                "kafkaConsumers.evidence.consumerGroup=bkn-trace-evidence-ledger-v1"
+                "kafkaConsumers.evidence.saslMechanism=${OPENBKN_TRACE_KAFKA_SASL_MECHANISM:-PLAIN}"
+                "kafkaConsumers.evidence.existingSecret.name=${OPENBKN_TRACE_KAFKA_SECRET}"
+                "kafkaConsumers.evidence.existingSecret.usernameKey=username"
+                "kafkaConsumers.evidence.existingSecret.passwordKey=password"
                 "opensearch.traceIndex=ss4o_traces-default-namespace"
                 "opensearch.logIndex=ss4o_logs-default-namespace"
                 "opensearch.traceTimestampPipeline=bkn-trace-span-timestamp-v1"
@@ -992,6 +1000,42 @@ except (ValueError, binascii.Error):
     fi
 }
 
+_openbkn_prepare_trace_evidence_topic() (
+    local namespace="$1" image job_name="" manifest consumer_enabled brokers secret mechanism override
+    # Explicit operator overrides remain authoritative.
+    consumer_enabled="$(_openbkn_last_set_value kafkaConsumers.evidence.enabled "${CORE_SET_VALUES[@]-}")" || consumer_enabled=true
+    [[ "${consumer_enabled}" == false ]] && return 0
+    brokers="$(_openbkn_trace_kafka_brokers)"
+    secret="${OPENBKN_TRACE_KAFKA_SECRET}"
+    mechanism="${OPENBKN_TRACE_KAFKA_SASL_MECHANISM:-PLAIN}"
+    if override="$(_openbkn_last_set_value 'kafkaConsumers.evidence.brokers[0]' "${CORE_SET_VALUES[@]-}")"; then brokers="${override}"; fi
+    if override="$(_openbkn_last_set_value kafkaConsumers.evidence.existingSecret.name "${CORE_SET_VALUES[@]-}")"; then secret="${override}"; fi
+    if override="$(_openbkn_last_set_value kafkaConsumers.evidence.saslMechanism "${CORE_SET_VALUES[@]-}")"; then mechanism="${override}"; fi
+    image="${OPENBKN_TRACE_KAFKA_ADMIN_IMAGE:-${KAFKA_IMAGE:-}}"
+    if [[ -z "${image}" ]] && declare -F _kafka_resolve_image_defaults >/dev/null; then
+        _kafka_resolve_image_defaults
+        image="${KAFKA_IMAGE:-}"
+    fi
+    if [[ -z "${image}" ]]; then
+        log_error "BKN Trace requires a Kafka Admin image (OPENBKN_TRACE_KAFKA_ADMIN_IMAGE)"
+        return 1
+    fi
+    manifest="$(mktemp)" || return 1
+    trap 'rm -f "${manifest}"; if [[ -n "${job_name}" ]]; then kubectl delete job "${job_name}" -n "${namespace}" --ignore-not-found >/dev/null 2>&1 || true; fi' EXIT
+    if ! python3 "${SCRIPT_DIR}/scripts/lib/trace_kafka_topic_job.py" \
+        "${namespace}" "${image}" "${brokers}" \
+        "${secret}" "${mechanism}" \
+        "${OPENBKN_TRACE_TOPIC_PARTITIONS:-1}" "${OPENBKN_TRACE_TOPIC_REPLICATION_FACTOR:-1}" >"${manifest}"; then
+        log_error "Cannot render the BKN Trace Evidence topic prerequisite Job"
+        return 1
+    fi
+    job_name="$(kubectl create -f "${manifest}" -o jsonpath='{.metadata.name}')" || return 1
+    if [[ -z "${job_name}" ]] || ! kubectl wait -n "${namespace}" --for=condition=complete "job/${job_name}" --timeout=120s >/dev/null 2>&1; then
+        log_error "BKN Trace Evidence topic prerequisite failed: verify Kafka access and message.timestamp.type=LogAppendTime. Existing CreateTime topics require an operator-reviewed migration; old records are not rewritten."
+        return 1
+    fi
+)
+
 _openbkn_prepare_trace_opensearch_secret() {
     local namespace="$1"
     local protocol host user password username_data password_data
@@ -1097,6 +1141,9 @@ _openbkn_prepare_trace_profile() {
         return 1
     fi
     if ! _openbkn_prepare_trace_kafka_secret "${namespace}"; then
+        return 1
+    fi
+    if ! _openbkn_prepare_trace_evidence_topic "${namespace}"; then
         return 1
     fi
     _openbkn_prepare_trace_opensearch_secret "${namespace}"
@@ -1268,7 +1315,7 @@ _openbkn_trace_control_profile_matches() {
         expected_items+=("${item}")
     done
     python3 -c '
-import json, sys
+import json, re, sys
 try:
     installed = json.load(sys.stdin)
     if not isinstance(installed, dict):
@@ -1279,11 +1326,17 @@ for item in sys.argv[1:]:
     if "=" not in item:
         continue
     key, expected = item.split("=", 1)
-    if "evidencePublisher" not in key and ".publisher." not in key and not key.startswith("traceAdmission."):
+    if "evidencePublisher" not in key and ".publisher." not in key and not key.startswith(("traceAdmission.", "kafkaConsumers.evidence.")):
         continue
     current = installed
     for part in key.split("."):
-        current = current.get(part) if isinstance(current, dict) else None
+        match = re.fullmatch(r"([^\[]+)\[(\d+)\]", part)
+        if match:
+            current = current.get(match[1]) if isinstance(current, dict) else None
+            index = int(match[2])
+            current = current[index] if isinstance(current, list) and index < len(current) else None
+        else:
+            current = current.get(part) if isinstance(current, dict) else None
     actual = str(current).lower() if isinstance(current, bool) else str(current)
     if actual != expected:
         sys.exit(1)
@@ -1300,8 +1353,11 @@ _openbkn_should_skip_upgrade() {
     if ! should_skip_upgrade_same_chart_version "${release_name}" "${namespace}" "${chart_name}" "${target_version}"; then
         return 1
     fi
+    if [[ "${release_name}" == agent-observability ]] && _openbkn_agent_observability_profile_is_explicitly_volatile; then
+        return 0
+    fi
     case "${release_name}" in
-        bkn-backend|ontology-query|agent-retrieval|agent-operator-integration|bkn-agent|otelcol-contrib)
+        agent-observability|bkn-backend|ontology-query|agent-retrieval|agent-operator-integration|bkn-agent|otelcol-contrib)
             CORE_RELEASE_EXTRA_SETS=()
             CORE_RELEASE_EXTRA_SET_STRINGS=()
             _openbkn_trace_control_profile_matches "${release_name}" "${namespace}"

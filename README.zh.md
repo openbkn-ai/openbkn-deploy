@@ -548,6 +548,10 @@ bash deploy/scripts/bkn-redirect.sh del  http://localhost:5173/studio/callback
 
 ## Trace Admission 内部控制协议迁移
 
+完整安装会启用 agent-observability 的 Evidence Kafka consumer，复用 publisher 的 broker 与凭据 Secret。部署 Core 前，独立 Admin Job（Java heap 96 MiB、容器内存上限 256 MiB）会在 topic 不存在时创建 `openbkn.evidence.v1` 并配置 `message.timestamp.type=LogAppendTime`，然后验证有效配置；不会在 broker 容器中运行管理工具。已有 topic 不会被自动修改：若使用 CreateTime，安装会停止，须由 Owner 审阅迁移并以新 MCP 事件验收。修改配置不会重写旧消息。Job 在成功或失败后均清理。
+
+外部 Kafka 须允许创建/描述该 topic，或由安装方事先正确配置。`OPENBKN_TRACE_KAFKA_ADMIN_IMAGE` 可指定管理工具镜像，默认复用 bundled Kafka 镜像；`OPENBKN_TRACE_KAFKA_SASL_MECHANISM` 默认 PLAIN，也支持 SCRAM-SHA-256/512。默认新建 topic 为单分区、单副本，与 bundled 单 broker 匹配；多 broker 可用 `OPENBKN_TRACE_TOPIC_PARTITIONS`、`OPENBKN_TRACE_TOPIC_REPLICATION_FACTOR` 调整。显式 `--set kafkaConsumers.evidence.enabled=false` 会跳过前置检查；broker 索引、Secret 名称和 SASL 的 `--set` 覆盖也用于前置检查。
+
 此安装器的 Trace profile 与 Foundry PR #2047 的协议配套：policy、configuration、heartbeat 和 ACK 使用 `agent-observability-internal:8081`，不要求 OAuth client credentials 或 Ed25519 签名密钥。服务端、六类调用方和 Chart 必须使用同一代协议；无旧客户端兼容层。
 
 五类 Evidence publisher 在完整安装时启用 Kafka，并配置内部控制端点。Kafka SASL 仍需要凭据：默认从 `resource/kafka-sasl` 的 `client-passwords` 复制第一个客户端密码到应用 namespace 的 `bkn-trace-evidence-kafka`，用户名来自 `KAFKA_CLIENT_USER`。外接 Kafka 应事先准备目标 Secret 的 `username`/`password`，可用 `OPENBKN_TRACE_KAFKA_SECRET` 指定名字。该 Secret 与已移除的 Admission OAuth/签名 Secret 不同。Artifact 投递继续使用现有凭据。

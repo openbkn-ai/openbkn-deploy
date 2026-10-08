@@ -15,6 +15,7 @@ EXISTING_KAFKA_CLIENT_PASSWORD_DATA="c2VjcmV0LWthZmthLXBhc3N3b3Jk"
 EXISTING_KAFKA_SOURCE_SECRET=true
 KUBECTL_LOG="$(mktemp)"
 LAST_ERROR=""
+OPENBKN_TRACE_KAFKA_ADMIN_IMAGE="example.invalid/kafka:test"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=../lib/common.sh
@@ -62,6 +63,10 @@ kubectl() {
             elif [[ "$*" == *"jsonpath={.data.client-passwords}"* ]]; then
                 printf '%s' "${EXISTING_KAFKA_CLIENT_PASSWORD_DATA}"
             fi
+            return 0
+            ;;
+        "create -f "*)
+            printf "%s" bkn-trace-evidence-topic-test
             return 0
             ;;
         *"create secret"*)
