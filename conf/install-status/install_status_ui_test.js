@@ -81,15 +81,37 @@ assert.match(html, /请选择容器以加载日志。/, 'Chinese is the default 
 assert.doesNotMatch(html, /<form id="authForm"|id="accessToken"/, 'the dashboard has no manual token form');
 let replacedUrl = null;
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
-vm.runInNewContext(script, {document, fetch, setInterval: () => {}, Date, console,
-  window: {location: {protocol: 'https:', hostname: 'status.example.test', hash: '#token=test-studio-token', pathname: '/install-status', search: ''}, history: {replaceState: (_state, _title, url) => { replacedUrl = url; }}},
-  btoa: value => Buffer.from(value, 'binary').toString('base64')});
+const savedTokens = new Map();
+element('authGate').hidden = true;
+document.cookie = 'bkn_access_token=test-studio-token';
+const authChannels = [];
+class TestBroadcastChannel {
+  constructor(name) { this.name = name; authChannels.push(this); }
+  addEventListener(_name, fn) { this.listener = fn; }
+  emit(data) { this.listener({data}); }
+}
+const sessionStorage = {
+  getItem: key => savedTokens.get(key) || null,
+  setItem: (key, value) => savedTokens.set(key, value),
+  removeItem: key => savedTokens.delete(key),
+};
+function openPage(hash, pageFetch = fetch) {
+  vm.runInNewContext(script, {document, fetch: pageFetch, setInterval: () => {}, Date, console,
+    BroadcastChannel: TestBroadcastChannel,
+    window: {location: {protocol: 'https:', hostname: 'status.example.test', hash, pathname: '/install-status', search: ''}, sessionStorage,
+      history: {replaceState: (_state, _title, url) => { replacedUrl = url; }}},
+    btoa: value => Buffer.from(value, 'binary').toString('base64')});
+}
+openPage('#token=test-studio-token');
 
 setImmediate(async () => {
   await new Promise(resolve => setImmediate(() => setImmediate(resolve)));
   assert.equal(element('dashboardContent').hidden, false, 'dashboard opens directly on the administrator-only port');
   assert.ok(requests.length > 0, 'the dashboard loads status data immediately');
   assert.equal(replacedUrl, '/install-status', 'the redirect token is removed from the address bar immediately');
+  assert.equal(JSON.parse(savedTokens.get('openbkn.install-status.token')).token, 'test-studio-token');
+  assert.ok(requests.filter(request => !String(request.url).includes('/logs?')).every(request => request.options.headers.Authorization === 'Bearer test-studio-token'), 'all status endpoints use the administrator token');
+  assert.ok(requests.every(request => !String(request.url).includes('test-studio-token')), 'token is never placed in request URLs');
   const row = element('#livepods tbody').children[0];
   assert.ok(row, 'pod row renders');
   assert.match(row.children[4].children[0].textContent, /CrashLoopBackOff/);
@@ -161,5 +183,62 @@ setImmediate(async () => {
   assert.equal(escapePrevented, true, 'Escape dismissal is handled as a modal cancel');
   assert.equal(element('logViewer').open, false, 'Escape closes the modal');
   assert.equal(element('logOutput').textContent, '', 'Escape also clears rendered log content');
+  const beforeReload = requests.length;
+  openPage('');
+  await new Promise(resolve => setImmediate(() => setImmediate(resolve)));
+  assert.ok(requests.length > beforeReload, 'refresh restores data from this tab');
+  assert.ok(requests.slice(beforeReload).every(request => request.options.headers.Authorization === 'Bearer test-studio-token'), 'refresh uses the same administrator check');
+  assert.equal(element('authGate').hidden, true);
+  assert.equal(authChannels.at(-1).name, 'bkn-auth');
+
+  document.cookie = '';
+  authChannels.at(-1).emit({type: 'logout'});
+  assert.equal(savedTokens.has('openbkn.install-status.token'), false, 'Studio logout removes the tab token immediately');
+  assert.equal(element('authGate').hidden, false, 'Studio logout hides the dashboard immediately');
+  const beforeLogoutReload = requests.length;
+  openPage('');
+  assert.equal(requests.length, beforeLogoutReload, 'a reload after Studio logout sends no status requests');
+
+  document.cookie = 'bkn_access_token=test-studio-token';
+  element('authGate').hidden = true;
+  element('dashboardContent').hidden = false;
+  openPage('');
+  await new Promise(resolve => setImmediate(() => setImmediate(resolve)));
+  document.cookie = '';
+  const beforeCookieCheck = requests.length;
+  element('refreshAll').listeners.click();
+  await new Promise(resolve => setImmediate(() => setImmediate(resolve)));
+  assert.equal(requests.length, beforeCookieCheck, 'cookie removal blocks requests even if the logout broadcast was missed');
+  assert.equal(savedTokens.has('openbkn.install-status.token'), false);
+  assert.equal(element('authGate').hidden, false);
+
+  document.cookie = 'bkn_access_token=test-studio-token';
+  savedTokens.set('openbkn.install-status.token', JSON.stringify({token: 'expired', expiresAt: Date.now() - 1}));
+  const beforeExpired = requests.length;
+  openPage('');
+  assert.equal(requests.length, beforeExpired, 'expired token is never sent');
+  assert.equal(savedTokens.has('openbkn.install-status.token'), false, 'expired token is removed');
+  assert.equal(element('authGate').hidden, false, 'expired authorization has a clear recovery path');
+  assert.equal(element('dashboardContent').hidden, true);
+
+  element('authGate').hidden = true;
+  element('dashboardContent').hidden = false;
+  openPage('');
+  assert.equal(element('authGate').hidden, false, 'a direct visit without tab authorization explains how to reopen the page');
+
+  element('authGate').hidden = true;
+  element('dashboardContent').hidden = false;
+  document.cookie = 'bkn_access_token=revoked';
+  for (const status of [401, 403]) {
+    openPage('#token=revoked', async () => ({ok: false, status}));
+    await new Promise(resolve => setImmediate(() => setImmediate(resolve)));
+    assert.equal(savedTokens.has('openbkn.install-status.token'), false, `${status} token is removed`);
+    assert.equal(element('authGate').hidden, false, `${status} prompts reopening Studio`);
+  }
+  document.cookie = '';
+  const beforeMissingCookie = requests.length;
+  openPage('#token=revoked');
+  assert.equal(requests.length, beforeMissingCookie, 'a fragment token without Studio login is rejected');
+  assert.equal(savedTokens.has('openbkn.install-status.token'), false);
   console.log('install-status modal log viewer checks passed');
 });
