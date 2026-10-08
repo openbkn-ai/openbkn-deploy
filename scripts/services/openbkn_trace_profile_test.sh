@@ -17,6 +17,7 @@ not_contains() {
 }
 log_info() { :; }
 log_warn() { :; }
+log_error() { LAST_ERROR="$*"; }
 get_set_value() {
     local key="$1"
     shift
@@ -31,8 +32,10 @@ get_set_value() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+FOUNDRY_ROOT="${FOUNDRY_ROOT:-${SCRIPT_DIR}/../bkn-foundry}"
 CONFIG_REGISTRY_FILE="$(mktemp)"
 trap 'rm -f "${CONFIG_REGISTRY_FILE}"' EXIT
+# Internal Trace Admission requires endpoints only, without credentials or keys.
 # shellcheck source=../services/openbkn.sh
 source "${SCRIPT_DIR}/scripts/services/openbkn.sh"
 
@@ -155,6 +158,12 @@ fi
 
 HELM_VALUES='{"opensearchExporter":{"pipeline":""}}'
 if _openbkn_should_skip_upgrade otelcol-contrib openbkn otelcol-contrib 0.1.4; then
+    fail "collector with old control defaults must be reconciled at the same chart version"
+else
+    ok
+fi
+HELM_VALUES='{"opensearchExporter":{"pipeline":""},"traceAdmission":{"policyURL":"http://agent-observability-internal:8081/api/agent-observability/v1/internal/trace-evidence/policy","configurationURL":"http://agent-observability-internal:8081/api/agent-observability/v1/internal/trace-evidence/configuration","heartbeatURL":"http://agent-observability-internal:8081/api/agent-observability/v1/internal/trace-evidence/endpoints:heartbeat","ackURLBase":"http://agent-observability-internal:8081/api/agent-observability/v1/internal/trace-evidence/operations"}}'
+if _openbkn_should_skip_upgrade otelcol-contrib openbkn otelcol-contrib 0.1.4; then
     ok
 else
     fail "collector without the unsupported pipeline value should retain version-skip optimization"
@@ -255,7 +264,10 @@ installed_collector_sets="${CORE_RELEASE_EXTRA_SETS[*]:-}"
 contains "installer applies secure Collector endpoint" "${installed_collector_sets}" "opensearchExporter.http.endpoint=https://opensearch-secure.resource.svc.cluster.local:9200"
 contains "installer applies secure Collector auth Secret" "${installed_collector_sets}" "opensearchExporter.auth.existingSecret=bkn-trace-opensearch"
 
-otel_values="$(<"${SCRIPT_DIR}/../bkn-trace/otelcol-contribute-chart/charts/otelcol-contrib/values.yaml")"
+# Cross-repository chart checks are optional here; installer unit regressions
+# must also run in a standalone openbkn-deploy checkout.
+if [[ -d "${FOUNDRY_ROOT}/bkn-trace" ]]; then
+otel_values="$(<"${FOUNDRY_ROOT}/bkn-trace/otelcol-contribute-chart/charts/otelcol-contrib/values.yaml")"
 contains "collector uses the Trace profile dataset" "${otel_values}" "dataset: default"
 contains "collector uses the Trace profile namespace" "${otel_values}" "namespace: namespace"
 contains "collector uses SS4O index names" "${otel_values}" "mode: ss4o"
@@ -266,22 +278,35 @@ expected_log_index="ss4o_logs-${collector_dataset}-${collector_namespace}"
 contains "AO profile reads the Collector Trace index" "${ao_sets}" "opensearch.traceIndex=${expected_trace_index}"
 contains "AO profile reads the Collector log index" "${ao_sets}" "opensearch.logIndex=${expected_log_index}"
 
-agent_observability_values="$(<"${SCRIPT_DIR}/../bkn-trace/agent-observability/charts/agent-observability/values.yaml")"
+agent_observability_values="$(<"${FOUNDRY_ROOT}/bkn-trace/agent-observability/charts/agent-observability/values.yaml")"
 contains "standalone AO reads the Collector Trace index" "${agent_observability_values}" "traceIndex: ${expected_trace_index}"
 contains "standalone AO reads the Collector log index" "${agent_observability_values}" "logIndex: ${expected_log_index}"
-agent_observability_deployment="$(<"${SCRIPT_DIR}/../bkn-trace/agent-observability/charts/agent-observability/templates/deployment.yaml")"
+agent_observability_deployment="$(<"${FOUNDRY_ROOT}/bkn-trace/agent-observability/charts/agent-observability/templates/deployment.yaml")"
 contains "AO Pod template includes timestamp repair revision" "${agent_observability_deployment}" "trace-timestamp-pipeline-revision"
 
+else
+    echo "SKIP: Foundry chart contract checks (set FOUNDRY_ROOT to the matching checkout)"
+fi
+
 CORE_RELEASE_EXTRA_SETS=()
+CORE_RELEASE_EXTRA_SET_STRINGS=()
 _openbkn_trace_profile_sets agent-retrieval
 ar_sets="${CORE_RELEASE_EXTRA_SETS[*]:-}"
 contains "retrieval targets internal Trace Core" "${ar_sets}" "observability.lifecycle.core_url=http://agent-observability-internal:8081"
 contains "retrieval emits Trace spans" "${ar_sets}" "observability.trace.enabled=true"
 contains "retrieval emits searchable runtime logs" "${ar_sets}" "observability.log.enabled=true"
-contains "retrieval emits evidence through token-protected ingest" "${ar_sets}" "observability.evidence.ingest_url=http://agent-observability:8080/api/agent-observability/v1/evidence/events"
-contains "retrieval uses evidence ingest Secret" "${ar_sets}" "observability.evidence.ingest_token_secret_name=bkn-trace-evidence-ingest"
+contains "retrieval keeps independent artifact endpoint" "${ar_sets}" "observability.evidence.artifact_endpoint=http://agent-observability:8080/api/agent-observability/v1/evidence/artifacts"
+contains "retrieval uses the standard Core token Secret for artifacts" "${ar_sets}" "observability.evidence.artifact_secret_name=bkn-trace-evidence-ingest"
+contains "retrieval enables Kafka evidence publisher" "${ar_sets}" "observability.evidencePublisher.enabled=true"
+contains "retrieval uses Kafka credentials" "${ar_sets}" "observability.evidencePublisher.passwordSecretName=bkn-trace-evidence-kafka"
+not_contains "internal admission needs no credentials" "${CORE_RELEASE_EXTRA_SET_STRINGS[*]:-}" "observability.evidencePublisher.traceAdmission.clientID="
+not_contains "internal admission needs no credentials" "${CORE_RELEASE_EXTRA_SET_STRINGS[*]:-}" "observability.evidencePublisher.traceAdmission.clientSecretSecretName="
+not_contains "retrieval has no static revision" "${ar_sets}" "capturePolicyRevision="
+not_contains "retrieval has no HTTP evidence ingest" "${ar_sets}" "observability.evidence.ingest_url="
 not_contains "retrieval has no query gateway Secret" "${ar_sets}" "gateway_token_secret_name="
 
+# bkn-backend is migrated to Kafka; ontology-query deliberately remains on its
+# Ontology uses the same frozen Kafka producer contract as bkn-backend.
 # vega-backend is an Evidence producer on an older chart generation: same three
 # facts, different keys. Its chart defaults ingestTokenSecretName to empty and
 # the template only injects the token env when that name is set, so leaving it
@@ -301,48 +326,70 @@ contains "vega uses the evidence ingest Secret" "${vega_sets}" "bknTrace.evidenc
 contains "vega reads the token key the receiver writes" "${vega_sets}" "bknTrace.evidence.ingestTokenSecretKey=token"
 not_contains "vega does not keep the pre-rename key" "${vega_sets}" "ingestTokenSecretKey=ingest-token"
 
-# A full OpenBKN installation must wire every declared producer through the
-# real installer entrypoint. bkn-backend and ontology-query are durable
-# producers, so the shared trusted-delivery Secret and both outbox switches are
-# required in addition to the ingest route. The remaining two post directly.
 CORE_RELEASE_EXTRA_SETS=()
 _openbkn_release_extra_sets bkn-backend openbkn
 bkn_backend_sets="${CORE_RELEASE_EXTRA_SETS[*]:-}"
-contains "bkn-backend posts evidence to the ingest route" "${bkn_backend_sets}" "bknTrace.evidence.ingestUrl=http://agent-observability:8080/api/agent-observability/v1/evidence/events"
-contains "bkn-backend uses the evidence ingest Secret" "${bkn_backend_sets}" "bknTrace.evidence.ingestTokenSecretName=bkn-trace-evidence-ingest"
-contains "bkn-backend reads the token key the receiver writes" "${bkn_backend_sets}" "bknTrace.evidence.ingestTokenSecretKey=token"
-contains "bkn-backend enables its durable outbox" "${bkn_backend_sets}" "bknTrace.producerOutbox.enabled=true"
-contains "bkn-backend starts its durable outbox worker" "${bkn_backend_sets}" "bknTrace.producerOutbox.workerEnabled=true"
-contains "bkn-backend enables delivered outbox cleanup" "${bkn_backend_sets}" "bknTrace.producerOutbox.cleanup.enabled=true"
-contains "bkn-backend uses the trusted delivery Secret" "${bkn_backend_sets}" "bknTrace.producerOutbox.queryGatewayTokenSecretName=bkn-trace-evidence-ingest"
-contains "bkn-backend reads the trusted delivery token key" "${bkn_backend_sets}" "bknTrace.producerOutbox.queryGatewayTokenSecretKey=token"
+bkn_backend_string_sets="${CORE_RELEASE_EXTRA_SET_STRINGS[*]:-}"
+contains "bkn-backend enables Kafka evidence publisher" "${bkn_backend_sets}" "bknTrace.evidencePublisher.enabled=true"
+contains "bkn-backend uses Kafka bootstrap" "${bkn_backend_sets}" "bknTrace.evidencePublisher.brokers="
+contains "bkn-backend uses Kafka username Secret" "${bkn_backend_sets}" "bknTrace.evidencePublisher.usernameSecretName=${OPENBKN_TRACE_KAFKA_SECRET}"
+contains "bkn-backend uses Kafka password Secret" "${bkn_backend_sets}" "bknTrace.evidencePublisher.passwordSecretName=${OPENBKN_TRACE_KAFKA_SECRET}"
+contains "bkn-backend has stable producer identity" "${bkn_backend_sets}" "bknTrace.evidencePublisher.producerId=bkn-backend"
+contains "bkn-backend has stable workload identity" "${bkn_backend_sets}" "bknTrace.evidencePublisher.workloadIdentity=bkn-backend"
+contains "bkn-backend has stable stream identity" "${bkn_backend_sets}" "bknTrace.evidencePublisher.producerStreamId=bkn-backend"
+not_contains "internal admission needs no credentials" "${bkn_backend_string_sets}" "bknTrace.evidencePublisher.traceAdmission.clientID="
+not_contains "bkn-backend has no static policy revision" "${bkn_backend_sets}${bkn_backend_string_sets}" "capturePolicyRevision="
+contains "bkn-backend bounds queue records" "${bkn_backend_sets}" "bknTrace.evidencePublisher.queueMaxRecords=4096"
+contains "bkn-backend bounds retry attempts" "${bkn_backend_sets}" "bknTrace.evidencePublisher.maxAttempts=3"
+not_contains "bkn-backend has no legacy ingest URL" "${bkn_backend_sets}" "bknTrace.evidence.ingestUrl="
+not_contains "bkn-backend has no legacy outbox" "${bkn_backend_sets}" "bknTrace.producerOutbox."
 
 CORE_RELEASE_EXTRA_SETS=()
 _openbkn_release_extra_sets ontology-query openbkn
 ontology_query_sets="${CORE_RELEASE_EXTRA_SETS[*]:-}"
-contains "ontology-query posts evidence to the ingest route" "${ontology_query_sets}" "bknTrace.evidence.ingestUrl=http://agent-observability:8080/api/agent-observability/v1/evidence/events"
-contains "ontology-query uses the evidence ingest Secret" "${ontology_query_sets}" "bknTrace.evidence.ingestTokenSecretName=bkn-trace-evidence-ingest"
-contains "ontology-query reads the token key the receiver writes" "${ontology_query_sets}" "bknTrace.evidence.ingestTokenSecretKey=token"
-contains "ontology-query enables its durable outbox" "${ontology_query_sets}" "bknTrace.producerOutbox.enabled=true"
-contains "ontology-query starts its durable outbox worker" "${ontology_query_sets}" "bknTrace.producerOutbox.workerEnabled=true"
-contains "ontology-query enables delivered outbox cleanup" "${ontology_query_sets}" "bknTrace.producerOutbox.cleanup.enabled=true"
-contains "ontology-query uses the trusted delivery Secret" "${ontology_query_sets}" "bknTrace.producerOutbox.queryGatewayTokenSecretName=bkn-trace-evidence-ingest"
-contains "ontology-query reads the trusted delivery token key" "${ontology_query_sets}" "bknTrace.producerOutbox.queryGatewayTokenSecretKey=token"
+ontology_query_string_sets="${CORE_RELEASE_EXTRA_SET_STRINGS[*]:-}"
+contains "ontology-query enables Kafka evidence publisher" "${ontology_query_sets}" "bknTrace.evidencePublisher.enabled=true"
+contains "ontology-query uses Kafka bootstrap" "${ontology_query_sets}" "bknTrace.evidencePublisher.brokers="
+contains "ontology-query uses Kafka username Secret" "${ontology_query_sets}" "bknTrace.evidencePublisher.usernameSecretName=${OPENBKN_TRACE_KAFKA_SECRET}"
+contains "ontology-query uses Kafka password Secret" "${ontology_query_sets}" "bknTrace.evidencePublisher.passwordSecretName=${OPENBKN_TRACE_KAFKA_SECRET}"
+contains "ontology-query has stable producer identity" "${ontology_query_sets}" "bknTrace.evidencePublisher.producerId=ontology-query"
+contains "ontology-query has stable workload identity" "${ontology_query_sets}" "bknTrace.evidencePublisher.workloadIdentity=ontology-query"
+contains "ontology-query has stable stream identity" "${ontology_query_sets}" "bknTrace.evidencePublisher.producerStreamId=ontology-query"
+not_contains "internal admission needs no credentials" "${ontology_query_string_sets}" "bknTrace.evidencePublisher.traceAdmission.clientID="
+not_contains "ontology-query has no static policy revision" "${ontology_query_sets}${ontology_query_string_sets}" "capturePolicyRevision="
+not_contains "ontology-query has no legacy ingest URL" "${ontology_query_sets}" "bknTrace.evidence.ingestUrl="
+not_contains "ontology-query has no legacy outbox" "${ontology_query_sets}" "bknTrace.producerOutbox."
 
 CORE_RELEASE_EXTRA_SETS=()
+CORE_RELEASE_EXTRA_SET_STRINGS=()
 _openbkn_release_extra_sets agent-operator-integration openbkn
 operator_sets="${CORE_RELEASE_EXTRA_SETS[*]:-}"
-contains "operator integration posts evidence to the ingest route" "${operator_sets}" "observability.evidence.ingest_url=http://agent-observability:8080/api/agent-observability/v1/evidence/events"
-contains "operator integration uses the evidence ingest Secret" "${operator_sets}" "observability.evidence.ingest_token_secret_name=bkn-trace-evidence-ingest"
-contains "operator integration reads the token key the receiver writes" "${operator_sets}" "observability.evidence.ingest_token_secret_key=token"
+contains "operator integration uses Kafka brokers" "${operator_sets}" "observability.evidence.publisher.brokers="
+contains "operator integration uses Kafka credential Secret" "${operator_sets}" "observability.evidence.publisher.credentials_secret_name=${OPENBKN_TRACE_KAFKA_SECRET}"
+not_contains "operator integration has no static policy revision" "${operator_sets}" "capture_policy_revision="
+not_contains "internal admission needs no credentials" "${CORE_RELEASE_EXTRA_SET_STRINGS[*]:-}" "observability.evidence.publisher.trace_admission.client_id="
+not_contains "internal admission needs no credentials" "${CORE_RELEASE_EXTRA_SET_STRINGS[*]:-}" "observability.evidence.publisher.trace_admission.client_secret_name="
+contains "operator integration has bounded Evidence queue" "${operator_sets}" "observability.evidence.publisher.queue_max_records=4096"
+contains "operator integration has independently wired Audit Kafka brokers" "${operator_sets}" "observability.audit.publisher.brokers=$(_openbkn_trace_kafka_brokers)"
+contains "operator integration has independently wired Audit credential Secret" "${operator_sets}" "observability.audit.publisher.credentials_secret_name=${OPENBKN_TRACE_KAFKA_SECRET}"
+contains "operator integration has Audit username Secret key" "${operator_sets}" "observability.audit.publisher.username_secret_key=username"
+contains "operator integration has Audit password Secret key" "${operator_sets}" "observability.audit.publisher.password_secret_key=password"
+not_contains "operator integration has no legacy HTTP Evidence URL" "${operator_sets}" "observability.evidence.ingest_url="
+not_contains "operator integration has no legacy HTTP Evidence Secret" "${operator_sets}" "observability.evidence.ingest_token_secret_name="
 
 CORE_RELEASE_EXTRA_SETS=()
+CORE_RELEASE_EXTRA_SET_STRINGS=()
 _openbkn_release_extra_sets bkn-agent openbkn
 bkn_agent_sets="${CORE_RELEASE_EXTRA_SETS[*]:-}"
-contains "bkn-agent posts evidence to the ingest route" "${bkn_agent_sets}" "observability.bknTraceEvidenceIngestUrl=http://agent-observability:8080/api/agent-observability/v1/evidence/events"
 contains "bkn-agent posts artifacts to the artifact route" "${bkn_agent_sets}" "observability.bknTraceArtifactIngestUrl=http://agent-observability:8080/api/agent-observability/v1/evidence/artifacts"
-contains "bkn-agent uses the evidence ingest Secret" "${bkn_agent_sets}" "observability.bknTraceEvidenceIngestTokenSecretName=bkn-trace-evidence-ingest"
-contains "bkn-agent reads the token key the receiver writes" "${bkn_agent_sets}" "observability.bknTraceEvidenceIngestTokenSecretKey=token"
+contains "bkn-agent uses Kafka brokers" "${bkn_agent_sets}" "observability.evidencePublisher.brokers="
+contains "bkn-agent uses Kafka credential Secret" "${bkn_agent_sets}" "observability.evidencePublisher.credentialsSecretName=${OPENBKN_TRACE_KAFKA_SECRET}"
+contains "bkn-agent enables policy-controlled Evidence" "${bkn_agent_sets}" "observability.evidencePublisher.enabled=true"
+not_contains "internal admission needs no credentials" "${CORE_RELEASE_EXTRA_SET_STRINGS[*]:-}" "observability.evidencePublisher.traceAdmission.clientID="
+not_contains "internal admission needs no credentials" "${CORE_RELEASE_EXTRA_SET_STRINGS[*]:-}" "observability.evidencePublisher.traceAdmission.clientSecretSecretName="
+not_contains "bkn-agent has no static revision" "${bkn_agent_sets}" "capturePolicyRevision="
+contains "bkn-agent has bounded queue settings" "${bkn_agent_sets}" "observability.evidencePublisher.queueMaxRecords=4096"
+not_contains "bkn-agent has no legacy Evidence HTTP route" "${bkn_agent_sets}" "observability.bknTraceEvidenceIngestUrl="
 
 # The full release manifest contains all declared producers. A new producer
 # must either be wired above or make this installer-level assertion fail.
@@ -406,6 +453,23 @@ not_contains "config application registries do not imply a third-party mirror" "
 sync_script="$(<"${SCRIPT_DIR}/scripts/sync-k8s-images.sh")"
 not_contains "offline sync excludes the deleted Hook image" "${sync_script}" 'curlimages/curl:8.10.1'
 not_contains "offline sync drops the Hook image array" "${sync_script}" 'HOOK_IMAGES'
+
+# Evidence wiring must not satisfy the Audit check for the same workload.
+# Keep Evidence correctly wired while omitting both Audit values.
+_openbkn_release_extra_sets() {
+    CORE_RELEASE_EXTRA_SETS=(
+        "observability.evidence.publisher.brokers=$(_openbkn_trace_kafka_brokers)"
+        "observability.evidence.publisher.credentials_secret_name=${OPENBKN_TRACE_KAFKA_SECRET}"
+    )
+}
+LAST_WARN=""
+log_warn() { LAST_WARN+="${LAST_WARN:+$'\n'}$*"; }
+_openbkn_warn_unwired_evidence_producers agent-operator-integration
+if [[ "${LAST_WARN}" == *"BKN Audit: Kafka publisher configuration is not wired for agent-operator-integration"* && "${LAST_WARN}" != *"BKN Trace:"* ]]; then
+    ok
+else
+    fail "Evidence wiring masked the missing Audit profile: ${LAST_WARN}"
+fi
 
 if [[ "${FAILED}" -eq 0 ]]; then
     echo "openbkn_trace_profile_test: all ${PASS} checks passed"

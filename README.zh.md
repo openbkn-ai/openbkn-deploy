@@ -545,3 +545,28 @@ bash deploy/scripts/bkn-redirect.sh del  http://localhost:5173/studio/callback
 ## 📄 License
 
 [Apache License 2.0](../LICENSE)
+
+## Trace Admission 内部控制协议迁移
+
+此安装器的 Trace profile 与 Foundry PR #2047 的协议配套：policy、configuration、heartbeat 和 ACK 使用 `agent-observability-internal:8081`，不要求 OAuth client credentials 或 Ed25519 签名密钥。服务端、六类调用方和 Chart 必须使用同一代协议；无旧客户端兼容层。
+
+五类 Evidence publisher 在完整安装时启用 Kafka，并配置内部控制端点。Kafka SASL 仍需要凭据：默认从 `resource/kafka-sasl` 的 `client-passwords` 复制第一个客户端密码到应用 namespace 的 `bkn-trace-evidence-kafka`，用户名来自 `KAFKA_CLIENT_USER`。外接 Kafka 应事先准备目标 Secret 的 `username`/`password`，可用 `OPENBKN_TRACE_KAFKA_SECRET` 指定名字。该 Secret 与已移除的 Admission OAuth/签名 Secret 不同。Artifact 投递继续使用现有凭据。
+
+**升级前检查：**
+
+1. 先确认服务器、publisher、Collector 和 Chart 的版本组合都包含该协议。相同 Chart 版本下，安装器也会重新核对已安装的 publisher/control profile，修复旧版禁用或未配置的 publisher。
+2. 审阅 `networkPolicy.allowedClients`，覆盖六类实际调用方。旧默认列表没有 Backend、ontology-query 和 Collector。安装器的资源 limits 清理路径会导出旧 Helm effective values，因此即使没有 `--reuse-values`，也可能保留旧 allowlist；须显式更新列表。自定义 namespace/Pod labels 也须相应调整。
+3. 默认 kubeadm 安装使用 Flannel。Flannel 数据面本身不执行 NetworkPolicy；仅创建策略对象不能验收内部访问隔离。目标环境须配置并验证策略执行组件。Flannel 官方说明：https://github.com/flannel-io/flannel/blob/master/Documentation/netpol.md 。k3s 或其他环境也须验证实际执行效果。
+4. 成组升级后，验证六类调用方可以读取 policy/configuration、发送 heartbeat/ACK，非允许 Pod 访问 8081 失败，公开 listener 的内部路径返回 404，并完成一次启用/禁用的状态收敛与 Evidence 投递验证。
+
+回滚须成组恢复原服务器、客户端、Collector 和 Chart；旧版需要的 OAuth/签名配置也须恢复。上述步骤应在目标测试环境执行并记录结果，未通过前 #2043/#2046 保持开放。
+
+本地回归（不连接集群）：
+
+```bash
+bash scripts/services/openbkn_trace_control_test.sh
+bash scripts/services/openbkn_trace_profile_test.sh
+bash scripts/services/openbkn_trace_prerequisites_test.sh
+```
+
+`FOUNDRY_ROOT` 可指向匹配的 Foundry checkout，以附加校验 Chart 的索引契约和 data-migrator 的 Trace 数据库声明。独立 checkout 缺少 Foundry 时会明确报告这些跨仓检查跳过；这不替代 Chart 渲染和真实集群验收。
