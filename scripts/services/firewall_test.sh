@@ -62,6 +62,84 @@ live_ports="$(_firewall_live_ingress_ports)"
 [[ "${live_ports}" == $'8080\n8443' ]] || fail "live ingress host ports: ${live_ports}"
 unset -f kubectl
 
+# OpenBKN firewall rules must be applied to runtime and permanent config
+# without a global reload. This keeps future boots covered while preserving
+# Kubernetes' live service/CNI firewall chains.
+original_reconcile_internal="$(declare -f _firewall_reconcile_internal)"
+original_reconcile_ingress="$(declare -f _firewall_reconcile_ingress_ports)"
+firewall_calls=()
+firewall_query_mode="missing"
+firewall-cmd() {
+    firewall_calls+=("firewall-cmd $*")
+    if [[ "$*" == *--query-* ]]; then
+        [[ "${firewall_query_mode}" == "present" ]]
+        return
+    fi
+    return 0
+}
+firewall_call_present() {
+    local expected="$1" call
+    for call in "${firewall_calls[@]}"; do
+        [[ "${call}" == "${expected}" ]] && return 0
+    done
+    return 1
+}
+
+_firewall_add_source trusted 192.169.0.0/24 || fail "source rule was not added"
+firewall_call_present "firewall-cmd --permanent --zone=trusted --add-source=192.169.0.0/24" \
+    || fail "source rule missing from permanent config"
+firewall_call_present "firewall-cmd --zone=trusted --add-source=192.169.0.0/24" \
+    || fail "source rule missing from runtime config"
+
+firewall_calls=()
+_firewall_add_interface trusted flannel.1 || fail "interface rule was not added"
+firewall_call_present "firewall-cmd --permanent --zone=trusted --add-interface=flannel.1" \
+    || fail "interface rule missing from permanent config"
+firewall_call_present "firewall-cmd --zone=trusted --add-interface=flannel.1" \
+    || fail "interface rule missing from runtime config"
+
+firewall_calls=()
+_firewall_add_port public 8443 || fail "port rule was not added"
+firewall_call_present "firewall-cmd --permanent --zone=public --add-port=8443/tcp" \
+    || fail "port rule missing from permanent config"
+firewall_call_present "firewall-cmd --zone=public --add-port=8443/tcp" \
+    || fail "port rule missing from runtime config"
+
+firewall_calls=()
+_firewall_add_api_rule 192.168.1.20/32 || fail "API rich rule was not added"
+firewall_call_present 'firewall-cmd --permanent --zone=public --add-rich-rule=rule family="ipv4" source address="192.168.1.20/32" port port="6443" protocol="tcp" accept' \
+    || fail "API rich rule missing from permanent config"
+firewall_call_present 'firewall-cmd --zone=public --add-rich-rule=rule family="ipv4" source address="192.168.1.20/32" port port="6443" protocol="tcp" accept' \
+    || fail "API rich rule missing from runtime config"
+
+firewall_calls=()
+firewall_query_mode="present"
+_firewall_add_port public 8443 || fail "existing rule reconciliation failed"
+[[ " ${firewall_calls[*]} " != *"--add-port="* ]] || fail "existing runtime/permanent rules were added again"
+
+firewall_calls=()
+_firewall_remove_port public 80 || fail "owned port removal failed"
+firewall_call_present "firewall-cmd --zone=public --remove-port=80/tcp" \
+    || fail "owned port was not removed from runtime config"
+firewall_call_present "firewall-cmd --permanent --zone=public --remove-port=80/tcp" \
+    || fail "owned port was not removed from permanent config"
+
+# Reconciliation itself must not issue a reload after applying scoped rules.
+_firewall_command_ready() { return 0; }
+_firewall_reconcile_internal() { return 0; }
+_firewall_reconcile_ingress_ports() { return 0; }
+_firewall_reconcile_api_access() { return 0; }
+firewall_calls=()
+OPENBKN_FIREWALL_ENABLED="true"
+reconcile_openbkn_firewall all || fail "all-phase firewall reconciliation failed"
+reconcile_openbkn_firewall api || fail "api-phase firewall reconciliation failed"
+[[ ${#firewall_calls[@]} -eq 0 ]] || fail "reconciliation called firewall-cmd (including reload)"
+unset -f _firewall_command_ready _firewall_reconcile_api_access
+eval "${original_reconcile_internal}"
+eval "${original_reconcile_ingress}"
+unset -f firewall-cmd firewall_call_present
+OPENBKN_FIREWALL_ENABLED=""
+
 # Reconciliation replaces only ports previously recorded as OpenBKN-owned.
 state_file="$(mktemp)"
 printf '%s\n' 80 443 > "${state_file}"

@@ -82,28 +82,48 @@ _firewall_valid_cidr() {
     _firewall_cidr_family "$1" >/dev/null
 }
 
+_firewall_ensure_rule() {
+    local zone="$1" kind="$2" value="$3" mode
+    local -a mode_args=()
+
+    # Keep runtime and permanent configuration in sync without a global
+    # firewalld reload, which can interrupt Kubernetes service/CNI rules.
+    for mode in permanent runtime; do
+        mode_args=()
+        [[ "${mode}" == "permanent" ]] && mode_args=(--permanent)
+        firewall-cmd "${mode_args[@]}" --zone="${zone}" "--query-${kind}=${value}" >/dev/null 2>&1 \
+            || firewall-cmd "${mode_args[@]}" --zone="${zone}" "--add-${kind}=${value}" >/dev/null \
+            || return 1
+    done
+}
+
+_firewall_remove_rule() {
+    local zone="$1" kind="$2" value="$3" mode
+    local -a mode_args=()
+
+    for mode in runtime permanent; do
+        mode_args=()
+        [[ "${mode}" == "permanent" ]] && mode_args=(--permanent)
+        if firewall-cmd "${mode_args[@]}" --zone="${zone}" "--query-${kind}=${value}" >/dev/null 2>&1; then
+            firewall-cmd "${mode_args[@]}" --zone="${zone}" "--remove-${kind}=${value}" >/dev/null || return 1
+        fi
+    done
+}
+
 _firewall_add_source() {
-    local zone="$1" cidr="$2"
-    firewall-cmd --permanent --zone="${zone}" --query-source="${cidr}" >/dev/null 2>&1 \
-        || firewall-cmd --permanent --zone="${zone}" --add-source="${cidr}" >/dev/null
+    _firewall_ensure_rule "$1" source "$2"
 }
 
 _firewall_add_interface() {
-    local zone="$1" interface="$2"
-    firewall-cmd --permanent --zone="${zone}" --query-interface="${interface}" >/dev/null 2>&1 \
-        || firewall-cmd --permanent --zone="${zone}" --add-interface="${interface}" >/dev/null
+    _firewall_ensure_rule "$1" interface "$2"
 }
 
 _firewall_add_port() {
-    local zone="$1" port="$2"
-    firewall-cmd --permanent --zone="${zone}" --query-port="${port}/tcp" >/dev/null 2>&1 \
-        || firewall-cmd --permanent --zone="${zone}" --add-port="${port}/tcp" >/dev/null
+    _firewall_ensure_rule "$1" port "$2/tcp"
 }
 
 _firewall_remove_port() {
-    local zone="$1" port="$2"
-    firewall-cmd --permanent --zone="${zone}" --query-port="${port}/tcp" >/dev/null 2>&1 \
-        && firewall-cmd --permanent --zone="${zone}" --remove-port="${port}/tcp" >/dev/null || true
+    _firewall_remove_rule "$1" port "$2/tcp"
 }
 
 _firewall_reconcile_ingress_ports() {
@@ -149,8 +169,7 @@ _firewall_add_api_rule() {
     local cidr="$1" family
     family="$(_firewall_cidr_family "${cidr}")" || return 1
     local rule="rule family=\"${family}\" source address=\"${cidr}\" port port=\"6443\" protocol=\"tcp\" accept"
-    firewall-cmd --permanent --zone="${OPENBKN_FIREWALL_PUBLIC_ZONE}" --query-rich-rule="${rule}" >/dev/null 2>&1 \
-        || firewall-cmd --permanent --zone="${OPENBKN_FIREWALL_PUBLIC_ZONE}" --add-rich-rule="${rule}" >/dev/null
+    _firewall_ensure_rule "${OPENBKN_FIREWALL_PUBLIC_ZONE}" rich-rule "${rule}"
 }
 
 _firewall_collect_pod_cidrs() {
@@ -271,7 +290,6 @@ reconcile_openbkn_firewall() {
 
     if [[ "${phase}" == "api" ]]; then
         _firewall_reconcile_api_access || return 1
-        firewall-cmd --reload >/dev/null
         log_info "OpenBKN firewalld rules reconciled (${phase})."
         return 0
     fi
@@ -280,6 +298,5 @@ reconcile_openbkn_firewall() {
     if [[ "${phase}" == "all" ]]; then
         _firewall_reconcile_ingress_ports || return 1
     fi
-    firewall-cmd --reload >/dev/null
     log_info "OpenBKN firewalld rules reconciled (${phase})."
 }
