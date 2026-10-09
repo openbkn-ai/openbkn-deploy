@@ -59,6 +59,11 @@ contains "AO uses durable Core" "${ao_sets}" "core.store=mariadb"
 contains "AO requires Core DSN Secret" "${ao_sets}" "core.mariadb.existingSecret=bkn-trace-core-mariadb"
 contains "AO persists evidence" "${ao_sets}" "evidence.store=opensearch"
 contains "AO enables projection" "${ao_sets}" "core.projection.enabled=true"
+contains "AO enables Evidence consumer" "${ao_sets}" "kafkaConsumers.evidence.enabled=true"
+contains "AO sets consumer broker" "${ao_sets}" "kafkaConsumers.evidence.brokers[0]=kafka.resource.svc.cluster.local:9092"
+contains "AO uses Kafka credential Secret" "${ao_sets}" "kafkaConsumers.evidence.existingSecret.name=bkn-trace-evidence-kafka"
+contains "AO uses fixed consumer group" "${ao_sets}" "kafkaConsumers.evidence.consumerGroup=bkn-trace-evidence-ledger-v1"
+
 contains "AO creates the Collector timestamp repair pipeline first" "${ao_sets}" "opensearch.traceTimestampPipeline=bkn-trace-span-timestamp-v1"
 contains "AO records the index-level timestamp repair revision" "${ao_sets}" "opensearch.traceTimestampPipelineRevision=index-default-pipeline-v1"
 not_contains "AO leaves index initialization to runtime" "${ao_sets}" "evidence.indexManagement"
@@ -111,12 +116,27 @@ else
     ok
 fi
 
-HELM_VALUES='{"core":{"store":"mariadb","projection":{"enabled":true}},"evidence":{"store":"opensearch","ingestAuth":{"existingSecret":"bkn-trace-evidence-ingest"}},"opensearch":{"traceTimestampPipeline":"bkn-trace-span-timestamp-v1","traceTimestampPipelineRevision":"index-default-pipeline-v1"}}'
+HELM_VALUES='{"core":{"store":"mariadb","projection":{"enabled":true}},"evidence":{"store":"opensearch","ingestAuth":{"existingSecret":"bkn-trace-evidence-ingest"}},"opensearch":{"traceTimestampPipeline":"bkn-trace-span-timestamp-v1","traceTimestampPipelineRevision":"index-default-pipeline-v1"},"kafkaConsumers":{"evidence":{"enabled":true,"brokers":["kafka.resource.svc.cluster.local:9092"],"topic":"openbkn.evidence.v1","consumerGroup":"bkn-trace-evidence-ledger-v1","saslMechanism":"PLAIN","existingSecret":{"name":"bkn-trace-evidence-kafka","usernameKey":"username","passwordKey":"password"}}}}'
 if _openbkn_should_skip_upgrade agent-observability openbkn agent-observability 0.1.4; then
     ok
 else
     fail "installer should retain the version-skip optimization for a fully reconciled runtime profile"
 fi
+
+# Durable storage alone must not leave the receive side disabled.
+HELM_VALUES="$(python3 -c 'import json,sys; x=json.load(sys.stdin); x["kafkaConsumers"]["evidence"]["enabled"]=False; print(json.dumps(x))' <<<"${HELM_VALUES}")"
+if _openbkn_should_skip_upgrade agent-observability openbkn agent-observability 0.2.0; then
+    fail "same-version upgrade must reconcile a disabled Evidence consumer"
+else
+    ok
+fi
+CORE_SET_VALUES=("kafkaConsumers.evidence.enabled=false")
+if _openbkn_should_skip_upgrade agent-observability openbkn agent-observability 0.2.0; then
+    ok
+else
+    fail "explicit consumer disable override must remain authoritative"
+fi
+CORE_SET_VALUES=()
 
 CORE_SET_VALUES=("core.store=memory")
 HELM_VALUES='{"core":{"store":"memory","projection":{"enabled":false}},"evidence":{"store":"memory"}}'
@@ -211,7 +231,7 @@ else
     fail "repository installer must upgrade a volatile runtime profile"
 fi
 
-HELM_VALUES='{"core":{"store":"mariadb","projection":{"enabled":true}},"evidence":{"store":"opensearch","ingestAuth":{"existingSecret":"bkn-trace-evidence-ingest"}},"opensearch":{"traceTimestampPipeline":"bkn-trace-span-timestamp-v1","traceTimestampPipelineRevision":"index-default-pipeline-v1"}}'
+HELM_VALUES='{"core":{"store":"mariadb","projection":{"enabled":true}},"evidence":{"store":"opensearch","ingestAuth":{"existingSecret":"bkn-trace-evidence-ingest"}},"opensearch":{"traceTimestampPipeline":"bkn-trace-span-timestamp-v1","traceTimestampPipelineRevision":"index-default-pipeline-v1"},"kafkaConsumers":{"evidence":{"enabled":true,"brokers":["kafka.resource.svc.cluster.local:9092"],"topic":"openbkn.evidence.v1","consumerGroup":"bkn-trace-evidence-ledger-v1","saslMechanism":"PLAIN","existingSecret":{"name":"bkn-trace-evidence-kafka","usernameKey":"username","passwordKey":"password"}}}}'
 _install_openbkn_release_local agent-observability /tmp openbkn
 _install_openbkn_release_repo agent-observability openbkn openbkn 0.1.4
 if [[ "${UPGRADE_CALLS}" -eq 2 ]]; then

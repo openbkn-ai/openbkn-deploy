@@ -606,6 +606,10 @@ This install profile targets the protocol in Foundry PR #2047. Policy, configura
 
 The complete install enables five Kafka Evidence publishers. Kafka SASL still requires credentials: the installer copies the first client password from `resource/kafka-sasl` into `bkn-trace-evidence-kafka` in the application namespace, using `KAFKA_CLIENT_USER` as the username. For external Kafka, provision the target Secret with `username` and `password`; `OPENBKN_TRACE_KAFKA_SECRET` overrides its name. Artifact credentials remain separate.
 
+The install also enables agent-observability's Evidence Kafka consumer, using the same broker and credential Secret. A separate Admin Job (96 MiB Java heap, 256 MiB container limit) creates `openbkn.evidence.v1` when absent with `message.timestamp.type=LogAppendTime`, then verifies the effective setting before deploying Core. It never runs Admin tools inside the broker. Existing topics are not altered: a `CreateTime` topic stops installation with an actionable error, because changing the setting does not rewrite old messages. Owners must review the migration and then verify newly produced MCP Evidence. The Job is cleaned up on success or failure.
+
+For external Kafka, the client needs permission to create/describe this topic, or the operator must provision it first. `OPENBKN_TRACE_KAFKA_ADMIN_IMAGE` selects a Kafka CLI image; the default uses the bundled Kafka image. SASL defaults to PLAIN; use `OPENBKN_TRACE_KAFKA_SASL_MECHANISM` for SCRAM-SHA-256 or SCRAM-SHA-512. Topic creation defaults to one partition and replication factor one, matching the bundled broker; override `OPENBKN_TRACE_TOPIC_PARTITIONS` and `OPENBKN_TRACE_TOPIC_REPLICATION_FACTOR` for a larger cluster. An explicit `--set kafkaConsumers.evidence.enabled=false` skips the topic check. The indexed broker, Secret name and SASL `--set` overrides are also honored by the check.
+
 Before upgrading, review `networkPolicy.allowedClients` for all six callers and the actual namespace/Pod labels. The resource-limit cleanup path exports old effective Helm values, so an old allowlist can survive even without `--reuse-values`. Explicitly update it. Same-version installs reconcile missing or outdated publisher/control values.
 
 The default kubeadm installer uses Flannel, whose data plane does not enforce NetworkPolicy by itself. Configure a policy enforcement component and verify it in the target environment. See https://github.com/flannel-io/flannel/blob/master/Documentation/netpol.md . Verify enforcement on k3s and other distributions as well.
@@ -618,6 +622,8 @@ Cluster-free regressions:
 bash scripts/services/openbkn_trace_control_test.sh
 bash scripts/services/openbkn_trace_profile_test.sh
 bash scripts/services/openbkn_trace_prerequisites_test.sh
+bash scripts/services/openbkn_trace_topic_test.sh
+python3 scripts/lib/trace_kafka_topic_job_test.py
 ```
 
 Set `FOUNDRY_ROOT` to a compatible checkout for additional index and data-migrator contract checks. A standalone checkout explicitly reports those cross-repository checks as skipped. These checks do not replace Chart rendering or cluster acceptance.
