@@ -627,3 +627,11 @@ python3 scripts/lib/trace_kafka_topic_job_test.py
 ```
 
 Set `FOUNDRY_ROOT` to a compatible checkout for additional index and data-migrator contract checks. A standalone checkout explicitly reports those cross-repository checks as skipped. These checks do not replace Chart rendering or cluster acceptance.
+
+## Trace/Evidence admission budget
+
+Set `observability.admissionBudget` in the persistent `--config` YAML used for installation and upgrades. Config generation preserves the existing `observability` block. New configs supply `collectorMetricsEndpoint: http://otelcol-contrib:8888/metrics` for the bundled Collector; change it when using a different deployment topology. No Admission credentials or permissions are added by this configuration.
+
+Fill all four deployment/SLO thresholds (`opensearchCapacityThreshold`, `opensearchHeapThreshold`, `collectorQueueThreshold`, `storagePoolThreshold`) with finite numbers in `(0, 1]`. They deliberately have no default. Leaving them empty keeps budget-dependent configuration reads and enable requests unavailable, with explicit diagnostic fields; it does not disable existing capture or stop unrelated APIs. The metrics endpoint must provide both `otelcol_exporter_queue_size` and a positive `otelcol_exporter_queue_capacity`.
+
+Keep these values in the config used on every upgrade. A separate one-time Helm override or `kubectl set env` does not establish that persistent configuration source. Add the block explicitly to existing configurations before requesting Trace/Evidence enable. If applying config changes without changing Chart versions, use `--force-upgrade` so the installer does not skip the release.

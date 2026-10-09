@@ -574,3 +574,11 @@ bash scripts/services/openbkn_trace_prerequisites_test.sh
 ```
 
 `FOUNDRY_ROOT` 可指向匹配的 Foundry checkout，以附加校验 Chart 的索引契约和 data-migrator 的 Trace 数据库声明。独立 checkout 缺少 Foundry 时会明确报告这些跨仓检查跳过；这不替代 Chart 渲染和真实集群验收。
+
+## Trace/Evidence 准入预算配置
+
+在安装和升级使用的持久 `--config` YAML 中配置 `observability.admissionBudget`。配置生成会保留已有的 `observability` 块。新配置为内置 Collector 提供 `collectorMetricsEndpoint: http://otelcol-contrib:8888/metrics`；使用其他部署拓扑时修改该地址。这些配置不新增 Admission 凭据或权限要求。
+
+四项部署/SLO 阈值（`opensearchCapacityThreshold`、`opensearchHeapThreshold`、`collectorQueueThreshold`、`storagePoolThreshold`）均须填写 `(0, 1]` 内的有限数值，不提供隐式默认值。留空时，依赖预算的配置读取及启用请求不可用，并报告具体配置字段；不会关闭已有采集或中断其他接口。指标端点必须提供 `otelcol_exporter_queue_size` 和大于零的 `otelcol_exporter_queue_capacity`。
+
+每次升级使用同一份持久配置。单次 Helm 覆盖或 `kubectl set env` 无法建立这个配置来源。旧配置应显式补充此块，并在请求启用 Trace/Evidence 前填写四项阈值。同 Chart 版本应用配置变更时，使用 `--force-upgrade`，避免安装器跳过 release。
