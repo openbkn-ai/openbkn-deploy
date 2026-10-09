@@ -1,3 +1,32 @@
+# Keep the user-owned observability values across config regeneration. They are
+# also passed to Helm on every install/upgrade through CONFIG_YAML_PATH.
+_config_observability_block() {
+    local config_file="$1"
+    local block=""
+    if [[ -f "${config_file}" ]]; then
+        block="$(awk '
+            /^observability:/ {inside=1; print; next}
+            inside && /^[^[:space:]#]/ {exit}
+            inside {print}
+        ' "${config_file}")"
+    fi
+    if [[ -n "${block}" ]]; then
+        printf '%s\n' "${block}"
+    else
+        cat <<'OBSERVABILITY_EOF'
+observability:
+  admissionBudget:
+    profile: default
+    collectorMetricsEndpoint: http://otelcol-contrib:8888/metrics
+    # Deployment/SLO inputs: configure all four finite thresholds in (0, 1].
+    # Empty values keep Trace/Evidence enable unavailable; no implicit budget.
+    opensearchCapacityThreshold: ""
+    opensearchHeapThreshold: ""
+    collectorQueueThreshold: ""
+    storagePoolThreshold: ""
+OBSERVABILITY_EOF
+    fi
+}
 
 generate_config_yaml() {
     log_info "Generating config.yaml..."
@@ -510,6 +539,9 @@ BKNSAFE_ON
   # Platform initial password (admin first login + users created without one).
   initialPassword: $(yaml_quote "${bkn_safe_initial_password}")"
 
+    local observability_block
+    observability_block="$(_config_observability_block "${out}")"
+
     cat > "${out}" <<EOF
 namespace: ${cfg_namespace}
 env:
@@ -519,6 +551,7 @@ image:
   registry: ${IMAGE_REGISTRY}
 ${storage_section}
 ${bkn_safe_block}
+${observability_block}
 accessAddress:
   host: ${node_ip}
   port: ${access_port}

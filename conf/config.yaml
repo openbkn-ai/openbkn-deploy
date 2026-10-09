@@ -1,5 +1,14 @@
 namespace: openbkn
 replicaCount: 1
+observability:
+  admissionBudget:
+    profile: default
+    collectorMetricsEndpoint: http://otelcol-contrib:8888/metrics
+    # Deployment/SLO inputs: configure all four finite thresholds in (0, 1].
+    opensearchCapacityThreshold: ""
+    opensearchHeapThreshold: ""
+    collectorQueueThreshold: ""
+    storagePoolThreshold: ""
 mode: Community
 env:
   language: en_US.UTF-8
