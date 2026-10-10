@@ -181,12 +181,14 @@ sudo bash ./deploy.sh --distro=k3s openbkn install --version_file=/tmp/m.yaml
 
 Per-chart resolution (stable-first): `--branch` newest build → latest stable →
 `--base` newest build → error. The generated manifest annotates each chart's
-source (`branch` / `stable` / `base`). Requires `gh` (authenticated,
-`package:read`) + `python3`; see `./scripts/gen-dev-manifest.sh -h`.
+source (`branch` / `stable` / `base`). A release branch starts with a full build;
+later builds update only the charts that changed. Requires `python3`; see
+`./scripts/gen-dev-manifest.sh -h`.
 
-Before a release is cut there is **no clean stable**, so to install the **newest
-build of every component** use `--latest` — it resolves each chart to its newest
-`…-main.<date>.sha…` build (ordered by the commit time embedded in the tag), else latest stable:
+To install the **newest builds for the checked-out branch**, use `--latest` from
+`main` or `release/X.Y.Z`. On a release branch it selects each chart's newest
+`X.Y.Z-release.<date>.sha…` build, then falls back to stable and main for charts
+without a release build. Other branches and detached HEAD are rejected:
 
 ```bash
 ./scripts/gen-dev-manifest.sh --latest --out=/tmp/m.yaml
@@ -194,7 +196,8 @@ build of every component** use `--latest` — it resolves each chart to its newe
 
 > macOS note: the system `python3` may lack CA certs and silently resolve every
 > chart as `NOT FOUND`. Set `SSL_CERT_FILE=/etc/ssl/cert.pem` (or `pip install certifi`).
-> `--latest` orders builds via local `git`, so run it from a repo checkout.
+> `--latest` reads the branch of this repository's checkout. Run it from a
+> `main` or `release/X.Y.Z` checkout.
 
 ### Install behind a restricted network (CN / no docker.io / slow GHCR)
 
@@ -204,7 +207,7 @@ On clusters that can't reach `docker.io` or pull GHCR image blobs (read timeouts
 
 - **`--registry=<swr / ghcr / host/ns>`** — image registry for **BKN images** and the bundled **data-service / ingress** images (sugar for `--set image.registry`). `swr` → `swr.cn-east-3.myhuaweicloud.com/openbkn-ai`, `ghcr` → `ghcr.io/openbkn-ai`. Precedence: explicit `--set image.registry=…` > `--registry` > an `image.registry` already in your `--config` YAML (respected, e.g. `dev/conf/mac-config.yaml`) > default `swr` (when config file does not set `image.registry`). SWR mirrors the same `…-main.<date>.sha…` build tags as GHCR.
 - **`--dockerhub-mirror=<auto / host / off>`** — containerd `docker.io` mirror for **third-party images** (otel/hydra/postgres/minio). Writes `/etc/containerd/certs.d/docker.io/hosts.toml` (needs root + a containerd `config_path` certs.d; else it warns and skips, never fails). **Defaults to `auto`** — probes a candidate list and picks the first mirror that serves this stack's docker.io images over the mirror (`?ns=docker.io`) protocol (sentinel `oryd/hydra`; `docker.m.daocloud.io` 403s namespaced repos there, so a fixed default isn't safe). Pass a host to pin one (e.g. `docker.1panel.live`); `off` disables. Candidate list overridable via `OPENBKN_DOCKERHUB_MIRROR_CANDIDATES`.
-- **`--latest`** — when no `--version_file` is given, auto-runs `gen-dev-manifest.sh --latest` and installs the result (run from a repo checkout — it needs `git`).
+- **`--latest`** — when no `--version_file` is given, installs the newest builds for this checkout's `main` or `release/X.Y.Z` branch (requires `git`).
 
 ```bash
 # Newest builds + BKN images from SWR + docker.io third-party via the default mirror:

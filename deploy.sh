@@ -125,7 +125,7 @@ usage() {
     echo "  --dockerhub-mirror=<auto|host|off> Containerd docker.io mirror for third-party images (otel/hydra/postgres)"
     echo "                                on CN/restricted nets. Default 'auto' probes candidates and picks a working one;"
     echo "                                pass a host to pin, 'off' to disable. Requires root + containerd certs.d config_path."
-    echo "  --version=dev | --latest      Follow newest main builds instead of the newest release manifest"
+    echo "  --version=dev | --latest      Follow newest builds for the checked-out main or release/X.Y.Z branch"
     echo "                                (default falls back to this only when no release manifest exists)."
     echo "  --access_address=<addr>       OpenBKN access address: host, host:port, or scheme://host:port/path"
     echo "                                Example: --access_address=10.0.0.5 or --access_address=https://openbkn.example.com:443"
