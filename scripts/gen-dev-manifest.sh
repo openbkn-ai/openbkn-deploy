@@ -22,21 +22,19 @@
 #
 # With no --branch it is pure stable: every chart = highest clean semver.
 #
-# --latest overrides the above: resolve EACH chart to its NEWEST main build,
-# i.e. among tags of the form <semver>-main.<YYYYMMDDHHMMSS>.sha<7hex>, pick the
-# one with the most recent embedded commit time (a plain string compare on the
-# fixed-width date — no local git history needed). If a chart has no such build,
-# fall back to stable (highest clean semver), then to the normal missing/error
-# handling. --latest is independent of --branch; if both are given, --latest
-# wins. Use this for "newest of everything from main", restricted-network safe.
+# --latest follows the branch checked out in this repository. On main it picks
+# each chart's newest main build. On release/X.Y.Z it composes that release
+# branch's newest build per chart, then uses the stable/main fallbacks above.
 #
-# Requires: python3 + git (queries GHCR OCI registry anonymously; no gh/PAT for public packages). For --branch, fetch the branch first so origin/<branch> resolves. On macOS the system python3 may lack CA certs; set SSL_CERT_FILE=/etc/ssl/cert.pem (or `pip install certifi`) if every chart resolves NOT FOUND.
+# Requires: python3; --latest also requires a Git checkout. GHCR OCI queries
+# are anonymous for public packages. On macOS, set SSL_CERT_FILE=/etc/ssl/cert.pem
+# if the system Python lacks CA certificates.
 #
 # Examples:
 #   ./gen-dev-manifest.sh                          # latest stable, all charts
 #   ./gen-dev-manifest.sh --branch=fix/my-thing    # my branch + stable fallback
 #   ./gen-dev-manifest.sh --branch=feat/x --base=release/0.2 --out=/tmp/m.yaml
-#   ./gen-dev-manifest.sh --latest --out=/tmp/m.yaml  # newest main build per chart
+#   ./gen-dev-manifest.sh --latest --out=/tmp/m.yaml  # current main or release/X.Y.Z branch
 # =============================================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,16 +64,40 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-if [ -n "${LATEST}" ] && [ -n "${BRANCH}" ]; then
-    echo "Note: --latest overrides --branch ('${BRANCH}'); resolving newest main build per chart." >&2
+if [ -n "${LATEST}" ]; then
+    if [ -n "${BRANCH}" ]; then
+        echo "Note: --latest ignores --branch ('${BRANCH}') and uses this checkout's branch." >&2
+    fi
+    command -v git >/dev/null 2>&1 || { echo "Error: --latest requires git." >&2; exit 1; }
+    if ! CURRENT_BRANCH="$(git -C "${SCRIPT_DIR}/.." symbolic-ref --quiet --short HEAD 2>/dev/null)"; then
+        echo "Error: --latest requires a checked-out main or release/X.Y.Z branch; detached HEAD is not supported." >&2
+        exit 1
+    fi
+    case "${CURRENT_BRANCH}" in
+        main)
+            echo "--latest: current branch is main; resolving newest main builds per chart." >&2
+            ;;
+        release/*)
+            if [[ ! "${CURRENT_BRANCH}" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "Error: --latest only supports main or release/X.Y.Z; current branch is '${CURRENT_BRANCH}'." >&2
+                exit 1
+            fi
+            BRANCH="${CURRENT_BRANCH}"
+            LATEST=""
+            echo "--latest: current branch is ${CURRENT_BRANCH}; resolving its newest builds per chart." >&2
+            ;;
+        *)
+            echo "Error: --latest only supports main or release/X.Y.Z; current branch is '${CURRENT_BRANCH}'. Use --branch=<branch> for an explicit branch manifest." >&2
+            exit 1
+            ;;
+    esac
 fi
 
 command -v python3 >/dev/null 2>&1 || { echo "Error: python3 required." >&2; exit 1; }
-command -v git >/dev/null 2>&1 || { echo "Error: git required (for --branch HEAD sha)." >&2; exit 1; }
 [ -f "${TEMPLATE}" ] || { echo "Error: template not found: ${TEMPLATE}" >&2; exit 1; }
 
 ORG="$ORG" TEMPLATE="$TEMPLATE" BRANCH="$BRANCH" BASE="$BASE" OUT="$OUT" LATEST="$LATEST" python3 - <<'PY'
-import os, re, json, subprocess, ssl, sys, time
+import os, re, json, ssl, sys, time
 
 ORG=os.environ["ORG"]; TEMPLATE=os.environ["TEMPLATE"]
 BRANCH=os.environ["BRANCH"]; BASE=os.environ["BASE"]; OUT=os.environ["OUT"]
@@ -87,13 +109,17 @@ def sanitize(b):
     b=re.sub(r'-+','-',b)
     return b.strip('.-')
 
-SAN_BRANCH=sanitize(BRANCH) if BRANCH else ""
-SAN_BASE=sanitize(BASE) if BASE else ""
+def branch_channel(branch):
+    if re.fullmatch(r'release/\d+\.\d+\.\d+', branch):
+        return 'release', branch.split('/', 1)[1]
+    return sanitize(branch), None
+
+SAN_BRANCH, BRANCH_LINE=branch_channel(BRANCH) if BRANCH else ("", None)
+SAN_BASE, BASE_LINE=branch_channel(BASE) if BASE else ("", None)
 
 SEMVER=re.compile(r'^(\d+)\.(\d+)\.(\d+)$')
 
 import urllib.request
-REPO_DIR=os.path.dirname(os.path.abspath(TEMPLATE))
 
 def _make_ssl_context():
     """Build an SSL context that actually verifies on macOS system python (3.7),
@@ -158,22 +184,6 @@ def reg_tags(chart):
         print(f"  (warning: {chart} tag fetch failed after retries: {last_exc})", file=sys.stderr)
     return []
 
-def git_short_sha(ref):
-    """7-char sha of a branch ref (origin/<ref> preferred), matching CI's tag sha."""
-    if not ref: return None
-    for r in (f"origin/{ref}", ref):
-        try:
-            out=subprocess.run(["git","rev-parse","--short=7",r],
-                               capture_output=True, text=True, cwd=REPO_DIR)
-            if out.returncode==0 and out.stdout.strip():
-                return out.stdout.strip()
-        except Exception:
-            pass
-    return None
-
-BR_SHA=git_short_sha(BRANCH)
-BASE_SHA=git_short_sha(BASE)
-
 def highest_semver(tags):
     cand=[t for t in tags if SEMVER.match(t)]
     if not cand: return None
@@ -197,17 +207,25 @@ def newest_main_build(tags):
     if not cand: return None
     return max(cand, key=lambda ts: ts[1])[0]
 
-# Branch build at an exact HEAD sha. Accepts both the dated form
-# (-<san>.<date>.sha<7>) and the legacy un-dated form (-<san>.sha<7>).
-def _branch_tag(tags, san, sha):
-    """Tag for a branch = the build at the branch HEAD sha exactly. No HEAD-sha
-    build (component not rebuilt on this branch, or branch not fetched) -> None,
-    so the caller falls back to stable rather than picking a stale older build."""
-    if not sha: return None
-    pat=re.compile(rf'-{re.escape(san)}\.(?:\d{{14}}\.)?sha{re.escape(sha)}$')
-    for t in tags:
-        if pat.search(t): return t
-    return None
+# Later release pushes may rebuild only some components. Compose the branch's
+# newest published build for each chart instead of requiring one shared HEAD SHA.
+def newest_branch_build(tags, san, line=None):
+    prefix=re.escape(line) if line else r'\d+\.\d+\.\d+'
+    channels=[san]
+    if san == 'release' and line:
+        channels.append(f'release-{line}')
+    channel='(?:' + '|'.join(re.escape(name) for name in channels) + ')'
+    dated=re.compile(rf'^{prefix}-{channel}\.(\d{{14}})\.sha[0-9a-f]{{7}}$')
+    candidates=[]
+    for tag in tags:
+        match=dated.fullmatch(tag)
+        if match: candidates.append((tag, match.group(1)))
+    if candidates:
+        return max(candidates, key=lambda item:item[1])[0]
+
+    legacy=re.compile(rf'^{prefix}-{channel}\.sha[0-9a-f]{{7}}$')
+    candidates=[tag for tag in tags if legacy.fullmatch(tag)]
+    return candidates[0] if len(candidates) == 1 else None
 
 def resolve(chart):
     tags=reg_tags(chart)
@@ -219,16 +237,16 @@ def resolve(chart):
         s=highest_semver(tags)
         if s: return s, "stable"
         return None, "missing"
-    # 1) branch build (match branch HEAD sha; fetch the branch first if stale)
+    # 1) newest branch build for each chart
     if SAN_BRANCH:
-        t=_branch_tag(tags, SAN_BRANCH, BR_SHA)
+        t=newest_branch_build(tags, SAN_BRANCH, BRANCH_LINE)
         if t: return t, "branch"
     # 2) latest stable (highest clean semver)
     s=highest_semver(tags)
     if s: return s, "stable"
     # 3) base branch build
     if SAN_BASE:
-        t=_branch_tag(tags, SAN_BASE, BASE_SHA)
+        t=newest_branch_build(tags, SAN_BASE, BASE_LINE)
         if t: return t, "base"
     return None, "missing"
 
@@ -251,11 +269,6 @@ mode=("latest (newest main build per chart, else stable)" if LATEST
       else f"branch={BRANCH or '-'}, base={BASE}")
 print(f"Resolving {len(charts)} charts from ghcr.io/{ORG}/charts "
       f"({mode})...", file=sys.stderr)
-if not LATEST and SAN_BRANCH and not BR_SHA:
-    print(f"  WARNING: cannot resolve sha for branch '{BRANCH}' (fetch it: "
-          f"git fetch origin {BRANCH}); branch matching disabled -> all stable.",
-          file=sys.stderr)
-
 resolved={}; sources={}
 for c in charts:
     v,src=resolve(c)

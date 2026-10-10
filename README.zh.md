@@ -177,19 +177,20 @@ sudo bash ./deploy.sh --distro=k3s openbkn install --version_file=/tmp/m.yaml
 ```
 
 逐 chart 解析（stable 优先）：`--branch` 最新构建 → 最新 stable → `--base` 最新构建 → 报错。
-生成的 manifest 会逐 chart 标注来源（`branch` / `stable` / `base`）。
-需要 `gh`（已登录，`package:read`）+ `python3`；详见 `./scripts/gen-dev-manifest.sh -h`。
+release 分支先全量构建，之后只更新有改动的 chart。生成的 manifest 会逐 chart 标注
+来源（`branch` / `stable` / `base`）。需要 `python3`；详见 `./scripts/gen-dev-manifest.sh -h`。
 
-发版之前没有干净 stable，要装**每个组件的最新构建**用 `--latest` —— 逐 chart 取
-其最新 `…-main.<日期>.sha…` 构建（按 tag 内嵌的提交时间排序），否则回退最新 stable：
+要安装**当前检出分支的最新构建**，在 `main` 或 `release/X.Y.Z` 上使用 `--latest`。
+release 分支逐 chart 取最新 `X.Y.Z-release.<日期>.sha…` 构建；缺少分支构建时
+回退到最新 stable，再回退到 main。其他分支或 detached HEAD 会报错：
 
 ```bash
 ./scripts/gen-dev-manifest.sh --latest --out=/tmp/m.yaml
 ```
 
 > macOS 注意：系统自带 `python3` 可能缺 CA 证书，导致逐 chart 静默解析成 `NOT FOUND`。
-> 设 `SSL_CERT_FILE=/etc/ssl/cert.pem`（或 `pip install certifi`）。`--latest` 用本地 `git`
-> 排序构建，需在仓库 checkout 内运行。
+> 设 `SSL_CERT_FILE=/etc/ssl/cert.pem`（或 `pip install certifi`）。`--latest` 从本仓库
+> checkout 读取分支名，需检出 `main` 或 `release/X.Y.Z`。
 
 ### 受限网络安装（国内 / 连不上 docker.io / GHCR 拉取慢）
 
@@ -198,7 +199,7 @@ sudo bash ./deploy.sh --distro=k3s openbkn install --version_file=/tmp/m.yaml
 
 - **`--registry=<swr / ghcr / host/ns>`** —— **BKN 镜像**以及内置 **数据服务 / ingress** 镜像的 registry（`--set image.registry` 的糖）。`swr` → `swr.cn-east-3.myhuaweicloud.com/openbkn-ai`，`ghcr` → `ghcr.io/openbkn-ai`。优先级：显式 `--set image.registry=…` > `--registry` > `--config` YAML 里已有的 `image.registry`（尊重，如 `dev/conf/mac-config.yaml`）> 默认 `swr`（当配置文件未设置 `image.registry` 时）。SWR 与 GHCR 同步同样的 `…-main.<日期>.sha…` 构建 tag。
 - **`--dockerhub-mirror=<auto / host / off>`** —— **第三方镜像**（otel/hydra/postgres/minio）的 containerd `docker.io` mirror。写 `/etc/containerd/certs.d/docker.io/hosts.toml`（需 root + containerd 配了 `config_path` certs.d；否则告警跳过、不报错）。**默认 `auto`** —— 探测候选列表，选第一个能经 mirror（`?ns=docker.io`）协议服务本栈 docker.io 镜像的（标志镜像 `oryd/hydra`；`docker.m.daocloud.io` 对带 namespace 的仓库会 403，所以固定默认不安全）。传 host 钉死某个（如 `docker.1panel.live`）；`off` 关闭。候选列表可用 `OPENBKN_DOCKERHUB_MIRROR_CANDIDATES` 覆盖。
-- **`--latest`** —— 没给 `--version_file` 时自动跑 `gen-dev-manifest.sh --latest` 并安装结果（需在仓库 checkout 内运行，依赖 `git`）。
+- **`--latest`** —— 没给 `--version_file` 时安装本仓库当前 `main` 或 `release/X.Y.Z` 分支的最新构建（需 `git`）。
 
 ```bash
 # 最新构建 + BKN 镜像走 SWR + docker.io 第三方走默认 mirror：
