@@ -13,7 +13,6 @@ import binascii
 import contextlib
 import json
 import os
-import platform
 import re
 import socket
 import subprocess
@@ -26,49 +25,6 @@ from typing import Any, Iterator, Mapping, Optional, Sequence
 
 
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
-GO_ARCHITECTURES = {
-    "x86_64": "amd64",
-    "amd64": "amd64",
-    "aarch64": "arm64",
-    "arm64": "arm64",
-}
-
-
-def host_machine(goos: str) -> str:
-    """Return the host CPU architecture, seeing through Rosetta on macOS.
-
-    An x86_64 Python on Apple silicon reports x86_64, but the host can run the
-    native arm64 executable, and only that one is bundled for macOS.
-    """
-    machine = platform.machine()
-    if goos != "darwin" or machine != "x86_64":
-        return machine
-    try:
-        result = subprocess.run(
-            ["/usr/sbin/sysctl", "-n", "hw.optional.arm64"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
-        return machine
-    return "arm64" if result.stdout.strip() == "1" else machine
-
-
-def bundled_authz_migrator(system: str = "", machine: str = "") -> Path:
-    """Return the checked-in authorization executable for the running host.
-
-    The executable runs where this script runs, not inside the cluster, so it
-    must match the operator host's platform rather than the node images.
-    """
-    goos = (system or platform.system()).lower()
-    machine = (machine or host_machine(goos)).lower()
-    goarch = GO_ARCHITECTURES.get(machine, machine)
-    executable = f"authz-migrate-{goos}-{goarch}"
-    return SCRIPT_DIRECTORY / "authz_migrate" / executable
-
-
-DEFAULT_AUTHZ_MIGRATOR = str(bundled_authz_migrator())
 DEFAULT_STATE_FILE = "/tmp/openbkn-permission-model-transition-workloads.tsv"
 DEFAULT_RUN_ROOT = Path.home() / ".openbkn-ai" / "migrations"
 TARGET_VERSION = "0.1.5"
@@ -107,8 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
         migration.add_argument("--expected-context", default="")
         migration.add_argument(
             "--authz-migrator",
-            default=os.getenv("OPENBKN_AUTHZ_MIGRATOR", DEFAULT_AUTHZ_MIGRATOR),
-            help=argparse.SUPPRESS,
+            default=os.getenv("OPENBKN_AUTHZ_MIGRATOR", ""),
+            help="path to an externally supplied authorization migration executable",
         )
 
     upgrade = commands.add_parser(
@@ -119,8 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade.add_argument("--expected-context", default="", help=argparse.SUPPRESS)
     upgrade.add_argument(
         "--authz-migrator",
-        default=os.getenv("OPENBKN_AUTHZ_MIGRATOR", DEFAULT_AUTHZ_MIGRATOR),
-        help=argparse.SUPPRESS,
+        default=os.getenv("OPENBKN_AUTHZ_MIGRATOR", ""),
+        help="path to an externally supplied authorization migration executable",
     )
 
     return parser
@@ -501,13 +457,16 @@ def build_steps(args: argparse.Namespace, report_dir: Path) -> list[Step]:
     Future Vega work for the same target release is added here as another
     explicit step. It must not introduce another operator-facing entry point.
     """
-    authz_migrator = Path(args.authz_migrator)
+    if not args.authz_migrator:
+        raise OrchestrationError(
+            "authorization migration requires --authz-migrator or "
+            "OPENBKN_AUTHZ_MIGRATOR; this repository does not bundle executables"
+        )
+    authz_migrator = Path(args.authz_migrator).resolve()
     if not authz_migrator.is_file() or not os.access(authz_migrator, os.X_OK):
         raise OrchestrationError(
             f"authorization migration executable is missing or not executable: "
-            f"{authz_migrator}; "
-            "the release bundles linux/amd64, linux/arm64 and darwin/arm64, "
-            "build another platform with authz_migrate/build.sh <os>/<arch>"
+            f"{authz_migrator}; provide a valid external executable"
         )
 
     bkn_report = report_dir / "01-bkn-data.json"

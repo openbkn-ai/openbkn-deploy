@@ -16,63 +16,58 @@ import migrate
 
 
 class StepRegistryTest(unittest.TestCase):
-    def test_bundled_authorization_migrators_match_their_platform(self):
-        # Executable magic and CPU type fields: ELF e_machine, Mach-O cputype.
-        expected_headers = {
-            "linux-amd64": (b"\x7fELF", slice(18, 20), 0x3E),
-            "linux-arm64": (b"\x7fELF", slice(18, 20), 0xB7),
-            "darwin-arm64": (b"\xcf\xfa\xed\xfe", slice(4, 8), 0x0100000C),
-        }
-        executables = {
-            platform: migrate.SCRIPT_DIRECTORY / "authz_migrate" / f"authz-migrate-{platform}"
-            for platform in expected_headers
-        }
+    def test_migration_commands_have_no_default_executable(self):
+        with patch.dict(os.environ, {"OPENBKN_AUTHZ_MIGRATOR": ""}):
+            parser = migrate.build_parser()
+        for command in ("upgrade", "dry-run", "apply"):
+            arguments = [command]
+            if command != "upgrade":
+                arguments.extend(["--report-dir", "reports"])
+            with self.subTest(command=command):
+                self.assertEqual("", parser.parse_args(arguments).authz_migrator)
 
-        if not any(executable.exists() for executable in executables.values()):
-            self.skipTest("source checkout intentionally excludes the release executable")
-        for platform, executable in executables.items():
-            magic, cpu_field, cpu_type = expected_headers[platform]
-            with self.subTest(platform=platform):
-                self.assertTrue(executable.is_file())
-                self.assertTrue(os.access(executable, os.X_OK))
-                header = executable.read_bytes()[:20]
-                self.assertEqual(magic, header[:4])
-                self.assertEqual(cpu_type, int.from_bytes(header[cpu_field], "little"))
-
-    def test_selects_the_bundled_authorization_migrator_for_the_host(self):
-        directory = migrate.SCRIPT_DIRECTORY / "authz_migrate"
-        cases = {
-            ("Linux", "x86_64"): "authz-migrate-linux-amd64",
-            ("Linux", "aarch64"): "authz-migrate-linux-arm64",
-            ("Linux", "arm64"): "authz-migrate-linux-arm64",
-            ("Darwin", "arm64"): "authz-migrate-darwin-arm64",
-        }
-
-        for (system, machine), name in cases.items():
-            with self.subTest(system=system, machine=machine):
+    def test_external_executable_can_be_set_by_environment_or_cli(self):
+        with patch.dict(os.environ, {"OPENBKN_AUTHZ_MIGRATOR": "/external/env-migrator"}):
+            parser = migrate.build_parser()
+        for command in ("upgrade", "dry-run", "apply"):
+            arguments = [command]
+            if command != "upgrade":
+                arguments.extend(["--report-dir", "reports"])
+            with self.subTest(command=command):
                 self.assertEqual(
-                    directory / name, migrate.bundled_authz_migrator(system, machine)
+                    "/external/env-migrator", parser.parse_args(arguments).authz_migrator
+                )
+                self.assertEqual(
+                    "/external/cli-migrator",
+                    parser.parse_args(
+                        arguments + ["--authz-migrator", "/external/cli-migrator"]
+                    ).authz_migrator,
                 )
 
-    def test_x86_64_python_on_apple_silicon_selects_the_arm64_migrator(self):
-        directory = migrate.SCRIPT_DIRECTORY / "authz_migrate"
-        cases = {"1\n": "authz-migrate-darwin-arm64", "": "authz-migrate-darwin-amd64"}
+    def test_missing_external_executable_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for executable in ("", str(root / "missing-migrator")):
+                args = argparse.Namespace(command="dry-run", authz_migrator=executable)
+                with self.subTest(executable=executable), self.assertRaises(
+                    migrate.OrchestrationError
+                ):
+                    migrate.build_steps(args, root / "reports")
 
-        for sysctl_output, name in cases.items():
-            completed = MagicMock(returncode=0, stdout=sysctl_output, stderr="")
-            with self.subTest(sysctl_output=sysctl_output), patch.object(
-                migrate.platform, "machine", return_value="x86_64"
-            ), patch.object(migrate.subprocess, "run", return_value=completed) as run:
-                self.assertEqual(directory / name, migrate.bundled_authz_migrator("Darwin"))
-                self.assertEqual(["/usr/sbin/sysctl", "-n", "hw.optional.arm64"], run.call_args.args[0])
-
-        with patch.object(migrate.platform, "machine", return_value="x86_64"), patch.object(
-            migrate.subprocess, "run"
-        ) as run:
-            self.assertEqual(
-                directory / "authz-migrate-linux-amd64", migrate.bundled_authz_migrator("Linux")
+    def test_missing_executable_does_not_run_any_data_step(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report_dir = Path(directory) / "reports"
+            args = argparse.Namespace(
+                command="dry-run", authz_migrator="", report_dir=str(report_dir),
+                namespace="openbkn", expected_context="",
             )
-            run.assert_not_called()
+            with patch.object(migrate, "installed_target_version", return_value="0.1.5"), patch.object(
+                migrate, "run_step"
+            ) as run_step:
+                with self.assertRaisesRegex(migrate.OrchestrationError, "--authz-migrator"):
+                    migrate.run_migration(args)
+                run_step.assert_not_called()
+            self.assertFalse((report_dir / "summary.json").exists())
 
     def test_registers_data_steps_before_authorization(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -92,7 +87,7 @@ class StepRegistryTest(unittest.TestCase):
             [step.name for step in steps],
         )
         self.assertIn("bkn_data.py", steps[0].command[1])
-        self.assertTrue(steps[1].command[1].endswith("vega/vega_data.py"))
+        self.assertEqual(("vega", "vega_data.py"), Path(steps[1].command[1]).parts[-2:])
         self.assertEqual("dry-run", steps[2].command[2])
 
 
