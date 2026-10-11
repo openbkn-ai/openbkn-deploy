@@ -35,6 +35,7 @@ def defaults(brokers, mechanism, secret):
                   "existingSecret": {"name": secret, "usernameKey": "username", "passwordKey": "password"}}
     consumer = copy.deepcopy(connection)
     consumer.update(topic="openbkn.audit.v1", consumerGroup="bkn-trace-audit-ledger-v1")
+    connection["environment"] = "development"
     return {"core": {"autoMigrate": True}, "kafkaConsumers": {"audit": consumer},
             "auditPublisher": connection}
 
@@ -103,13 +104,10 @@ def validate_system(values, namespace):
     if publisher.get("saslMechanism") != "PLAIN":
         raise ValueError("Core Audit publisher requires the existing PLAIN Kafka path")
     if publisher.get("environment") not in ("development", "test", "staging", "production"):
-        raise ValueError("auditPublisher.environment must explicitly identify development/test/staging/production")
+        raise ValueError("auditPublisher.environment must be development/test/staging/production")
     if consumer.get("saslMechanism") not in ("PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"):
         raise ValueError("Audit consumer requires a supported Kafka SASL mechanism")
-    consumer_secret = consumer.get("existingSecret", {})
     publisher_secret = publisher.get("existingSecret", {})
-    if publisher.get("environment") == "production" and publisher_secret.get("name") == consumer_secret.get("name"):
-        raise ValueError("production Core Audit publisher requires an independent approved write Secret reference")
     core = values.get("core", {})
     if core.get("store") != "mariadb" or core.get("autoMigrate") is not True:
         raise ValueError("System Audit requires Core MariaDB and autoMigrate=true")

@@ -94,7 +94,6 @@ class RenderTests(unittest.TestCase):
         args[3] = output.getvalue().strip()
         values = defaults("broker:9092", "PLAIN", "existing-client")
         values["core"].update(store="mariadb", mariadb={"existingSecret": "core-db"})
-        values["auditPublisher"]["environment"] = "test"
         values_path = self.directory / "values.json"
         values_path.write_text(json.dumps(values), encoding="utf-8")
         args += ["-f", str(values_path)]
@@ -103,10 +102,12 @@ class RenderTests(unittest.TestCase):
         effective = json.loads(output.getvalue())["config"]
         self.assertTrue(effective["kafkaConsumers"]["audit"]["enabled"])
         self.assertTrue(effective["auditPublisher"]["enabled"])
+        self.assertEqual(effective["auditPublisher"]["environment"], "development")
         self.assertFalse(set(effective) - set(NON_AUDIT_KEYS) - {"auditPublisher"})
         manifests = helper.run_helm(["template", *args[2:]])
         self.assertRegex(manifests, r'BKN_TRACE_AUDIT_KAFKA_ENABLED\s+value: "true"')
         self.assertRegex(manifests, r'BKN_AUDIT_KAFKA_ENABLED\s+value: "true"')
+        self.assertRegex(manifests, r'BKN_AUDIT_ENVIRONMENT\s+value: "development"')
         self.assertTrue("openbkn-audit-values-probe" not in manifests)
 
 

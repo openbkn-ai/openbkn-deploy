@@ -29,8 +29,14 @@ class SystemAuditTests(unittest.TestCase):
         self.assertEqual(values["kafkaConsumers"]["audit"]["consumerGroup"], "bkn-trace-audit-ledger-v1")
         self.assertNotIn("password", values["auditPublisher"])
 
-    def test_environment_is_not_guessed(self):
-        self.assertNotIn("environment", audit.defaults("broker:9092", "PLAIN", "existing-client")["auditPublisher"])
+    @patch.object(audit, "check_secret")
+    def test_default_environment_validates_without_operator_configuration(self, check):
+        values = audit.defaults("broker:9092", "PLAIN", "existing-client")
+        values["core"] = self.values()["core"]
+        self.assertEqual(values["auditPublisher"]["environment"], "development")
+        self.assertNotIn("environment", values["kafkaConsumers"]["audit"])
+        audit.validate_system(values, "openbkn")
+        self.assertEqual(check.call_count, 3)
 
     def test_historical_disabled_empty_settings_do_not_block_defaults(self):
         values = self.values()
@@ -82,13 +88,17 @@ class SystemAuditTests(unittest.TestCase):
                 audit.validate_system(values, "openbkn")
 
     @patch.object(audit, "check_secret")
-    def test_production_does_not_assume_consumer_identity_is_publisher_identity(self, check):
-        values = self.values()
-        values["auditPublisher"]["environment"] = "production"
-        with self.assertRaisesRegex(ValueError, "production.*independent"):
-            audit.validate_system(values, "openbkn")
-        values["auditPublisher"]["existingSecret"]["name"] = "approved-publisher"
-        audit.validate_system(values, "openbkn")
+    def test_shared_existing_secret_is_allowed_in_every_environment(self, check):
+        for environment in ("development", "test", "staging", "production"):
+            values = self.values()
+            values["auditPublisher"]["environment"] = environment
+            before = copy.deepcopy(values)
+            with self.subTest(environment=environment):
+                check.reset_mock()
+                audit.validate_system(values, "openbkn")
+                self.assertEqual(values, before)
+                self.assertEqual(check.call_count, 3)
+                self.assertEqual(check.call_args.args[:2], ("openbkn", "existing-client"))
 
     def test_rendered_defaults_and_partial_maps_use_helm_result(self):
         values = self.values()

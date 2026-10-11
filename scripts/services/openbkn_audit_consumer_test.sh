@@ -143,12 +143,34 @@ assert v['auditPublisher']['environment']=='staging'
 PY
 }
 
+default_environment_and_shared_credentials() {
+    printf '{}\n' >"${CONFIG_YAML_PATH}"
+    local environment
+    local -a overrides
+    for environment in development production; do
+        overrides=()
+        if [[ "${environment}" == production ]]; then
+            overrides+=(--set auditPublisher.environment=production)
+        fi
+        prepare "${overrides[@]}"
+        apply
+        python3 - "${CASE_DIR}/applied.json" "${environment}" <<'PY'
+import json,sys
+v=json.load(open(sys.argv[1]))['config']
+assert v['auditPublisher']['environment']==sys.argv[2]
+assert v['auditPublisher']['existingSecret']==v['kafkaConsumers']['audit']['existingSecret']
+assert v['auditPublisher']['existingSecret']['name']=='bkn-trace-evidence-kafka'
+PY
+    done
+    [[ "$(wc -l <"${CASE_DIR}/upgrades")" -eq 2 ]]
+}
+
 negative_configuration() {
     for flag in kafkaConsumers.audit.enabled=false auditPublisher.enabled=false core.autoMigrate=false; do
         if prepare --set "${flag}"; then echo "accepted $flag" >&2; exit 1; fi
     done
-    printf '{}\n' >"${CONFIG_YAML_PATH}"
-    if prepare; then echo 'guessed missing environment' >&2; exit 1; fi
+    printf 'auditPublisher:\n  environment: invalid\n' >"${CONFIG_YAML_PATH}"
+    if prepare; then echo 'accepted invalid environment' >&2; exit 1; fi
     printf 'auditPublisher:\n  environment: test\n' >"${CONFIG_YAML_PATH}"
     for state in missing missing-key missing-dsn timeout; do
         export AUDIT_TEST_SECRET_STATE="${state}"
@@ -219,7 +241,7 @@ preflight_precedes_application_loop() {
     grep -q unrelated-only "${CASE_DIR}/upgrades"
 }
 
-for case in repair_and_preserve explicit_override_and_idempotency non_audit_drift_is_blocked current_file_override negative_configuration pending_and_concurrent_release topic_failure_stops_and_cleans fresh_install_and_chart_upgrade preflight_precedes_application_loop; do
+for case in repair_and_preserve explicit_override_and_idempotency non_audit_drift_is_blocked current_file_override default_environment_and_shared_credentials negative_configuration pending_and_concurrent_release topic_failure_stops_and_cleans fresh_install_and_chart_upgrade preflight_precedes_application_loop; do
     run_case "${case}"
 done
 
