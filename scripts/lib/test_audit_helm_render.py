@@ -94,9 +94,8 @@ class RenderTests(unittest.TestCase):
         args[3] = output.getvalue().strip()
         values = defaults("broker:9092", "PLAIN", "existing-client")
         values["core"].update(store="mariadb", mariadb={"existingSecret": "core-db"})
-        values_path = self.directory / "values.json"
-        values_path.write_text(json.dumps(values), encoding="utf-8")
-        args += ["-f", str(values_path)]
+        for name, value in values.items():
+            args += ["--set-json", f"{name}={json.dumps(value)}"]
         with contextlib.redirect_stdout(io.StringIO()) as output:
             helper.render(self.directory, "actual", args.copy())
         effective = json.loads(output.getvalue())["config"]
