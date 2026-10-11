@@ -1,0 +1,42 @@
+# Test-only Chart: verifies real Helm merging, not the shipped AO templates.
+replicaCount: 1
+image:
+  repository: test
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+affinity: {}
+opensearch:
+  endpoint: old
+enterpriseBusinessProvenance:
+  enabled: false
+core:
+  store: memory
+  autoMigrate: true
+  mariadb:
+    existingSecret: bkn-trace-core-mariadb
+    dsnKey: dsn
+kafkaConsumers:
+  evidence:
+    enabled: false
+    consumerGroup: bkn-trace-evidence-ledger-v1
+  audit:
+    enabled: false
+    brokers: []
+    topic: openbkn.audit.v1
+    consumerGroup: ''
+    saslMechanism: ''
+    existingSecret:
+      name: ''
+      usernameKey: username
+      passwordKey: password
+auditPublisher:
+  enabled: false
+  environment: ''
+  brokers: []
+  saslMechanism: ''
+  existingSecret:
+    name: ''
+    usernameKey: username
+    passwordKey: password

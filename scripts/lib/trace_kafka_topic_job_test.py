@@ -38,16 +38,17 @@ class TopicJobTest(unittest.TestCase):
             topics.chmod(0o700)
             configs.chmod(0o700)
             client = directory / 'client.properties'
-            script = ADMIN_SCRIPT.replace('/opt/bitnami/kafka/bin/', temporary + '/')
-            script = script.replace('/tmp/client.properties', str(client))
-            script = script.replace('/tmp/topic.properties', str(directory / 'topic.properties'))
+            script = ADMIN_SCRIPT.replace('/opt/bitnami/kafka/bin/', directory.as_posix() + '/')
+            script = script.replace('/tmp/client.properties', client.as_posix())
+            script = script.replace('/tmp/topic.properties', (directory / 'topic.properties').as_posix())
             env = dict(os.environ, TASK_KAFKA_USER='test-user', TASK_KAFKA_PASSWORD='a\\b"c',
                        TASK_KAFKA_MECHANISM=mechanism, TASK_KAFKA_BROKERS='broker:9092',
                        TASK_TOPIC_PARTITIONS='1', TASK_TOPIC_REPLICAS='1',
                        TASK_TIMESTAMP=timestamp, TASK_CREATION_FAILS=str(creation_fails).lower(),
                        TASK_TOPIC_EXISTS=str(exists).lower(),
-                       TASK_CALLS=str(directory / 'calls'))
-            result = subprocess.run(['bash', '-ec', script], env=env, capture_output=True, text=True)
+                       TASK_CALLS=(directory / 'calls').as_posix())
+            # stdin avoids native Windows argument quote/escape rewriting.
+            result = subprocess.run(['bash', '-s'], input=script, env=env, capture_output=True, text=True)
             return result, client.read_text(), (directory / 'calls').read_text()
 
     def test_existing_append_time_passes(self):

@@ -814,6 +814,7 @@ main() {
                 parse_openbkn_args "install" "$@"
                 confirm_access_address_before_install
                 install_openbkn
+                return $?
                 ;;
             download)
                 parse_openbkn_args "download" "$@"

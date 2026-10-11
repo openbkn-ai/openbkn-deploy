@@ -1,0 +1,4 @@
+apiVersion: v2
+name: agent-observability
+version: 0.1.4
+type: application

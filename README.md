@@ -639,6 +639,36 @@ python3 scripts/lib/trace_kafka_topic_job_test.py
 
 Set `FOUNDRY_ROOT` to a compatible checkout for additional index and data-migrator contract checks. A standalone checkout explicitly reports those cross-repository checks as skipped. These checks do not replace Chart rendering or cluster acceptance.
 
+## System Audit installation (Foundry #2061 / #2094)
+
+This ports the installer wiring from Foundry PR #2097, not application code or Charts. The standalone Chart default `kafkaConsumers.audit.enabled=false` stays unchanged. The complete installer explicitly enables the Audit consumer and Core publisher in final **agent-observability** values and uses Core MariaDB with migration enabled. The default independent consumer group is `bkn-trace-audit-ledger-v1`; existing group and Secret references are preserved.
+
+No extra `--config` file is required. Existing Trace prerequisites prepare `bkn-trace-core-mariadb` and reuse `bkn-trace-evidence-kafka` (`OPENBKN_TRACE_KAFKA_SECRET` overrides the Kafka Secret name). Brokers and SASL come from the existing MQ configuration. External Kafka still requires an existing credentials Secret. No Kafka users, passwords, ACLs, or broker authentication settings are changed.
+
+Publisher environment defaults to `development`; a saved valid value or an explicit override is reused. No environment argument is required for the default installation on `main`:
+
+```bash
+./deploy.sh openbkn install --registry=swr --latest \
+  --set resources.requests.cpu=0m --set resources.requests.memory=0Mi
+```
+
+The consumer and publisher may reuse the existing Kafka credentials Secret; there is no production-only requirement for a separate approved write Secret. Override `auditPublisher.environment` or `auditPublisher.existingSecret.name` only when needed. No account is provisioned automatically. Both components support `existingSecret.usernameKey` / `passwordKey` (defaults: `username` / `password`); credentials use Secret references, not Helm plaintext. The existing publisher requires PLAIN; unsupported mechanisms fail before application upgrades.
+
+After existing Trace prerequisites, before the application release loop, client-only `helm template` validates the staged pinned AO Chart, final merged values, and required Secret keys. A bounded separate Kafka Admin Job checks `openbkn.audit.v1`. Only an absent topic is created with `message.timestamp.type=LogAppendTime`. Existing `CreateTime` stops installation and requires a separately reviewed migration: changing configuration cannot rewrite historical records. Existing topics, records, offsets, authentication and Evidence topic behavior are not modified. The Job is deleted on success/failure.
+
+Same-version Audit repair preserves AO's Chart-owned user settings including image, resources, Evidence, OpenSearch and EE. Unintended non-Audit changes are rejected; current explicit inputs may change them. AO skips only when final configuration and original reconciliation checks match. Pending releases are not automatically uninstalled; concurrent revision changes stop the upgrade. Other release profiles/order remain unchanged. Failures return nonzero and stop the application release loop; earlier prerequisites are not automatically rolled back.
+
+Real-cluster acceptance: both Audit flags true, valid environment/Secret references, unchanged Kafka authentication and other service settings, effective `LogAppendTime`, healthy consumer/publisher, and a real audited business operation visible in System Audit without `audit_consumer_not_configured`. An empty HTTP 200 alone is insufficient. Cover fresh install, same-version repair, repeat install and failures. Rollback the prior AO Helm revision only; do not delete database tables, Kafka messages or offsets.
+
+Cluster-free regressions (Helm 3.18.6 and Python 3):
+
+```bash
+PYTHONPATH=scripts/lib python3 -m unittest test_audit_consumer test_audit_helm_render audit_kafka_topic_job_test
+bash scripts/services/openbkn_audit_consumer_test.sh
+```
+
+The small Helm fixture and mocked cluster tests do not replace published product Chart rendering or real-cluster acceptance.
+
 ## Trace/Evidence admission budget
 
 Set `observability.admissionBudget` in the persistent `--config` YAML used for installation and upgrades. Config generation preserves the existing `observability` block. New configs supply `collectorMetricsEndpoint: http://otelcol-contrib:8888/metrics` for the bundled Collector; change it when using a different deployment topology. No Admission credentials or permissions are added by this configuration.
