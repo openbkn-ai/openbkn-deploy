@@ -417,6 +417,14 @@ dropped) and never exposes raw health-endpoint bodies (those can carry internal
 versions/topology). The ConfigMap is refreshed per install; nginx reads the
 mounted file per request, so no pod restart is needed.
 
+### Studio one-click samples
+
+The standard product composition includes `bkn-sample-studio`. The installer supplies its gateway URL through the existing Chart `baseURL` value; explicit `--set` overrides remain supported. Published sample Charts pin the service/executor image digest. The installer does not infer API compatibility from Chart versions or component names.
+
+With the sample service's standard-API runtime defaults, leave `platform.version` and `platform.capabilities` empty: the service reads backend version through `GET /api/bkn-backend/v1/health` and checks required API adapter names against its implemented installation profile. Target API availability, authorization and licensing are enforced by the actual installation calls, with failures recorded in the corresponding stages. `GET /api/safe/v1/capabilities` describes licensed capabilities and is not the sample API inventory. Older sample service builds still require explicit compatibility values; use a published build containing the runtime-defaults change. See the [sample service deployment guide](https://github.com/openbkn-ai/bkn-samples/blob/main/docs/sample-service-deployment.md). Full fresh-product installation acceptance remains separate from configuration/preflight checks.
+
+After signing in, open Studio Home → One-click experience. Click **Refresh samples** to scan official releases, inspect a version's release notes and install it. Without an online catalog, administrators can **Import offline package**; its fixed data image must be available to the cluster. The internal `openbkn-samples` Kubernetes namespace is managed by the Chart. The current scope is one OpenBKN instance per environment; in-place sample upgrades and uninstall are not supported. See the [sample development guide](https://github.com/openbkn-ai/bkn-samples/blob/main/docs/SAMPLE_DEVELOPMENT_GUIDE.md).
+
 ## 📁 Project Structure
 
 ```text
