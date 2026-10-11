@@ -234,19 +234,19 @@ fi
 HELM_VALUES='{"core":{"store":"mariadb","projection":{"enabled":true}},"evidence":{"store":"opensearch","ingestAuth":{"existingSecret":"bkn-trace-evidence-ingest"}},"opensearch":{"traceTimestampPipeline":"bkn-trace-span-timestamp-v1","traceTimestampPipelineRevision":"index-default-pipeline-v1"},"kafkaConsumers":{"evidence":{"enabled":true,"brokers":["kafka.resource.svc.cluster.local:9092"],"topic":"openbkn.evidence.v1","consumerGroup":"bkn-trace-evidence-ledger-v1","saslMechanism":"PLAIN","existingSecret":{"name":"bkn-trace-evidence-kafka","usernameKey":"username","passwordKey":"password"}}}}'
 _install_openbkn_release_local agent-observability /tmp openbkn
 _install_openbkn_release_repo agent-observability openbkn openbkn 0.1.4
-if [[ "${UPGRADE_CALLS}" -eq 2 ]]; then
+if [[ "${UPGRADE_CALLS}" -eq 4 ]]; then
     ok
 else
-    fail "durable runtime profiles must skip both installer paths"
+    fail "durable AO profiles must reach the final Audit reconciliation guard"
 fi
 
 HELM_VALUES='{not-json}'
 _install_openbkn_release_local agent-observability /tmp openbkn
 _install_openbkn_release_repo agent-observability openbkn openbkn 0.1.4
-if [[ "${UPGRADE_CALLS}" -eq 2 ]]; then
+if [[ "${UPGRADE_CALLS}" -eq 6 ]]; then
     ok
 else
-    fail "unreadable Helm values must not roll out either installer path"
+    fail "unreadable AO values must reach final preflight, not an early skip"
 fi
 eval "${ORIGINAL_RELEASE_EXTRA_SETS}"
 

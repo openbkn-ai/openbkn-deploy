@@ -753,10 +753,175 @@ _openbkn_drop_literal_env_now_from_secret() {
 #
 # Output keeps streaming — an install waits minutes on cold pulls and a silent
 # terminal reads as a hang — so helm's own exit code comes from PIPESTATUS.
+_openbkn_audit_cleanup() {
+    local dir="${_OPENBKN_AUDIT_PLAN_DIR:-}"
+    [[ -n "${dir}" ]] || return 0
+    # Clean only the private, owner-marked plan created by this run.
+    case "${dir##*/}" in openbkn-audit.*) ;; *) return 1 ;; esac
+    python3 "${SCRIPT_DIR}/scripts/lib/audit_helm_render.py" cleanup "${dir}" || return 1
+    _OPENBKN_AUDIT_PLAN_DIR=""
+    _OPENBKN_AUDIT_READY=false
+}
+
+_openbkn_audit_release_state() (
+    local namespace="$1"
+    set -o pipefail
+    helm list --all -n "${namespace}" --filter '^agent-observability$' -o json |
+        python3 "${SCRIPT_DIR}/scripts/lib/audit_consumer.py" release-state
+)
+
+_openbkn_audit_explicit_args() {
+    # Remove only the first occurrence of each generated flag; an explicit
+    # operator override later in the argument list remains authoritative.
+    local -a generated=("${CORE_RELEASE_EXTRA_SETS[@]-}")
+    local -a generated_strings=("${CORE_RELEASE_EXTRA_SET_STRINGS[@]-}")
+    local -a input=("$@")
+    local i j value drop
+    _OPENBKN_AUDIT_EXPLICIT_ARGS=("${input[@]:0:4}")
+    for ((i=4; i<${#input[@]}; i++)); do
+        if [[ "${input[i]}" == --set || "${input[i]}" == --set-string ]]; then
+            value="${input[i+1]}"; drop=false
+            # These two fields are prerequisites for rendering enabled Audit.
+            case "${value}" in core.store=*|core.mariadb.existingSecret=*) ;;
+                *)
+                    if [[ "${input[i]}" == --set ]]; then
+                        for ((j=0; j<${#generated[@]}; j++)); do
+                            if [[ "${value}" == "${generated[j]}" ]]; then generated[j]=""; drop=true; break; fi
+                        done
+                    else
+                        for ((j=0; j<${#generated_strings[@]}; j++)); do
+                            if [[ "${value}" == "${generated_strings[j]}" ]]; then generated_strings[j]=""; drop=true; break; fi
+                        done
+                    fi
+                    ;;
+            esac
+            if [[ "${drop}" != true ]]; then _OPENBKN_AUDIT_EXPLICIT_ARGS+=("${input[i]}" "${value}"); fi
+            i=$((i+1))
+        else
+            _OPENBKN_AUDIT_EXPLICIT_ARGS+=("${input[i]}")
+        fi
+    done
+}
+
+_openbkn_prepare_audit_upgrade() {
+    local namespace="$1" target_chart="$2"
+    shift 2
+    local -a input=("$@") args explicit_args
+    local dir state status installed_chart rendered_chart i
+    _openbkn_audit_cleanup || return 1
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/openbkn-audit.XXXXXX")" || return 1
+    _OPENBKN_AUDIT_PLAN_DIR="${dir}"
+    : >"${dir}/.audit-owner"
+    for i in defaults user current preserved non-audit render explicit; do
+        : >"${dir}/${i}.json"
+        chmod 600 "${dir}/${i}.json" || return 1
+    done
+    if ! state="$(_openbkn_audit_release_state "${namespace}")"; then
+        log_error 'Cannot inspect Agent Observability release; no application release was upgraded.'
+        return 1
+    fi
+    status="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", ""))' <<<"${state}")"
+    installed_chart="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("chart", ""))' <<<"${state}")"
+    case "${status}" in ''|deployed|failed) ;;
+        *) log_error 'Agent Observability is pending or in an unsupported state; resolve it without automatic uninstall.'; return 1 ;;
+    esac
+    if [[ -n "${status}" ]]; then
+        if ! helm get values agent-observability -n "${namespace}" -o json >"${dir}/user.json" ||
+           ! helm get values agent-observability -n "${namespace}" --all -o json >"${dir}/current.json"; then
+            log_error 'Cannot preserve Agent Observability values; stopping before application upgrades.'
+            return 1
+        fi
+    else
+        printf '{}\n' >"${dir}/user.json"
+        printf '{}\n' >"${dir}/current.json"
+    fi
+    if ! python3 "${SCRIPT_DIR}/scripts/lib/audit_consumer.py" defaults \
+            "$(_openbkn_trace_kafka_brokers)" "$(config_yaml_dep_field mq mechanism)" \
+            "${OPENBKN_TRACE_KAFKA_SECRET}" >"${dir}/defaults.json" ||
+       ! python3 "${SCRIPT_DIR}/scripts/lib/audit_consumer.py" preserve-system \
+            <"${dir}/user.json" >"${dir}/preserved.json"; then
+        return 1
+    fi
+    # Freeze only AO's config input; other releases keep their original inputs.
+    if [[ -f "${CONFIG_YAML_PATH:-}" ]]; then
+        cp "${CONFIG_YAML_PATH}" "${dir}/current.yaml" || return 1
+        chmod 600 "${dir}/current.yaml" || return 1
+        for ((i=4; i<${#input[@]}-1; i++)); do
+            if [[ "${input[i]}" == -f && "${input[i+1]}" == "${CONFIG_YAML_PATH}" ]]; then
+                input[i+1]="${dir}/current.yaml"
+            fi
+        done
+    fi
+    local staged_chart
+    staged_chart="$(python3 "${SCRIPT_DIR}/scripts/lib/audit_helm_render.py" stage "${dir}" "${input[@]}")" || return 1
+    input[3]="${staged_chart}"
+    _openbkn_audit_explicit_args "${input[@]}"
+    explicit_args=("${_OPENBKN_AUDIT_EXPLICIT_ARGS[@]:0:4}" -f "${dir}/defaults.json" -f "${dir}/preserved.json" "${_OPENBKN_AUDIT_EXPLICIT_ARGS[@]:4}")
+    args=("${input[@]:0:4}")
+    if [[ "${installed_chart}" == "${target_chart}" ]]; then
+        python3 "${SCRIPT_DIR}/scripts/lib/audit_consumer.py" preserve-non-audit \
+            <"${dir}/user.json" >"${dir}/non-audit.json" || return 1
+        args+=(-f "${dir}/non-audit.json")
+    fi
+    args+=(-f "${dir}/defaults.json" -f "${dir}/preserved.json" "${input[@]:4}")
+    if ! python3 "${SCRIPT_DIR}/scripts/lib/audit_helm_render.py" render "${dir}" actual "${args[@]}" >"${dir}/render.json" ||
+       ! python3 "${SCRIPT_DIR}/scripts/lib/audit_consumer.py" validate-system "${namespace}" <"${dir}/render.json"; then
+        log_error 'System Audit preflight failed; verify environment, existing Secrets, Kafka and Core MariaDB.'
+        return 1
+    fi
+    rendered_chart="$(python3 -c 'import json,sys; x=json.load(sys.stdin)["chart"]["metadata"]; print(x["name"]+"-"+x["version"])' <"${dir}/render.json")" || return 1
+    if [[ "${rendered_chart}" != "${target_chart}" ]]; then
+        log_error 'Resolved AO Chart differs from the pinned installation target; refusing to upgrade.'
+        return 1
+    fi
+    if [[ "${installed_chart}" == "${target_chart}" ]]; then
+        if ! python3 "${SCRIPT_DIR}/scripts/lib/audit_helm_render.py" render "${dir}" explicit "${explicit_args[@]}" >"${dir}/explicit.json" ||
+           ! python3 "${SCRIPT_DIR}/scripts/lib/audit_consumer.py" check-non-audit \
+                "${dir}/current.json" "${dir}/explicit.json" <"${dir}/render.json"; then
+            log_error 'Same-version Audit repair was blocked to protect non-Audit configuration.'
+            return 1
+        fi
+    fi
+    _openbkn_prepare_audit_topic "${namespace}" "${dir}/render.json" || return 1
+    _OPENBKN_AUDIT_SKIP=false
+    if [[ "${status}" == deployed && "${installed_chart}" == "${target_chart}" ]] &&
+       python3 "${SCRIPT_DIR}/scripts/lib/audit_consumer.py" same-system "${dir}/current.json" <"${dir}/render.json" &&
+       python3 "${SCRIPT_DIR}/scripts/lib/audit_consumer.py" same-non-audit "${dir}/current.json" <"${dir}/render.json" &&
+       _openbkn_should_skip_upgrade agent-observability "${namespace}" agent-observability "${target_chart#agent-observability-}"; then
+        _OPENBKN_AUDIT_SKIP=true
+    fi
+    _OPENBKN_AUDIT_ARGS=("${args[@]}")
+    _OPENBKN_AUDIT_STATE="${state}"
+    _OPENBKN_AUDIT_NAMESPACE="${namespace}"
+    _OPENBKN_AUDIT_READY=true
+}
+
 _openbkn_helm_upgrade_release() {
     local release_name="$1" namespace="$2"
     shift 2
+    if [[ "${1:-}" == --prepare-only ]]; then
+        [[ "${release_name}" == agent-observability ]] || return 1
+        shift
+        local target_chart="$1"
+        shift
+        _openbkn_prepare_audit_upgrade "${namespace}" "${target_chart}" "$@"
+        return $?
+    fi
     local -a helm_args=("$@")
+
+    if [[ "${release_name}" == agent-observability ]]; then
+        local current_state
+        if [[ "${_OPENBKN_AUDIT_READY:-false}" != true || "${_OPENBKN_AUDIT_NAMESPACE:-}" != "${namespace}" ]]; then
+            log_error 'AO requires a successful Audit preparation before upgrade.'
+            return 1
+        fi
+        if ! current_state="$(_openbkn_audit_release_state "${namespace}")" || [[ "${current_state}" != "${_OPENBKN_AUDIT_STATE}" ]]; then
+            log_error 'AO release changed after preflight; rerun installation without overwriting concurrent changes.'
+            return 1
+        fi
+        [[ "${_OPENBKN_AUDIT_SKIP:-false}" != true ]] || return 0
+        helm_args=("${_OPENBKN_AUDIT_ARGS[@]}")
+    fi
 
     # Here rather than at either call site: both the repository and the local
     # --charts-dir paths reach helm through this function, and a cleanup wired
@@ -1032,6 +1197,35 @@ _openbkn_prepare_trace_evidence_topic() (
     job_name="$(kubectl create -f "${manifest}" -o jsonpath='{.metadata.name}')" || return 1
     if [[ -z "${job_name}" ]] || ! kubectl wait -n "${namespace}" --for=condition=complete "job/${job_name}" --timeout=120s >/dev/null 2>&1; then
         log_error "BKN Trace Evidence topic prerequisite failed: verify Kafka access and message.timestamp.type=LogAppendTime. Existing CreateTime topics require an operator-reviewed migration; old records are not rewritten."
+        return 1
+    fi
+)
+
+# Audit is isolated from the existing Evidence helper and uses the effective
+# rendered consumer configuration (including custom Secret key names).
+_openbkn_prepare_audit_topic() (
+    local namespace="$1" rendered="$2" image job_name="" manifest
+    image="${OPENBKN_TRACE_KAFKA_ADMIN_IMAGE:-${KAFKA_IMAGE:-}}"
+    if [[ -z "${image}" ]] && declare -F _kafka_resolve_image_defaults >/dev/null; then
+        _kafka_resolve_image_defaults
+        image="${KAFKA_IMAGE:-}"
+    fi
+    if [[ -z "${image}" ]]; then
+        log_error 'Audit topic prerequisite requires a Kafka Admin image (OPENBKN_TRACE_KAFKA_ADMIN_IMAGE).'
+        return 1
+    fi
+    manifest="$(mktemp)" || return 1
+    trap 'rm -f "${manifest}"; if [[ -n "${job_name}" ]]; then kubectl delete job "${job_name}" -n "${namespace}" --ignore-not-found >/dev/null 2>&1 || true; fi' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    if ! python3 "${SCRIPT_DIR}/scripts/lib/audit_consumer.py" render-topic-job "${namespace}" "${image}" \
+            "${OPENBKN_TRACE_TOPIC_PARTITIONS:-1}" "${OPENBKN_TRACE_TOPIC_REPLICATION_FACTOR:-1}" \
+            <"${rendered}" >"${manifest}"; then
+        return 1
+    fi
+    job_name="$(kubectl create -f "${manifest}" -o jsonpath='{.metadata.name}')" || return 1
+    if [[ -z "${job_name}" ]] || ! kubectl wait -n "${namespace}" --for=condition=complete "job/${job_name}" --timeout=120s >/dev/null 2>&1; then
+        log_error 'Audit topic prerequisite failed: verify authentication/topic permissions and LogAppendTime. Existing CreateTime topics and records were not modified; operator-reviewed migration is required.'
         return 1
     fi
 )
@@ -1421,6 +1615,7 @@ _install_openbkn_release_local() {
     local release_name="$1"
     local charts_dir="$2"
     local namespace="$3"
+    local mode="${4:-apply}"
     local requested_version
     local chart_name
 
@@ -1445,7 +1640,7 @@ _install_openbkn_release_local() {
     if [[ -z "${target_version}" ]]; then
         target_version="$(get_local_chart_version "${chart_tgz}")"
     fi
-    if _openbkn_should_skip_upgrade "${release_name}" "${namespace}" "${chart_name}" "${target_version}"; then
+    if [[ "${release_name}" != agent-observability ]] && _openbkn_should_skip_upgrade "${release_name}" "${namespace}" "${chart_name}" "${target_version}"; then
         return 0
     fi
 
@@ -1471,7 +1666,11 @@ _install_openbkn_release_local() {
         helm_args+=("--set" "${set_value}")
     done
 
-    _openbkn_helm_upgrade_release "${release_name}" "${namespace}" "${helm_args[@]}"
+    if [[ "${mode}" == --prepare-only ]]; then
+        _openbkn_helm_upgrade_release "${release_name}" "${namespace}" --prepare-only "${chart_name}-${target_version}" "${helm_args[@]}"
+    else
+        _openbkn_helm_upgrade_release "${release_name}" "${namespace}" "${helm_args[@]}"
+    fi
 }
 
 # Install a single bkn-foundry release from a Helm repository
@@ -1480,6 +1679,7 @@ _install_openbkn_release_repo() {
     local namespace="$2"
     local helm_repo_name="$3"
     local release_version="$4"
+    local mode="${5:-apply}"
     local chart_name
     chart_name="$(_openbkn_resolve_chart_name "${release_name}")"
 
@@ -1491,14 +1691,14 @@ _install_openbkn_release_repo() {
         target_version=$(get_repo_chart_latest_version "${helm_repo_name}" "${chart_name}")
     fi
 
-    if _openbkn_should_skip_upgrade "${release_name}" "${namespace}" "${chart_name}" "${target_version}"; then
+    if [[ "${release_name}" != agent-observability ]] && _openbkn_should_skip_upgrade "${release_name}" "${namespace}" "${chart_name}" "${target_version}"; then
         return 0
     fi
 
     # Clean up any pending state before installing
     local current_status
     current_status=$(helm status "${release_name}" -n "${namespace}" -o json 2>/dev/null | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
-    if [[ -n "${current_status}" && "${current_status}" != "deployed" && "${current_status}" != "failed" ]]; then
+    if [[ "${release_name}" != agent-observability && -n "${current_status}" && "${current_status}" != "deployed" && "${current_status}" != "failed" ]]; then
         log_info "Cleaning up ${release_name} (status: ${current_status})..."
         helm uninstall "${release_name}" -n "${namespace}" 2>/dev/null || true
     fi
@@ -1514,6 +1714,8 @@ _install_openbkn_release_repo() {
 
     if [[ -n "${release_version}" ]]; then
         helm_args+=("--version" "${release_version}")
+    elif [[ "${release_name}" == agent-observability ]]; then
+        helm_args+=("--version" "${target_version}")
     fi
 
     # Bound the post-install hook wait. Helm always waits for post-install hooks
@@ -1539,7 +1741,11 @@ _install_openbkn_release_repo() {
         helm_args+=("--set" "${set_value}")
     done
 
-    _openbkn_helm_upgrade_release "${release_name}" "${namespace}" "${helm_args[@]}"
+    if [[ "${mode}" == --prepare-only ]]; then
+        _openbkn_helm_upgrade_release "${release_name}" "${namespace}" --prepare-only "${chart_name}-${target_version}" "${helm_args[@]}"
+    else
+        _openbkn_helm_upgrade_release "${release_name}" "${namespace}" "${helm_args[@]}"
+    fi
 }
 
 # Resolve a --registry shorthand to a full registry/namespace string.
@@ -1755,7 +1961,17 @@ _openbkn_resolve_latest_manifest() {
 }
 
 # Install BKN Foundry services via Helm
-install_openbkn() {
+install_openbkn() (
+    # Confine traps and prepared AO arguments to this installation invocation.
+    _OPENBKN_AUDIT_PLAN_DIR=""
+    _OPENBKN_AUDIT_READY=false
+    trap '_openbkn_audit_cleanup' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    _install_openbkn_impl "$@"
+)
+
+_install_openbkn_impl() {
     log_info "Installing BKN Foundry services via Helm..."
     _openbkn_resolve_latest_manifest || return 1
    if [[ "${OFFLINE_MODE}" != "true" ]]; then
@@ -1828,15 +2044,22 @@ install_openbkn() {
             return 1
         fi
         _openbkn_warn_unwired_evidence_producers "${release_names[@]}"
+        local ao_version
+        ao_version="$(_openbkn_resolve_release_version agent-observability)"
+        if [[ "${use_local}" == true ]]; then
+            _install_openbkn_release_local agent-observability "${charts_dir}" "${namespace}" --prepare-only || return 1
+        else
+            _install_openbkn_release_repo agent-observability "${namespace}" "${HELM_CHART_REPO_NAME}" "${ao_version}" --prepare-only || return 1
+        fi
     fi
 
     local release_version
     for release_name in "${release_names[@]}"; do
         release_version="$(_openbkn_resolve_release_version "${release_name}")"
         if [[ "${use_local}" == "true" ]]; then
-            _install_openbkn_release_local "${release_name}" "${charts_dir}" "${namespace}"
+            _install_openbkn_release_local "${release_name}" "${charts_dir}" "${namespace}" || return 1
         else
-            _install_openbkn_release_repo "${release_name}" "${namespace}" "${HELM_CHART_REPO_NAME}" "${release_version}"
+            _install_openbkn_release_repo "${release_name}" "${namespace}" "${HELM_CHART_REPO_NAME}" "${release_version}" || return 1
         fi
     done
 

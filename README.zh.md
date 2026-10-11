@@ -584,6 +584,37 @@ bash scripts/services/openbkn_trace_prerequisites_test.sh
 
 `FOUNDRY_ROOT` 可指向匹配的 Foundry checkout，以附加校验 Chart 的索引契约和 data-migrator 的 Trace 数据库声明。独立 checkout 缺少 Foundry 时会明确报告这些跨仓检查跳过；这不替代 Chart 渲染和真实集群验收。
 
+## System Audit 安装迁移（Foundry #2061 / #2094）
+
+本仓库迁移 Foundry PR #2097 的安装器接线，不复制应用代码或 Chart。Chart 默认值 `kafkaConsumers.audit.enabled=false` 不变；完整安装时在 **agent-observability** 的最终 values 中启用 Audit consumer 和 Core publisher，并使用 Core MariaDB、`autoMigrate=true`。默认独立消费组为 `bkn-trace-audit-ledger-v1`，已有组名和 Secret 引用保留。
+
+不需要额外提供 `--config` 文件。沿用现有 Trace 前置逻辑准备 `bkn-trace-core-mariadb`、复用 `bkn-trace-evidence-kafka`；Kafka Secret 名可用 `OPENBKN_TRACE_KAFKA_SECRET` 覆盖。地址、SASL 从安装器已有 MQ 配置读取。外置 Kafka 仍需已有凭据 Secret。不新增用户、不换密码、不改 ACL 或 broker 认证，不影响其它服务的 Kafka 凭据。
+
+发布环境必须明确提供；已有有效环境值会保留。以下命令只适用于真实的**测试环境**：
+
+```bash
+./deploy.sh openbkn install --registry=swr --latest \
+  --set auditPublisher.environment=test \
+  --set resources.requests.cpu=0m --set resources.requests.memory=0Mi
+```
+
+生产环境不能填 test。生产需设置 `auditPublisher.environment=production`，并通过 `auditPublisher.existingSecret.name` 引用已有、获批的独立写入凭据；仅 Secret 名称不同不代表账号权限已获验证。安装器不会自动创建账号。消费端、发布端的 `existingSecret.usernameKey` / `passwordKey` 默认是 `username` / `password`，支持显式覆盖；密码通过 Secret 引用注入，不作为 Helm 明文参数传递。现有发布端仅支持 PLAIN；不支持的机制在应用升级前报错。
+
+现有 Trace 前置准备完成后、应用 Release 循环之前，安装器暂存目标 AO Chart，通过无集群访问的 `helm template` 检查最终合并 values 和 Secret 键，再运行独立、有时限的 Kafka Admin Job。只为不存在的 `openbkn.audit.v1` 创建 `LogAppendTime` topic；已有 `CreateTime` 会停止安装，需另行审核历史数据迁移，不能用修改配置冒充历史数据修复。不更改现有 topic、不删消息、不重置 offset、不改认证、不改变 Evidence topic 逻辑。Job 成功、失败都会清理。
+
+同版本修复保留 AO 已有的 Chart 用户配置（镜像、资源、Evidence、OpenSearch、EE 等），非 Audit 意外变化会阻断；本次明确指定的参数可以覆盖。只有最终配置一致且原有检查通过才跳过升级。pending 状态不自动卸载，预检后版本被并发修改也会停止。其它 Release 配置及顺序不变。失败返回非零并停止应用循环；已执行的前置准备不会自动回滚。
+
+集群验收：最终 consumer/publisher 都为 true、环境及 Secret 正确、其它服务及 Kafka 认证不变、topic 有效配置是 `LogAppendTime`、消费者和发布端健康；执行真实审计业务操作，System Audit 查询能看到事件且不再返回 `audit_consumer_not_configured`。只返回空的 HTTP 200 不算验收。覆盖新装、同版本修复、重复安装及失败场景。回滚仅恢复 AO 原 Helm revision，不删除数据库表、消息或 offset。
+
+离线回归（Helm 3.18.6、Python 3）：
+
+```bash
+PYTHONPATH=scripts/lib python3 -m unittest test_audit_consumer test_audit_helm_render audit_kafka_topic_job_test
+bash scripts/services/openbkn_audit_consumer_test.sh
+```
+
+测试使用小型 Helm 合并 fixture 和模拟集群，不能替代实际发布 Chart 渲染及目标集群验收。
+
 ## Trace/Evidence 准入预算配置
 
 在安装和升级使用的持久 `--config` YAML 中配置 `observability.admissionBudget`。配置生成会保留已有的 `observability` 块。新配置为内置 Collector 提供 `collectorMetricsEndpoint: http://otelcol-contrib:8888/metrics`；使用其他部署拓扑时修改该地址。这些配置不新增 Admission 凭据或权限要求。
