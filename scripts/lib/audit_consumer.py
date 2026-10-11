@@ -29,10 +29,11 @@ def preserved_values(values):
     return {"kafkaConsumers": {"audit": preserved}}
 
 
-def defaults(brokers, mechanism, secret):
+def defaults(brokers, mechanism, credentials_secret_name):
+    # This is a Kubernetes Secret reference name, not credential material.
     connection = {"enabled": True, "brokers": [brokers] if brokers else [],
                   "saslMechanism": mechanism,
-                  "existingSecret": {"name": secret, "usernameKey": "username", "passwordKey": "password"}}
+                  "existingSecret": {"name": credentials_secret_name, "usernameKey": "username", "passwordKey": "password"}}
     consumer = copy.deepcopy(connection)
     consumer.update(topic="openbkn.audit.v1", consumerGroup="bkn-trace-audit-ledger-v1")
     connection["environment"] = "development"
