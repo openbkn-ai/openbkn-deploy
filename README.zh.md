@@ -590,15 +590,14 @@ bash scripts/services/openbkn_trace_prerequisites_test.sh
 
 不需要额外提供 `--config` 文件。沿用现有 Trace 前置逻辑准备 `bkn-trace-core-mariadb`、复用 `bkn-trace-evidence-kafka`；Kafka Secret 名可用 `OPENBKN_TRACE_KAFKA_SECRET` 覆盖。地址、SASL 从安装器已有 MQ 配置读取。外置 Kafka 仍需已有凭据 Secret。不新增用户、不换密码、不改 ACL 或 broker 认证，不影响其它服务的 Kafka 凭据。
 
-发布环境必须明确提供；已有有效环境值会保留。以下命令只适用于真实的**测试环境**：
+发布环境默认使用 `development`；已有有效值或显式覆盖值会保留。在 `main` 分支执行默认安装，无需额外传入环境参数：
 
 ```bash
 ./deploy.sh openbkn install --registry=swr --latest \
-  --set auditPublisher.environment=test \
   --set resources.requests.cpu=0m --set resources.requests.memory=0Mi
 ```
 
-生产环境不能填 test。生产需设置 `auditPublisher.environment=production`，并通过 `auditPublisher.existingSecret.name` 引用已有、获批的独立写入凭据；仅 Secret 名称不同不代表账号权限已获验证。安装器不会自动创建账号。消费端、发布端的 `existingSecret.usernameKey` / `passwordKey` 默认是 `username` / `password`，支持显式覆盖；密码通过 Secret 引用注入，不作为 Helm 明文参数传递。现有发布端仅支持 PLAIN；不支持的机制在应用升级前报错。
+消费端和发布端可以复用已有 Kafka 凭据 Secret，不要求生产环境另行提供独立、获批的写入 Secret。仅在需要时显式覆盖 `auditPublisher.environment` 或 `auditPublisher.existingSecret.name`。安装器不会自动创建账号。消费端、发布端的 `existingSecret.usernameKey` / `passwordKey` 默认是 `username` / `password`，支持显式覆盖；密码通过 Secret 引用注入，不作为 Helm 明文参数传递。现有发布端仅支持 PLAIN；不支持的机制在应用升级前报错。
 
 现有 Trace 前置准备完成后、应用 Release 循环之前，安装器暂存目标 AO Chart，通过无集群访问的 `helm template` 检查最终合并 values 和 Secret 键，再运行独立、有时限的 Kafka Admin Job。只为不存在的 `openbkn.audit.v1` 创建 `LogAppendTime` topic；已有 `CreateTime` 会停止安装，需另行审核历史数据迁移，不能用修改配置冒充历史数据修复。不更改现有 topic、不删消息、不重置 offset、不改认证、不改变 Evidence topic 逻辑。Job 成功、失败都会清理。
 

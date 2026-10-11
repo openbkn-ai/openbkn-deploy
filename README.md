@@ -645,15 +645,14 @@ This ports the installer wiring from Foundry PR #2097, not application code or C
 
 No extra `--config` file is required. Existing Trace prerequisites prepare `bkn-trace-core-mariadb` and reuse `bkn-trace-evidence-kafka` (`OPENBKN_TRACE_KAFKA_SECRET` overrides the Kafka Secret name). Brokers and SASL come from the existing MQ configuration. External Kafka still requires an existing credentials Secret. No Kafka users, passwords, ACLs, or broker authentication settings are changed.
 
-Publisher environment must be explicit; a saved valid environment is reused. For an actual **test** environment:
+Publisher environment defaults to `development`; a saved valid value or an explicit override is reused. No environment argument is required for the default installation on `main`:
 
 ```bash
 ./deploy.sh openbkn install --registry=swr --latest \
-  --set auditPublisher.environment=test \
   --set resources.requests.cpu=0m --set resources.requests.memory=0Mi
 ```
 
-Do not label production as test. Production requires `auditPublisher.environment=production` and an independent approved write Secret via `auditPublisher.existingSecret.name`; different Secret names alone do not verify privileges. No account is provisioned automatically. Both components support `existingSecret.usernameKey` / `passwordKey` (defaults: `username` / `password`); credentials use Secret references, not Helm plaintext. The existing publisher requires PLAIN; unsupported mechanisms fail before application upgrades.
+The consumer and publisher may reuse the existing Kafka credentials Secret; there is no production-only requirement for a separate approved write Secret. Override `auditPublisher.environment` or `auditPublisher.existingSecret.name` only when needed. No account is provisioned automatically. Both components support `existingSecret.usernameKey` / `passwordKey` (defaults: `username` / `password`); credentials use Secret references, not Helm plaintext. The existing publisher requires PLAIN; unsupported mechanisms fail before application upgrades.
 
 After existing Trace prerequisites, before the application release loop, client-only `helm template` validates the staged pinned AO Chart, final merged values, and required Secret keys. A bounded separate Kafka Admin Job checks `openbkn.audit.v1`. Only an absent topic is created with `message.timestamp.type=LogAppendTime`. Existing `CreateTime` stops installation and requires a separately reviewed migration: changing configuration cannot rewrite historical records. Existing topics, records, offsets, authentication and Evidence topic behavior are not modified. The Job is deleted on success/failure.
 
