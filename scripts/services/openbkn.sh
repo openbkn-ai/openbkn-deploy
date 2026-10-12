@@ -29,6 +29,14 @@ CORE_USE_LATEST_MANIFEST="${CORE_USE_LATEST_MANIFEST:-false}"
 # Global --set values array
 declare -a CORE_SET_VALUES=()
 
+# openbkn.sh is normally sourced after common.sh. Keep standalone profile
+# tests and callers safe when the optional YAML helper is not loaded.
+_openbkn_config_yaml_top_field() {
+    if declare -F config_yaml_top_field >/dev/null 2>&1; then
+        config_yaml_top_field "$@"
+    fi
+}
+
 # Core SQL module directories to initialize before installing Core releases.
 declare -a CORE_SQL_MODULES=(
     "studio"
@@ -1363,7 +1371,7 @@ _openbkn_safe_audit_environment() {
         printf '%s' "${value}"
         return 0
     fi
-    value="$(config_yaml_top_field auditPublisher environment)"
+    value="$(_openbkn_config_yaml_top_field auditPublisher environment)"
     if [[ -n "${value}" ]]; then printf '%s' "${value}"; return 0; fi
     for release in bkn-safe agent-observability; do
         value="$(set -o pipefail; helm get values "${release}" -n "${namespace}" --all -o json 2>/dev/null |
@@ -1377,7 +1385,7 @@ _openbkn_safe_audit_profile_sets() {
     local namespace="$1" key value
     CORE_RELEASE_EXTRA_SETS+=("auditPublisher.enabled=true")
     for key in environment brokers credentialsSecretName usernameSecretKey passwordSecretKey; do
-        value="$(config_yaml_top_field auditPublisher "${key}")"
+        value="$(_openbkn_config_yaml_top_field auditPublisher "${key}")"
         # AO uses an array at this shared key; Safe needs the MQ broker string.
         [[ "${key}" != brokers || "${value}" != \[* ]] || value=""
         if [[ -z "${value}" ]]; then
@@ -1426,7 +1434,7 @@ except (ValueError, TypeError, AttributeError):
 # Management producers share the Audit connection, but retain release-specific
 # user values. Read supplied values (not Chart defaults) to preserve opt-outs.
 _openbkn_management_audit_profile_sets() {
-    local release="$1" namespace="$2" installed key value
+    local release="$1" namespace="$2" installed installed_value key value
     local -a keys=(enabled environment brokers credentialsSecretName usernameSecretKey passwordSecretKey)
     [[ "${release}" != mf-model-manager ]] || keys+=(securityProtocol saslMechanism)
     installed="$(helm get values "${release}" -n "${namespace}" -o json 2>/dev/null)" || installed='{}'
@@ -1434,10 +1442,13 @@ _openbkn_management_audit_profile_sets() {
         if value="$(_openbkn_last_set_value "auditPublisher.${key}" "${CORE_SET_VALUES[@]-}")"; then
             :
         else
-            value="$(config_yaml_top_field auditPublisher "${key}")"
+            if declare -F config_yaml_top_field >/dev/null 2>&1; then
+                value="$(_openbkn_config_yaml_top_field auditPublisher "${key}")"
+            else
+                value=""
+            fi
             [[ "${key}" != brokers || "${value}" != \[* ]] || value=""
-            if [[ -z "${value}" ]]; then
-                value="$(python3 -c '
+            installed_value="$(python3 -c '
 import json,sys
 try:
     value=json.load(sys.stdin).get("auditPublisher", {}).get(sys.argv[1], "")
@@ -1445,6 +1456,10 @@ try:
 except (ValueError, AttributeError, TypeError):
     pass
 ' "${key}" <<<"${installed}")"
+            # Preserve an explicitly installed per-release value when the
+            # shared config only supplies a product default.
+            if [[ -n "${installed_value}" ]]; then
+                value="${installed_value}"
             fi
         fi
         if [[ -z "${value}" ]]; then
@@ -1521,7 +1536,7 @@ _openbkn_release_extra_sets() {
     elif [[ "${release_name}" == "bkn-safe" ]]; then
         _openbkn_safe_audit_profile_sets "${namespace}"
         local initial_pwd
-        initial_pwd="$(config_yaml_top_field bknSafe initialPassword)"
+        initial_pwd="$(_openbkn_config_yaml_top_field bknSafe initialPassword)"
         if [[ -n "${initial_pwd}" ]]; then
             CORE_RELEASE_EXTRA_SETS+=("config.initialPassword=${initial_pwd}")
         else
@@ -2257,7 +2272,7 @@ _install_openbkn_impl() {
     # created without an explicit one. Highlighted — it is the one thing the
     # operator must take away from this summary, but only on the first install.
     local _initial_pwd
-    _initial_pwd="$(config_yaml_top_field bknSafe initialPassword)"
+    _initial_pwd="$(_openbkn_config_yaml_top_field bknSafe initialPassword)"
     if _openbkn_should_show_bkn_safe_initial_password "${bkn_safe_existed_before_install}" "${_initial_pwd}"; then
         echo ""
         echo "  Console sign-in (a password change is forced on first login):"
