@@ -100,31 +100,29 @@ def core_history_import_batches(plan, max_bytes=64 << 20, max_interactions=100):
             if row["resource_id"] not in convs:
                 raise ValueError("historical idempotency conversation missing")
             conv_idempotency[row["resource_id"]].append(row)
-    units = []
-    seen_convs = set()
-    for iid, interaction in ints.items():
-        cid = interaction["conversation_id"]
-        seen_convs.add(cid)
-        unit = {key: [] for key in HISTORY_CORE_FIELDS}
-        unit.update(conversations=[convs[cid]], interactions=[interaction])
-        for key in HISTORY_CORE_FIELDS[2:]:
-            unit[key] = grouped[key][iid]
-        unit["idempotency_records"] = (
-            unit["idempotency_records"] + conv_idempotency[cid]
-        )
-        units.append(unit)
-    for cid, conv in convs.items():
-        if cid not in seen_convs:
+    def units():
+        seen_convs = set()
+        for iid, interaction in ints.items():
+            cid = interaction["conversation_id"]
+            seen_convs.add(cid)
             unit = {key: [] for key in HISTORY_CORE_FIELDS}
-            unit.update(conversations=[conv], idempotency_records=conv_idempotency[cid])
-            units.append(unit)
-    # Plan every batch before yielding, so a later orphan/oversized group cannot
-    # let the caller import only the earlier portion of an invalid source plan.
-    batches = []
+            unit.update(conversations=[convs[cid]], interactions=[interaction])
+            for key in HISTORY_CORE_FIELDS[2:]:
+                unit[key] = grouped[key][iid]
+            unit["idempotency_records"] = (
+                unit["idempotency_records"] + conv_idempotency[cid]
+            )
+            yield unit
+        for cid, conv in convs.items():
+            if cid not in seen_convs:
+                unit = {key: [] for key in HISTORY_CORE_FIELDS}
+                unit.update(conversations=[conv], idempotency_records=conv_idempotency[cid])
+                yield unit
+    # The caller stages and validates every batch on disk before importing.
     batch = {key: {} for key in HISTORY_CORE_FIELDS}
     overhead = len(canonical({key: [] for key in HISTORY_CORE_FIELDS}).encode())
     size = overhead
-    for unit in units:
+    for unit in units():
         additions = {
             key: {
                 _identity(key, row): row
@@ -143,7 +141,7 @@ def core_history_import_batches(plan, max_bytes=64 << 20, max_interactions=100):
             or len(batch["interactions"]) + len(additions["interactions"])
             > max_interactions
         ):
-            batches.append(
+            yield (
                 canonical(
                     {key: list(batch[key].values()) for key in HISTORY_CORE_FIELDS}
                 ).encode()
@@ -165,9 +163,8 @@ def core_history_import_batches(plan, max_bytes=64 << 20, max_interactions=100):
             batch[key].update(additions[key])
         size += added_size
     if any(batch.values()):
-        batches.append(
+        yield (
             canonical(
                 {key: list(batch[key].values()) for key in HISTORY_CORE_FIELDS}
             ).encode()
         )
-    yield from batches

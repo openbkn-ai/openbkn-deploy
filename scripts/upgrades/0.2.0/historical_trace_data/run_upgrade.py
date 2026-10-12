@@ -362,6 +362,7 @@ def _report(directory, result, reasons):
     lines = ["# 015 -> 020 Historical Data Conversion", "", "## Result", "",
              "- State: " + result["state"],
              "- Source records: %d" % result["source_count"],
+             "- Captured source rows (including auxiliary/out-of-cutover rows): %d" % result.get("captured_source_records", result["source_count"]),
              "- Source records converted and native target verified: %d" % result["target_verified_count"],
              "- Already verified Audit records before publication: %d" % result["already_verified_count"],
              "- Source records not converted (originals retained): %d" % result["retained_count"],
@@ -393,11 +394,17 @@ def _report(directory, result, reasons):
                   "No online historical query or UI compatibility branch is permitted.",
                   "Original rows remain in the private source snapshot for repeatable reruns. Final per-record outcomes are recorded in final-items.jsonl when the conversion phase finishes.",
                   "Existing completed archive files/jobs are unchanged and are not imported.", ""])
+    if (directory / "progress.json").exists():
+        lines.extend(["", "- Live progress: progress.json", "- Per-batch details: batches/",
+                      "- Failure details: error.json (when present)"])
     private_write(directory / "report.md", "\n".join(lines).encode())
 
 
 def run(runtime, state_root):
     """Convert every source record; failures remain incomplete and retryable."""
+    if isinstance(runtime, DeploymentRuntime):
+        from loop_upgrade import run_loop
+        return run_loop(runtime, state_root)
     state_root = Path(state_root)
     state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     cutover_before, cutover_defaulted = history_cutover_before()
