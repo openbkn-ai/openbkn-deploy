@@ -43,7 +43,7 @@ def fetch_audit(source, item):
     event_id = item["target_id"]
     if not re.fullmatch(r"[0-9a-f-]{36}", event_id):
         raise ValueError("invalid native event identity")
-    rows = source.query("SELECT JSON_OBJECT('target_table',target_table,'dedup_hash',content_hash) FROM bkn_audit.audit_event_dedup WHERE event_id=" + literal(event_id))
+    rows = list(source.query("SELECT JSON_OBJECT('target_table',target_table,'dedup_hash',content_hash) FROM bkn_audit.audit_event_dedup WHERE event_id=" + literal(event_id)))
     if not rows:
         return None
     if len(rows) != 1:
@@ -52,7 +52,7 @@ def fetch_audit(source, item):
     table = row["target_table"]
     if not re.fullmatch(r"audit_event_[0-9]{6}", table):
         raise ValueError("invalid native month table")
-    payloads = source.query("SELECT JSON_OBJECT('content_hash',content_hash,'payload',JSON_QUERY(payload,'$'),'source_id',source_id,'occurred_at',DATE_FORMAT(occurred_at,'%Y-%m-%dT%H:%i:%s.%fZ'),'topic',topic,'partition',partition_id,'offset',offset_id) FROM bkn_audit." + identifier(table) + " WHERE event_id=" + literal(event_id))
+    payloads = list(source.query("SELECT JSON_OBJECT('content_hash',content_hash,'payload',JSON_QUERY(payload,'$'),'source_id',source_id,'occurred_at',DATE_FORMAT(occurred_at,'%Y-%m-%dT%H:%i:%s.%fZ'),'topic',topic,'partition',partition_id,'offset',offset_id) FROM bkn_audit." + identifier(table) + " WHERE event_id=" + literal(event_id)))
     if not payloads:
         return None
     if len(payloads) != 1:
