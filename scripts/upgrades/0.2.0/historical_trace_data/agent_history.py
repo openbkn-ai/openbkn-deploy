@@ -7,7 +7,7 @@ import hashlib
 import json
 import msgpack
 
-from snapshot import canonical
+from snapshot import canonical, check_blob_size
 from native_core import _id, _time, CORE_FIELDS
 
 
@@ -745,35 +745,38 @@ def export_agent_source(source, before):
             + ") AND channel='messages'",
         ),
     ]
-    result = []
     tables = []
-    for table, kind, columns, condition in specs:
-        found = source.query(
-            "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='openbkn' AND TABLE_NAME='"
-            + table
-            + "'"
-        )
-        if not found:
-            tables.append({"locator": "openbkn." + table, "state": "absent"})
-            continue
-        if not set(columns).issubset(set(found)):
-            raise ValueError("agent_source_schema_incomplete:" + table)
-        pairs = [repr(name) + ",`" + name + "`" for name in columns]
-        if kind == "agent_blob":
-            pairs.append("'blob_hex',HEX(`blob`)")
-        sql = (
-            "SELECT JSON_OBJECT('source_id','bkn-agent','kind','"
-            + kind
-            + "','locator','openbkn."
-            + table
-            + "','row',JSON_OBJECT("
-            + ",".join(pairs)
-            + ")) FROM openbkn.`"
-            + table
-            + "`"
-        )
-        if condition:
-            sql += " WHERE " + condition
-        result.extend(json.loads(line) for line in source.query(sql))
-        tables.append({"locator": "openbkn." + table, "state": "present"})
-    return result, tables
+    def capture():
+        for table, kind, columns, condition in specs:
+            found = list(source.query(
+                "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='openbkn' AND TABLE_NAME='"
+                + table
+                + "'"
+            ))
+            if not found:
+                tables.append({"locator": "openbkn." + table, "state": "absent"})
+                continue
+            if not set(columns).issubset(set(found)):
+                raise ValueError("agent_source_schema_incomplete:" + table)
+            pairs = [repr(name) + ",`" + name + "`" for name in columns]
+            if kind == "agent_blob":
+                check_blob_size(source, 'openbkn', table, ['blob'])
+                pairs.append("'blob_hex',HEX(`blob`)")
+            sql = (
+                "SELECT JSON_OBJECT('source_id','bkn-agent','kind','"
+                + kind
+                + "','locator','openbkn."
+                + table
+                + "','row',JSON_OBJECT("
+                + ",".join(pairs)
+                + ")) FROM openbkn.`"
+                + table
+                + "`"
+            )
+            if condition:
+                sql += " WHERE " + condition
+            for line in source.query(sql):
+                yield json.loads(line)
+            tables.append({"locator": "openbkn." + table, "state": "present"})
+
+    return capture(), tables

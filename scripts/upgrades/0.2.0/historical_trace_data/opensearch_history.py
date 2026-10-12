@@ -1,6 +1,7 @@
 """Read-before-create and readback for native historical Evidence aggregates."""
 import base64
 import json
+import os
 import ssl
 from datetime import timezone
 from urllib.error import HTTPError, URLError
@@ -12,6 +13,22 @@ def _iso(value):
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds" if value.microsecond else "seconds").replace("+00:00", "Z")
+
+
+def document_chunks(items):
+    limit = min(int(os.environ.get("BKN_HISTORY_BATCH_BYTES", 32 << 20)), 8 << 20)
+    chunk, size = [], 0
+    for item in items:
+        length = len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode()) + 256
+        if length > limit:
+            raise ValueError("native_evidence_document_exceeds_content_limit")
+        if chunk and (len(chunk) == 200 or size + length > limit):
+            yield chunk
+            chunk, size = [], 0
+        chunk.append(item)
+        size += length
+    if chunk:
+        yield chunk
 
 
 class OpenSearchHistoryWriter:
@@ -62,8 +79,7 @@ class OpenSearchHistoryWriter:
 
     def publish_documents(self, items, observed_at=None, *, allow_update=False, on_result=None):
         counts = {"created": 0, "updated": 0, "already_verified": 0, "conflict": 0}
-        for start in range(0, len(items), 200):
-            chunk = items[start:start + 200]
+        for chunk in document_chunks(items):
             status, body = self._request("POST", "/" + quote(self.index, safe="") + "/_mget",
                                          json.dumps({"docs": [{"_id": item["_id"]} for item in chunk]}, separators=(",", ":")).encode())
             if status != 200:
