@@ -63,7 +63,8 @@ class OpenSearch:
                 status, payload = response.status, response.read()
         except HTTPError as error:
             status = error.code
-            error.close()
+            if error.fp is not None:
+                error.close()
             if 300 <= status < 400:
                 raise ValueError("OpenSearch redirect refused; target isolation preserved") from None
             return status, {}

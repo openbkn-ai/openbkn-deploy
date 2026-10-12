@@ -1,0 +1,54 @@
+name: release-opensearch-image
+
+on:
+  pull_request:
+    paths:
+      - 'images/opensearch/Dockerfile'
+      - '.github/workflows/release-opensearch-image.yml'
+      - '.github/workflows/reusable-container-image.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'images/opensearch/Dockerfile'
+      - '.github/workflows/release-opensearch-image.yml'
+      - '.github/workflows/reusable-container-image.yml'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish to registries (true) or verify build only (false)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_VERSION='2.19.4'
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          COMMIT_DATE="$(TZ=Asia/Shanghai git show -s --format=%cd --date=format-local:%Y%m%d%H%M%S HEAD)"
+          echo "version=${BASE_VERSION}-${COMMIT_DATE}.sha${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve-version
+    uses: ./.github/workflows/reusable-container-image.yml
+    secrets: inherit
+    with:
+      service-path: images/opensearch
+      dockerfile: Dockerfile
+      context: '.'
+      image-name: opensearch
+      version: ${{ needs.resolve-version.outputs.version }}
+      publish: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
