@@ -62,16 +62,16 @@ snapshot remains stable until vega-backend is restarted.
 
 ## Build & publish
 
-CI (`.github/workflows/release-deploy-opensearch.yml`) builds
-`linux/amd64,linux/arm64` on any push touching this directory and publishes to
+CI (`.github/workflows/release-opensearch-image.yml`) builds
+`linux/amd64,linux/arm64` on main pushes touching the Dockerfile (PRs verify without publishing) and publishes to
 GHCR plus the Huawei SWR mirror as
-`opensearch:2.19.4-<branch>.<committime>.sha<short>` (base `2.19.4` = the
-OpenSearch version, not the repo VERSION).
+`opensearch:2.19.4-<committime>.sha<short>` (base `2.19.4` = the
+OpenSearch version).
 
-This image is the installer default. `deploy/scripts/lib/common.sh` pins
+This image is the installer default. `scripts/lib/common.sh` pins
 `OPENSEARCH_IMAGE_REPOSITORY=opensearch` and
 `OPENSEARCH_IMAGE_TAG=2.19.4-main.20260818163046.shaaeb5d56`; the offline
-image list in `deploy/scripts/sync-k8s-images.sh` carries the same tag. Publishing
+image list in `scripts/sync-k8s-images.sh` carries the same tag. Publishing
 a rebuild means bumping both, so a cluster always names the exact build it runs.
 
 Pinning a different image for one environment:

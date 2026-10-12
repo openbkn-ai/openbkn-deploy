@@ -1,0 +1,90 @@
+name: Deployment contracts
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - 'conf/**'
+      - 'deploy.sh'
+      - '.github/workflows/ci-deploy-contracts.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - 'conf/**'
+      - 'deploy.sh'
+      - '.github/workflows/ci-deploy-contracts.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  installer-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Manifest and observability configuration contracts
+        run: |
+          bash scripts/tests/test-gen-dev-manifest.sh
+          bash scripts/services/config_observability_test.sh
+          bash scripts/services/openbkn_audit_consumer_test.sh
+
+  permission-transition:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scripts/upgrades/0.1.5/permission_model_transition
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pymysql==1.1.0
+      - run: python -m unittest -v test_bkn_data.py test_migrate.py
+      - run: ./test_service_control.sh
+
+  permission-marker-writer:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scripts/upgrades/0.1.5/permission_model_transition/authz_migrate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: openbkn-ai/bkn-foundry
+          path: _foundry
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: scripts/upgrades/0.1.5/permission_model_transition/authz_migrate/go.mod
+      - name: Verify shared receipt contract and migration writer
+        run: |
+          set -euo pipefail
+          cp go.mod "${RUNNER_TEMP}/authz-migrate.mod"
+          cp go.sum "${RUNNER_TEMP}/authz-migrate.sum"
+          go mod edit -modfile="${RUNNER_TEMP}/authz-migrate.mod" \
+            -replace=github.com/openbkn-ai/bkn-foundry/bkn-safe/server="${GITHUB_WORKSPACE}/_foundry/bkn-safe/server"
+          GOWORK=off go test -modfile="${RUNNER_TEMP}/authz-migrate.mod" -mod=mod -p=1 ./...
+
+  historical-trace-data:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scripts/upgrades/0.2.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r historical_trace_data/requirements.txt
+      - run: python -m unittest discover -s historical_trace_data -p 'test_*.py'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: scripts/upgrades/0.2.0/historical_trace_data/span-codec/go.mod
+      - name: Verify offline Span codec
+        working-directory: scripts/upgrades/0.2.0/historical_trace_data/span-codec
+        run: |
+          go vet ./...
+          go test ./... -count=1
+          go build ./...

@@ -1,0 +1,58 @@
+name: release-mariadb-chart
+
+on:
+  pull_request:
+    paths:
+      - 'charts/mariadb/**'
+      - '.github/workflows/release-mariadb-chart.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'charts/mariadb/**'
+      - '.github/workflows/release-mariadb-chart.yml'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish to GHCR (true) or verify package only (false)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: azure/setup-helm@v4
+      - name: Resolve immutable chart version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_VERSION="$(sed -n 's/^version: *//p' charts/mariadb/Chart.yaml | head -1)"
+          [[ "$BASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::invalid MariaDB chart version: $BASE_VERSION"; exit 1; }
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          COMMIT_DATE="$(TZ=Asia/Shanghai git show -s --format=%cd --date=format-local:%Y%m%d%H%M%S HEAD)"
+          echo "version=${BASE_VERSION}-${COMMIT_DATE}.sha${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+      - name: Lint and package chart
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          helm lint charts/mariadb
+          mkdir -p /tmp/charts
+          helm package charts/mariadb --version "$VERSION" --destination /tmp/charts
+      - name: Publish chart
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm push "/tmp/charts/mariadb-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
