@@ -1423,6 +1423,66 @@ except (ValueError, TypeError, AttributeError):
 ' "${expected[@]}" <<<"${values}"
 }
 
+# Management producers share the Audit connection, but retain release-specific
+# user values. Read supplied values (not Chart defaults) to preserve opt-outs.
+_openbkn_management_audit_profile_sets() {
+    local release="$1" namespace="$2" installed key value
+    local -a keys=(enabled environment brokers credentialsSecretName usernameSecretKey passwordSecretKey)
+    [[ "${release}" != mf-model-manager ]] || keys+=(securityProtocol saslMechanism)
+    installed="$(helm get values "${release}" -n "${namespace}" -o json 2>/dev/null)" || installed='{}'
+    for key in "${keys[@]}"; do
+        if value="$(_openbkn_last_set_value "auditPublisher.${key}" "${CORE_SET_VALUES[@]-}")"; then
+            :
+        else
+            value="$(config_yaml_top_field auditPublisher "${key}")"
+            [[ "${key}" != brokers || "${value}" != \[* ]] || value=""
+            if [[ -z "${value}" ]]; then
+                value="$(python3 -c '
+import json,sys
+try:
+    value=json.load(sys.stdin).get("auditPublisher", {}).get(sys.argv[1], "")
+    print(str(value).lower() if isinstance(value, bool) else value or "", end="")
+except (ValueError, AttributeError, TypeError):
+    pass
+' "${key}" <<<"${installed}")"
+            fi
+        fi
+        if [[ -z "${value}" ]]; then
+            case "${key}" in
+                enabled) value=true ;;
+                environment) value="$(_openbkn_safe_audit_environment "${namespace}")" ;;
+                brokers) value="$(_openbkn_trace_kafka_brokers)" ;;
+                credentialsSecretName) value="${OPENBKN_TRACE_KAFKA_SECRET}" ;;
+                usernameSecretKey) value=username ;;
+                passwordSecretKey) value=password ;;
+                securityProtocol) value=SASL_PLAINTEXT ;;
+                saslMechanism) value=PLAIN ;;
+            esac
+        fi
+        CORE_RELEASE_EXTRA_SETS+=("auditPublisher.${key}=${value//,/\\,}")
+    done
+}
+
+_openbkn_management_audit_profile_matches() {
+    local release="$1" namespace="$2" values
+    local -a CORE_RELEASE_EXTRA_SETS=()
+    values="$(helm get values "${release}" -n "${namespace}" --all -o json 2>/dev/null)" || return 2
+    _openbkn_management_audit_profile_sets "${release}" "${namespace}"
+    python3 -c '
+import json,sys
+try:
+    publisher=json.load(sys.stdin).get("auditPublisher", {})
+    for item in sys.argv[1:]:
+        key, expected=item.split("=", 1)
+        actual=publisher.get(key.split(".", 1)[1])
+        actual=str(actual).lower() if isinstance(actual, bool) else str(actual)
+        if actual != expected.replace("\\,", ","):
+            sys.exit(1)
+except (ValueError, AttributeError, TypeError):
+    sys.exit(2)
+' "${CORE_RELEASE_EXTRA_SETS[@]}" <<<"${values}"
+}
+
 _openbkn_release_extra_sets() {
     local release_name="$1"
     local namespace="${2:-${CORE_NAMESPACE}}"
@@ -1478,6 +1538,11 @@ _openbkn_release_extra_sets() {
             log_warn "Could not derive a hardware instance identity from any node (status.nodeInfo.systemUUID / machineID) — commercial licenses cannot be activated on this cluster until config.license.instanceId is set to a host-derived, stable value."
         fi
     fi
+    case "${release_name}" in
+        bkn-backend|vega-backend|mf-model-manager)
+            _openbkn_management_audit_profile_sets "${release_name}" "${namespace}"
+            ;;
+    esac
 }
 
 # Chart version equality alone is not sufficient for agent-observability: the
@@ -1625,6 +1690,15 @@ _openbkn_should_skip_upgrade() {
     if ! should_skip_upgrade_same_chart_version "${release_name}" "${namespace}" "${chart_name}" "${target_version}"; then
         return 1
     fi
+    case "${release_name}" in
+        bkn-backend|vega-backend|mf-model-manager)
+            _openbkn_management_audit_profile_matches "${release_name}" "${namespace}"
+            case "$?" in
+                1) log_info "Reconcile ${release_name}: installed Audit publisher profile differs."; return 1 ;;
+                2) log_warn "Cannot read ${release_name} Helm values; preserving the version-skip decision."; return 0 ;;
+            esac
+            ;;
+    esac
     if [[ "${release_name}" == "bkn-safe" ]]; then
         _openbkn_safe_audit_profile_matches "${namespace}"
         case "$?" in
