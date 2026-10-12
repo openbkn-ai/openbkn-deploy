@@ -30,6 +30,7 @@ jobs:
       - name: Installer regression tests (mock cluster)
         run: |
           bash scripts/services/openbkn_audit_consumer_test.sh
+          bash scripts/services/openbkn_instance_id_test.sh
           bash scripts/services/openbkn_trace_control_test.sh
           bash scripts/services/openbkn_trace_profile_test.sh
           bash scripts/services/openbkn_trace_prerequisites_test.sh

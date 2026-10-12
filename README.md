@@ -641,7 +641,7 @@ Set `FOUNDRY_ROOT` to a compatible checkout for additional index and data-migrat
 
 ## System Audit installation (Foundry #2061 / #2094)
 
-This ports the installer wiring from Foundry PR #2097, not application code or Charts. The standalone Chart default `kafkaConsumers.audit.enabled=false` stays unchanged. The complete installer explicitly enables the Audit consumer and Core publisher in final **agent-observability** values and uses Core MariaDB with migration enabled. The default independent consumer group is `bkn-trace-audit-ledger-v1`; existing group and Secret references are preserved.
+This ports the installer wiring from Foundry PR #2097, not application code or Charts. The standalone Chart default `kafkaConsumers.audit.enabled=false` stays unchanged. The complete installer explicitly enables the Audit consumer and Core publisher in final **agent-observability** values and uses Core MariaDB with migration enabled. It also enables the Safe Audit publisher with the same managed Kafka connection, using Safe's `credentialsSecretName` / `usernameSecretKey` / `passwordSecretKey` contract. The default independent consumer group is `bkn-trace-audit-ledger-v1`; existing group and Secret references are preserved.
 
 No extra `--config` file is required. Existing Trace prerequisites prepare `bkn-trace-core-mariadb` and reuse `bkn-trace-evidence-kafka` (`OPENBKN_TRACE_KAFKA_SECRET` overrides the Kafka Secret name). Brokers and SASL come from the existing MQ configuration. External Kafka still requires an existing credentials Secret. No Kafka users, passwords, ACLs, or broker authentication settings are changed.
 
@@ -665,6 +665,7 @@ Cluster-free regressions (Helm 3.18.6 and Python 3):
 ```bash
 PYTHONPATH=scripts/lib python3 -m unittest test_audit_consumer test_audit_helm_render audit_kafka_topic_job_test
 bash scripts/services/openbkn_audit_consumer_test.sh
+bash scripts/services/openbkn_instance_id_test.sh
 ```
 
 The small Helm fixture and mocked cluster tests do not replace published product Chart rendering or real-cluster acceptance.

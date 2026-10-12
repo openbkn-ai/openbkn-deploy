@@ -586,7 +586,7 @@ bash scripts/services/openbkn_trace_prerequisites_test.sh
 
 ## System Audit 安装迁移（Foundry #2061 / #2094）
 
-本仓库迁移 Foundry PR #2097 的安装器接线，不复制应用代码或 Chart。Chart 默认值 `kafkaConsumers.audit.enabled=false` 不变；完整安装时在 **agent-observability** 的最终 values 中启用 Audit consumer 和 Core publisher，并使用 Core MariaDB、`autoMigrate=true`。默认独立消费组为 `bkn-trace-audit-ledger-v1`，已有组名和 Secret 引用保留。
+本仓库迁移 Foundry PR #2097 的安装器接线，不复制应用代码或 Chart。Chart 默认值 `kafkaConsumers.audit.enabled=false` 不变；完整安装时在 **agent-observability** 的最终 values 中启用 Audit consumer 和 Core publisher，并使用 Core MariaDB、`autoMigrate=true`。同时为 Safe 启用 Audit publisher，复用同一受安装器管理的 Kafka 连接，并按 Safe 的 `credentialsSecretName` / `usernameSecretKey` / `passwordSecretKey` 字段契约注入。默认独立消费组为 `bkn-trace-audit-ledger-v1`，已有组名和 Secret 引用保留。
 
 不需要额外提供 `--config` 文件。沿用现有 Trace 前置逻辑准备 `bkn-trace-core-mariadb`、复用 `bkn-trace-evidence-kafka`；Kafka Secret 名可用 `OPENBKN_TRACE_KAFKA_SECRET` 覆盖。地址、SASL 从安装器已有 MQ 配置读取。外置 Kafka 仍需已有凭据 Secret。不新增用户、不换密码、不改 ACL 或 broker 认证，不影响其它服务的 Kafka 凭据。
 
@@ -610,6 +610,7 @@ bash scripts/services/openbkn_trace_prerequisites_test.sh
 ```bash
 PYTHONPATH=scripts/lib python3 -m unittest test_audit_consumer test_audit_helm_render audit_kafka_topic_job_test
 bash scripts/services/openbkn_audit_consumer_test.sh
+bash scripts/services/openbkn_instance_id_test.sh
 ```
 
 测试使用小型 Helm 合并 fixture 和模拟集群，不能替代实际发布 Chart 渲染及目标集群验收。

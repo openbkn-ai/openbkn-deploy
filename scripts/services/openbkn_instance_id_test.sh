@@ -131,6 +131,22 @@ else
     ok
 fi
 
+# Safe's Chart deliberately defaults Audit publishing off. The installer must
+# inject its own (different from agent-observability) publisher field contract,
+# otherwise successful user/login actions have no Kafka facts to query.
+safe_audit_sets="${CORE_RELEASE_EXTRA_SETS[*]:-}"
+for expected in \
+    "auditPublisher.enabled=true" \
+    "auditPublisher.environment=development" \
+    "auditPublisher.brokers=kafka.resource.svc.cluster.local:9092" \
+    "auditPublisher.credentialsSecretName=${OPENBKN_TRACE_KAFKA_SECRET}" \
+    "auditPublisher.usernameSecretKey=username" \
+    "auditPublisher.passwordSecretKey=password"; do
+    if [[ " ${safe_audit_sets} " == *" ${expected} "* ]]; then ok; else
+        fail "safe-audit-publisher-missing: ${expected}"
+    fi
+done
+
 trace_secret_create_setting() {
     SCENARIO="$1" _openbkn_release_extra_sets agent-observability openbkn >/dev/null 2>&1
     printf '%s' "${CORE_RELEASE_EXTRA_SETS[*]:-}"

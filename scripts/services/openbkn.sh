@@ -428,7 +428,10 @@ _bkn_safe_usable_instance_id() {
 # CORE_RELEASE_EXTRA_SET_STRINGS (--set-string).
 # bkn-safe: pass the per-install platform initial password recorded in
 # config.yaml by generate_config_yaml (seeded admin + users created without an
-# explicit password — no baked-in default), plus the license instance identity.
+# explicit password — no baked-in default), the license instance identity, and
+# the System Audit publisher connection. The standalone Safe chart defaults the
+# publisher off, so the product installer must wire it just like other Kafka
+# producers.
 # Applied BEFORE CORE_SET_VALUES so an explicit --set config.initialPassword=...
 # still wins.
 CORE_RELEASE_EXTRA_SETS=()
@@ -1390,6 +1393,21 @@ _openbkn_release_extra_sets() {
             log_warn "accessAddress is not recorded; bkn-sample-studio has no gateway URL, so sample install cannot call OpenBKN."
         fi
     elif [[ "${release_name}" == "bkn-safe" ]]; then
+        # Safe publishes management and access Audit facts. Its Chart uses a
+        # different credentials contract from agent-observability: a single
+        # Secret name plus explicit username/password keys. Keep credentials in
+        # the existing installer-managed Kafka Secret; never pass them as Helm
+        # values. CORE_SET_VALUES is applied after these defaults, so operators
+        # may still explicitly override any of them.
+        CORE_RELEASE_EXTRA_SETS+=(
+            "auditPublisher.enabled=true"
+            "auditPublisher.environment=development"
+            "auditPublisher.brokers=$(_openbkn_trace_kafka_brokers)"
+            "auditPublisher.credentialsSecretName=${OPENBKN_TRACE_KAFKA_SECRET}"
+            "auditPublisher.usernameSecretKey=username"
+            "auditPublisher.passwordSecretKey=password"
+        )
+
         local initial_pwd
         initial_pwd="$(config_yaml_top_field bknSafe initialPassword)"
         if [[ -n "${initial_pwd}" ]]; then
