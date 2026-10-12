@@ -1,6 +1,8 @@
 import tempfile
+import sys
 from collections import Counter
 from pathlib import Path
+from types import ModuleType
 import unittest
 from unittest.mock import patch
 
@@ -398,23 +400,34 @@ class AgentHistoryPreflightTests(unittest.TestCase):
             self.assertEqual(runtime.snapshot_calls,1)
             self.assertEqual(export.call_count,1)
 
-    def test_cutover_required_before_writes(self):
+    def test_default_cutover_is_generated_once_before_agent_export(self):
         class Runtime(FakeRuntime):
-            def prepare_agent_history(self, records, before):return None
+            source = object()
+            def prepare_agent_history(self, records, before):
+                self.cutover_before = before
+                return None
         runtime=Runtime()
-        with tempfile.TemporaryDirectory() as directory, patch.dict('os.environ',{},clear=True):
+        agent_history = ModuleType('agent_history')
+        agent_history.export_agent_source = lambda *_: ([], [])
+        with tempfile.TemporaryDirectory() as directory, patch.dict('os.environ',{},clear=True), patch.dict(sys.modules, {'agent_history': agent_history}):
             result=run(runtime,Path(directory))
-        self.assertFalse(result['complete']);self.assertEqual(result['state'],'agent_source_precheck_failed')
-        self.assertEqual(runtime.sent,[])
+        self.assertTrue(result['agent_cutover_defaulted'])
+        self.assertEqual(result['agent_cutover_before'], runtime.cutover_before)
+        self.assertRegex(runtime.cutover_before, r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}')
 
-    def test_legacy_cutover_variable_is_not_accepted(self):
+    def test_legacy_cutover_variable_is_ignored_when_defaulting(self):
         class Runtime(FakeRuntime):
-            def prepare_agent_history(self, records, before):return None
+            source = object()
+            def prepare_agent_history(self, records, before):
+                self.cutover_before = before
+                return None
         runtime=Runtime()
-        with tempfile.TemporaryDirectory() as directory, patch.dict('os.environ', {'BKN_HISTORY_AGENT_BEFORE':'2026-10-01T00:00:00Z'}, clear=True):
+        agent_history = ModuleType('agent_history')
+        agent_history.export_agent_source = lambda *_: ([], [])
+        with tempfile.TemporaryDirectory() as directory, patch.dict('os.environ', {'BKN_HISTORY_AGENT_BEFORE':'2026-10-01T00:00:00Z'}, clear=True), patch.dict(sys.modules, {'agent_history': agent_history}):
             result=run(runtime,Path(directory))
-        self.assertFalse(result['complete']);self.assertEqual(result['state'],'agent_source_precheck_failed')
-        self.assertEqual(runtime.sent,[])
+        self.assertTrue(result['agent_cutover_defaulted'])
+        self.assertNotEqual(runtime.cutover_before, '2026-10-01T00:00:00Z')
 
     def test_retained_artifact_defaults_are_reported_and_persisted(self):
         from run_upgrade import _report
