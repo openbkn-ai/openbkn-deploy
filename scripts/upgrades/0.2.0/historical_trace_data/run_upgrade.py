@@ -34,6 +34,16 @@ ARTIFACT_BATCH_BYTES = 8 << 20
 ARTIFACT_BATCH_RECORDS = 100
 
 
+def history_cutover_before():
+    """Return one stable cutover for this run, defaulting only once to now."""
+    before = os.environ.get("BKN_HISTORY_BEFORE")
+    if before:
+        return before, False
+    before = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    os.environ["BKN_HISTORY_BEFORE"] = before
+    return before, True
+
+
 def artifact_import_batches(artifacts, settings, max_bytes=ARTIFACT_BATCH_BYTES,
                             max_records=ARTIFACT_BATCH_RECORDS):
     """Bound encoded UTF-8 plans, including transport metadata, below native limits."""
@@ -390,11 +400,13 @@ def run(runtime, state_root):
     """Convert every source record; failures remain incomplete and retryable."""
     state_root = Path(state_root)
     state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cutover_before, cutover_defaulted = history_cutover_before()
     directory = state_root / ("run-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8])
     directory.mkdir(mode=0o700)
     result = {"complete": False, "state": "precheck_failed", "source_count": 0,
               "target_verified_count": 0, "already_verified_count": 0, "retained_count": 0,
-              "run_directory": str(directory)}
+              "run_directory": str(directory), "agent_cutover_before": cutover_before,
+              "agent_cutover_defaulted": cutover_defaulted}
     reasons, items = Counter(), []
     phase = "precheck_failed"
     try:
@@ -438,9 +450,7 @@ def run(runtime, state_root):
             from agent_history import export_agent_source
             from native_core import _time
             phase = "agent_source_precheck_failed"
-            before = os.environ.get("BKN_HISTORY_BEFORE")
-            if not before:
-                raise ValueError("agent_history_cutover_required")
+            before = cutover_before
             before = _time(before)
             # A separate immutable capture extends the old Audit/Evidence snapshot
             # without replacing it. Customer cutover is explicit, never a release date constant.
