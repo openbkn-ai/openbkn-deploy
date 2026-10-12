@@ -10,7 +10,7 @@ import re
 from decimal import Decimal
 from pathlib import Path
 
-from snapshot import identifier, literal, strict_loads
+from snapshot import identifier, literal, strict_loads, bounded_lines, record_limit, check_blob_size
 
 CORE_TABLES = tuple(
     ("bkn_trace", "bkn_trace_" + name)
@@ -45,7 +45,7 @@ def _binary(value):
     return value.lower()
 
 
-def export_core(source):
+def export_core(source, stream=False):
     """Return (rows_by_qualified_table, metadata) in one read-only data snapshot."""
     rows, tables, queries, present = {}, [], [], {}
     for database, table in CORE_TABLES:
@@ -63,6 +63,8 @@ def export_core(source):
         binary_columns = [
             name for name, datatype in columns if datatype in BINARY_TYPES
         ]
+        if stream:
+            check_blob_size(source, database, table, binary_columns)
         pairs = []
         for name, datatype in columns:
             column = identifier(name)
@@ -89,21 +91,26 @@ def export_core(source):
         }
         tables.append(entry)
         present[locator] = entry
-    # SQLSource.query encloses this entire batch in a consistent read-only transaction.
-    for line in source.query(";".join(queries)) if queries else []:
-        item = strict_loads(line)
-        locator = item["locator"]
-        row = item["row"]
-        if locator not in present:
-            raise ValueError("unexpected source table")
-        entry = present[locator]
-        if set(row) != {name for name, _ in entry["columns"]}:
-            raise ValueError("source row columns mismatch")
-        for name in entry["binary_columns"]:
-            row[name] = _binary(row[name])
-        rows[locator].append(row)
-        entry["count"] += 1
-    return rows, {"format_version": 1, "binary_encoding": "hex", "tables": tables}
+    metadata = {"format_version": 1, "binary_encoding": "hex", "tables": tables}
+    def capture():
+        for line in source.query(";".join(queries)) if queries else []:
+            item = strict_loads(line)
+            locator = item["locator"]
+            row = item["row"]
+            if locator not in present:
+                raise ValueError("unexpected source table")
+            entry = present[locator]
+            if set(row) != {name for name, _ in entry["columns"]}:
+                raise ValueError("source row columns mismatch")
+            for name in entry["binary_columns"]:
+                row[name] = _binary(row[name])
+            entry["count"] += 1
+            yield {"kind": "core_source", "source_id": "trace-core", "locator": locator, "row": row}
+    if stream:
+        return capture(), metadata
+    for record in capture():
+        rows[record["locator"]].append(record["row"])
+    return rows, metadata
 
 
 def _check_directives(data):
@@ -131,7 +138,9 @@ def _statements(stream):
         96: re.compile(rb"`"),
     }
     unquoted_markers = re.compile(rb"['\"`;\/#-]")
-    for line in stream:
+    for line in bounded_lines(stream):
+        if len(buffer) + len(line) > record_limit():
+            raise ValueError("SQL_statement_exceeds_limit")
         i = 0
         while i < len(line):
             c = line[i]
@@ -308,7 +317,7 @@ def _tuples(data):
                 raise ValueError("trailing INSERT comma")
 
 
-def read_core_backup(path):
+def _backup_records(path, metadata):
     """Parse supported mysqldump .sql/.sql.gz without a database or SQL execution.
 
     Require USE or qualified names, CREATE TABLE column types, ordinary INSERT
@@ -317,7 +326,7 @@ def read_core_backup(path):
     """
     path = Path(path)
     opener = gzip.open if path.suffix == ".gz" else open
-    rows = {}
+    counts = {}
     schemas = {}
     database = None
     sha = hashlib.sha256()
@@ -363,7 +372,7 @@ def read_core_backup(path):
                 if locator in schemas and schemas[locator] != schema:
                     raise ValueError("conflicting source DDL")
                 schemas[locator] = schema
-                rows.setdefault(locator, [])
+                counts.setdefault(locator, 0)
                 continue
             if locator not in schemas:
                 raise ValueError("INSERT missing source DDL")
@@ -403,7 +412,8 @@ def read_core_backup(path):
                             raise ValueError("invalid UTF-8 source text") from exc
                     else:
                         row[name] = value
-                rows[locator].append(row)
+                counts[locator] += 1
+                yield {"kind": "core_source", "source_id": "trace-core", "locator": locator, "row": row}
     source_sha256 = hashlib.sha256()
     with path.open("rb") as source_file:
         for block in iter(lambda: source_file.read(1 << 20), b""):
@@ -414,11 +424,11 @@ def read_core_backup(path):
             "state": "present",
             "columns": schemas[loc],
             "binary_columns": [n for n, t in schemas[loc] if t in BINARY_TYPES],
-            "count": len(records),
+            "count": count,
         }
-        for loc, records in rows.items()
+        for loc, count in counts.items()
     ]
-    return rows, {
+    metadata.update({
         "format_version": 1,
         "source_kind": "mysqldump",
         "source_file": path.name,
@@ -426,4 +436,15 @@ def read_core_backup(path):
         "binary_encoding": "hex",
         "parsed_statements_sha256": sha.hexdigest(),
         "tables": tables,
-    }
+    })
+
+
+def read_core_backup(path, stream=False):
+    metadata = {}
+    records = _backup_records(path, metadata)
+    if stream:
+        return records, metadata
+    rows = {}
+    for record in records:
+        rows.setdefault(record["locator"], []).append(record["row"])
+    return rows, metadata
