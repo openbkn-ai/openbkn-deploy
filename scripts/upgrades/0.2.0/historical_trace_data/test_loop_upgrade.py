@@ -76,12 +76,16 @@ class LoopUpgradeTests(unittest.TestCase):
     def test_core_rejection_skips_only_the_rejected_interaction(self):
         from loop_upgrade import _stage_core_batches
 
-        class Runtime:
-            def _native(self, flags, data):
-                ids = [row['interaction_id'] for row in strict_loads(data)['interactions']]
-                if 'rejected' in ids:
-                    return b'{"verified":false,"reason":"interaction_invalid"}'
-                return b'{"verified":true}'
+        from subprocess import CompletedProcess
+        from run_upgrade import DeploymentRuntime
+        runtime = DeploymentRuntime()
+        runtime.context, runtime.pod, runtime.container = 'test', 'trace', 'trace'
+
+        def command(arguments, input, capture_output):
+            ids = [row['interaction_id'] for row in strict_loads(input)['interactions']]
+            if 'rejected' in ids:
+                return CompletedProcess(arguments, 1, b'{"verified":false,"reason":"interaction_invalid"}', b'rejected')
+            return CompletedProcess(arguments, 0, b'{"verified":true}', b'')
 
         class Progress:
             def update(self, **values):
@@ -95,7 +99,9 @@ class LoopUpgradeTests(unittest.TestCase):
         ]
         directory = self.root / 'core-stage'
         directory.mkdir()
-        skipped = _stage_core_batches(Runtime(), plan, directory, Progress())
+        with patch('run_upgrade.subprocess.run', side_effect=command), patch('loop_upgrade.time.sleep') as sleep:
+            skipped = _stage_core_batches(runtime, plan, directory, Progress())
+        sleep.assert_not_called()
         self.assertEqual([item['interaction_id'] for item in skipped], ['rejected'])
         staged = [strict_loads(path.read_bytes()) for path in (directory / 'core').glob('*.json')]
         self.assertEqual([[row['interaction_id'] for row in body['interactions']] for body in staged], [['accepted']])
