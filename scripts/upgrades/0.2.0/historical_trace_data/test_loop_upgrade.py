@@ -5,10 +5,11 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from loop_upgrade import run_loop, Progress
 from snapshot import canonical, digest, strict_loads
+from core_history_batches import HISTORY_CORE_FIELDS
 from test_run_upgrade import FakeRuntime
 from test_logs import row
 
@@ -71,6 +72,142 @@ class LoopUpgradeTests(unittest.TestCase):
     def run_quiet(self, runtime):
         with contextlib.redirect_stderr(io.StringIO()):
             return run_loop(runtime, self.root)
+
+    def test_core_rejection_skips_only_the_rejected_interaction(self):
+        from loop_upgrade import _stage_core_batches
+
+        class Runtime:
+            def _native(self, flags, data):
+                ids = [row['interaction_id'] for row in strict_loads(data)['interactions']]
+                if 'rejected' in ids:
+                    return b'{"verified":false,"reason":"interaction_invalid"}'
+                return b'{"verified":true}'
+
+        class Progress:
+            def update(self, **values):
+                pass
+
+        plan = {'core': {key: [] for key in HISTORY_CORE_FIELDS}}
+        plan['core']['conversations'] = [{'conversation_id': 'conversation'}]
+        plan['core']['interactions'] = [
+            {'interaction_id': 'accepted', 'conversation_id': 'conversation'},
+            {'interaction_id': 'rejected', 'conversation_id': 'conversation'},
+        ]
+        directory = self.root / 'core-stage'
+        directory.mkdir()
+        skipped = _stage_core_batches(Runtime(), plan, directory, Progress())
+        self.assertEqual([item['interaction_id'] for item in skipped], ['rejected'])
+        staged = [strict_loads(path.read_bytes()) for path in (directory / 'core').glob('*.json')]
+        self.assertEqual([[row['interaction_id'] for row in body['interactions']] for body in staged], [['accepted']])
+
+    def test_ledger_rejection_skips_only_the_rejected_event(self):
+        from loop_upgrade import _stage_ledger_batches
+
+        class Runtime:
+            def _native(self, flags, data):
+                ids = [row['ledger_id'] for row in strict_loads(data)['ledger']]
+                if 'rejected' in ids:
+                    return b'{"verified":false,"reason":"ledger_invalid"}'
+                return b'{"verified":true}'
+
+        class Progress:
+            def update(self, **values):
+                pass
+
+        directory = self.root / 'ledger-stage'
+        directory.mkdir()
+        rows = {'ledger': [
+            {'ledger_id': 'accepted', 'envelope': {'envelope': {'event': {'event_type': 'accepted'}}}},
+            {'ledger_id': 'rejected', 'envelope': {'envelope': {'event': {'event_type': 'rejected'}}}},
+        ]}
+        skipped = _stage_ledger_batches(Runtime(), [canonical(rows).encode()], directory, Progress())
+        self.assertEqual([item['ledger_id'] for item in skipped], ['rejected'])
+        staged = [strict_loads(path.read_bytes()) for path in (directory / 'ledger').glob('*.json')]
+        self.assertEqual([[row['ledger_id'] for row in body['ledger']] for body in staged], [['accepted']])
+
+    def test_validator_command_failure_retries_then_stops_instead_of_skipping_ledger(self):
+        from loop_upgrade import _stage_ledger_batches
+
+        class CommandFailure(ValueError):
+            returncode, stdout, stderr = 1, b'', b'pod unavailable'
+
+        class Runtime:
+            def __init__(self):
+                self.calls = 0
+
+            def _native(self, flags, data):
+                self.calls += 1
+                raise CommandFailure('deployment_command_failed')
+
+        class Progress:
+            def update(self, **values):
+                pass
+
+        directory = self.root / 'failed-ledger-stage'
+        directory.mkdir()
+        runtime = Runtime()
+        with patch('loop_upgrade.time.sleep') as sleep:
+            with self.assertRaisesRegex(RuntimeError, 'native_validator_command_failed'):
+                _stage_ledger_batches(runtime, [canonical({'ledger': [{'ledger_id': 'one'}]}).encode()],
+                                      directory, Progress())
+        self.assertEqual(runtime.calls, 3)
+        self.assertEqual(sleep.call_args_list, [call(3), call(3)])
+        self.assertEqual(list((directory / 'ledger').glob('*.json')), [])
+
+    def test_validator_command_failure_retries_then_stops_instead_of_skipping_core(self):
+        from loop_upgrade import _stage_core_batches
+
+        class CommandFailure(ValueError):
+            returncode, stdout, stderr = 1, b'', b'validator unavailable'
+
+        class Runtime:
+            def __init__(self):
+                self.calls = 0
+
+            def _native(self, flags, data):
+                self.calls += 1
+                raise CommandFailure('deployment_command_failed')
+
+        class Progress:
+            def update(self, **values):
+                pass
+
+        plan = {'core': {key: [] for key in HISTORY_CORE_FIELDS}}
+        plan['core']['conversations'] = [{'conversation_id': 'conversation'}]
+        plan['core']['interactions'] = [{'interaction_id': 'interaction', 'conversation_id': 'conversation'}]
+        directory = self.root / 'failed-core-stage'
+        directory.mkdir()
+        runtime = Runtime()
+        with patch('loop_upgrade.time.sleep') as sleep:
+            with self.assertRaisesRegex(RuntimeError, 'native_validator_command_failed'):
+                _stage_core_batches(runtime, plan, directory, Progress())
+        self.assertEqual(runtime.calls, 3)
+        self.assertEqual(sleep.call_args_list, [call(3), call(3)])
+        self.assertEqual(list((directory / 'core').glob('*.json')), [])
+
+    def test_validator_command_retry_can_recover_without_skipping(self):
+        from loop_upgrade import _native_preflight
+
+        class CommandFailure(ValueError):
+            returncode, stdout, stderr = 1, b'', b'pod starting'
+
+        class Runtime:
+            def __init__(self):
+                self.calls = 0
+
+            def _native(self, flags, data):
+                self.calls += 1
+                if self.calls < 3:
+                    raise CommandFailure('deployment_command_failed')
+                return b'{"verified":true}'
+
+        runtime = Runtime()
+        with patch('loop_upgrade.time.sleep') as sleep:
+            passed, detail = _native_preflight(runtime, '--validate-ledger-records', b'{}')
+        self.assertTrue(passed)
+        self.assertEqual(detail, {'verified': True})
+        self.assertEqual(runtime.calls, 3)
+        self.assertEqual(sleep.call_args_list, [call(3), call(3)])
 
     def test_loop_imports_only_current_batch_and_rerun_is_idempotent(self):
         runtime = LoopRuntime()

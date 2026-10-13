@@ -380,6 +380,7 @@ def _report(directory, result, reasons):
              "- Historical message rounds deliberately skipped (source retained): %d" % result.get("skipped_count", 0),
              "- Historical Core Interaction groups deliberately skipped (source retained): %d" % result.get("core_skipped_count", 0),
              "- Historical Ledger events deliberately skipped (source retained): %d" % result.get("ledger_skipped_count", 0),
+             "- Historical message Ledger events deliberately skipped (source retained): %d" % result.get("message_ledger_skipped_count", 0),
              "- Core projection verified: " + str(result.get("core_projection", {}).get("verified", False)),
              "- Core projection documents verified: %d" % result.get("core_projection", {}).get("projected_count", 0),
              "- Core projection index: " + str(result.get("core_projection", {}).get("index_version", "not checked")),

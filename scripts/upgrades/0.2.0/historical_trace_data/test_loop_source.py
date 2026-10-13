@@ -93,12 +93,33 @@ class LoopSourceTests(unittest.TestCase):
                 actual = plan_agent_thread_history(next(source.batches()), '2026-10-01T00:00:00Z')
         self.assertEqual(actual, expected)
 
-    def test_oversized_dependency_is_explicit_and_not_split(self):
-        records = [record('e' + str(n)) for n in range(3)]
-        with tempfile.TemporaryDirectory() as tmp, patch.dict('os.environ', {'BKN_HISTORY_BATCH_RECORDS': '2'}):
-            with self.source(Path(tmp), records) as source:
-                with self.assertRaisesRegex(ValueError, 'dependency_group_exceeds'):
-                    list(source.batches())
+    def test_oversized_dependency_uses_the_documented_hard_limit(self):
+        class Done:
+            def seek(self, offset):
+                pass
+
+            def read(self, size):
+                return b'0'
+
+            def write(self, value):
+                pass
+
+        source = object.__new__(LoopSource)
+        source.count, source.count_limit, source.byte_limit = 1, 2, 32 << 20
+        source.done = Done()
+        source.record = lambda ordinal: ({'kind': 'audit', 'source_id': 'vega', 'row': {}}, 1)
+        calls = []
+
+        def grouped(seeds):
+            calls.append((source.count_limit, source.byte_limit, len(seeds)))
+            if source.count_limit == 2:
+                raise ValueError('dependency_group_exceeds_batch_limit')
+            return {seeds[0]: source.record(seeds[0])[0]}, 1
+
+        source.group = grouped
+        batch = next(source.batches())
+        self.assertEqual(batch, [{'kind': 'audit', 'source_id': 'vega', 'row': {}}])
+        self.assertIn((10000, 100 << 20, 1), calls)
 
     def test_invalid_limits_fail(self):
         for count in ('0', '10001'):

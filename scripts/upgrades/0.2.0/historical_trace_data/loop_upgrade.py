@@ -22,6 +22,14 @@ from snapshot import canonical, digest, private_write, read_snapshot, save_snaps
 from loop_source import LoopSource, limits
 
 
+# A native validation command can fail transiently while Kubernetes is replacing
+# a Pod or its API connection.  This is deliberately separate from a validator
+# response of {"verified": false}: the latter is a deterministic verdict on
+# historical data and must be handled by the per-record skip path instead.
+NATIVE_PREFLIGHT_ATTEMPTS = 3
+NATIVE_PREFLIGHT_RETRY_SECONDS = 3
+
+
 def atomic_json(path, value):
     temporary = path.with_suffix('.tmp')
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -160,26 +168,48 @@ def freeze(runtime, state_root, deployment, before, progress):
 
 def _native_preflight(runtime, flag, data):
     """Return a safe, private diagnostic for one native validation request."""
-    try:
-        raw = runtime._native([flag], data)
-    except ValueError as error:
-        # run_upgrade.py can be loaded both as __main__ and as a module.  Do
-        # not rely on exception-class identity across those two module objects.
-        if not all(hasattr(error, field) for field in ('returncode', 'stdout', 'stderr')):
-            raise
-        return False, {
-            'reason': 'native_validator_command_failed',
-            'native_exit_code': error.returncode,
-            'native_stdout': error.stdout.decode(errors='replace'),
-            'native_stderr': error.stderr.decode(errors='replace'),
-        }
+    for attempt in range(1, NATIVE_PREFLIGHT_ATTEMPTS + 1):
+        try:
+            raw = runtime._native([flag], data)
+            break
+        except (OSError, ValueError) as error:
+            # run_upgrade.py can be loaded both as __main__ and as a module.
+            # Do not rely on exception-class identity across those two module
+            # objects; command failures carry subprocess result attributes.
+            command_error = (isinstance(error, OSError) or
+                             all(hasattr(error, field) for field in ('returncode', 'stdout', 'stderr')))
+            if not command_error:
+                raise
+            if attempt < NATIVE_PREFLIGHT_ATTEMPTS:
+                time.sleep(NATIVE_PREFLIGHT_RETRY_SECONDS)
+                continue
+            detail = {
+                'reason': 'native_validator_command_failed',
+                'native_attempts': attempt,
+                'native_error_class': type(error).__name__,
+            }
+            if isinstance(error, OSError):
+                detail['native_os_error_errno'] = error.errno
+            else:
+                detail.update({
+                    'native_exit_code': error.returncode,
+                    'native_stdout': error.stdout.decode(errors='replace'),
+                    'native_stderr': error.stderr.decode(errors='replace'),
+                })
+            raise RuntimeError('native_validator_command_failed:' + canonical(detail)) from error
     try:
         answer = strict_loads(raw)
     except (TypeError, ValueError):
-        return False, {
+        raise RuntimeError('native_validator_invalid_response:' + canonical({
             'reason': 'native_validator_invalid_response',
             'native_stdout': raw[-16384:].decode(errors='replace'),
-        }
+        }))
+    if (not isinstance(answer, dict)
+            or (answer.get('verified') is not True and answer.get('verified') is not False)):
+        raise RuntimeError('native_validator_invalid_response:' + canonical({
+            'reason': 'native_validator_invalid_response',
+            'native_response': answer,
+        }))
     if answer.get('verified') is True:
         return True, {'verified': True}
     return False, {
@@ -607,7 +637,8 @@ def run_loop(runtime, state_root):
     directory.mkdir(mode=0o700)
     result = {'complete': False, 'state': 'precheck_failed', 'source_count': 0, 'target_verified_count': 0,
               'already_verified_count': 0, 'retained_count': 0, 'skipped_count': 0,
-              'core_skipped_count': 0, 'ledger_skipped_count': 0, 'run_directory': str(directory)}
+              'core_skipped_count': 0, 'ledger_skipped_count': 0,
+              'message_ledger_skipped_count': 0, 'run_directory': str(directory)}
     reasons = Counter()
     # Temporary files can contain business content, even though logs cannot.
     os.chmod(directory, 0o700)
@@ -646,9 +677,11 @@ def run_loop(runtime, state_root):
                     result['skipped_count'] += summary.get('skipped_count', 0)
                     result['core_skipped_count'] += summary.get('core_skipped_count', 0)
                     result['ledger_skipped_count'] += summary.get('ledger_skipped_count', 0)
+                    result['message_ledger_skipped_count'] += summary.get('message_ledger_skipped_count', 0)
                     reasons.update(summary.get('skipped_reasons', {}))
                     reasons.update(summary.get('core_skipped_reasons', {}))
                     reasons.update(summary.get('ledger_skipped_reasons', {}))
+                    reasons.update(summary.get('message_ledger_skipped_reasons', {}))
                     total = number + 1
                     progress.update(prepared_batches=total, prepared_records=result['source_count'])
                     records = None
@@ -665,7 +698,7 @@ def run_loop(runtime, state_root):
             progress.update(phase='rebuild_core_projection')
             result['core_projection'] = runtime.rebuild_core_projection()
             result['complete'] = result['target_verified_count'] == result['source_count'] and result['retained_count'] == 0
-            result['state'] = ('completed_with_skipped_history' if result['complete'] and (result['skipped_count'] or result['core_skipped_count'] or result['ledger_skipped_count'])
+            result['state'] = ('completed_with_skipped_history' if result['complete'] and (result['skipped_count'] or result['core_skipped_count'] or result['ledger_skipped_count'] or result['message_ledger_skipped_count'])
                                else 'completed' if result['complete'] else 'partial_requires_reconciliation')
         except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
             progress.error(error)

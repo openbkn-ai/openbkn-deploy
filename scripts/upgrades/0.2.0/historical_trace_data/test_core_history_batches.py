@@ -91,6 +91,30 @@ class HistoricalCoreBatchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             list(core_history_import_batches(plan, max_bytes=100))
 
+    def test_oversized_interaction_splits_only_on_operation_boundaries(self):
+        plan = plan_core_history(fixture())["core"]
+        parent_receipt = dict(plan["receipts"][0], receipt_id="parent-receipt",
+                              operation_id="parent", attempt=1, request_id="parent-request")
+        parent_fact = dict(plan["call_facts"][0], operation_id="parent", receipt_id="parent-receipt",
+                           attempt=1, request_id="parent-request")
+        plan["receipts"].append(parent_receipt)
+        plan["call_facts"].append(parent_fact)
+        for fact in plan["call_facts"]:
+            fact["input"] = {"mode": "inline", "inline": {"payload": "x" * 2200}}
+            fact["output"] = {"mode": "inline", "inline": {"payload": "y" * 2200}}
+        batches = [strict_loads(batch) for batch in core_history_import_batches(plan, max_bytes=8000)]
+        self.assertEqual(len(batches), 2)
+        self.assertEqual({row["operation_id"] for batch in batches for row in batch["operations"]},
+                         {"parent", "op"})
+        for batch in batches:
+            self.assertEqual(len(batch["interactions"]), 1)
+            self.assertEqual(batch["interactions"][0]["interaction_id"], "round")
+            operation_ids = {row["operation_id"] for row in batch["operations"]}
+            receipt_ids = {row["receipt_id"] for row in batch["receipts"]}
+            self.assertTrue(all(row["operation_id"] in operation_ids for row in batch["receipts"]))
+            self.assertTrue(all(row["operation_id"] in operation_ids and row["receipt_id"] in receipt_ids
+                                for row in batch["call_facts"]))
+
     def test_orphans_and_duplicate_source_identity_fail_before_yield(self):
         for field, change in [
             ("operations", {"interaction_id": "missing"}),

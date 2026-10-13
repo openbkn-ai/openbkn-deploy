@@ -6,6 +6,22 @@ from test_core_history import fixture
 
 
 class RetainedRuntimeTests(unittest.TestCase):
+    def test_message_ledger_failure_stops_without_bisecting_or_skipping(self):
+        from retained_runtime import _prepare_message_ledger
+
+        class Runtime:
+            def __init__(self):
+                self.calls = 0
+
+            def _native(self, flags, data):
+                self.calls += 1
+                raise ValueError('kubectl_exec_failed')
+
+        runtime = Runtime()
+        with self.assertRaisesRegex(RuntimeError, 'thread_message_ledger_native_failure'):
+            _prepare_message_ledger(runtime, [{'event_id': 'first'}, {'event_id': 'second'}])
+        self.assertEqual(runtime.calls, 1)
+
     def test_thread_target_derivations_do_not_inflate_source_count(self):
         from retained_runtime import merge_thread_history
         from core_history_batches import HISTORY_CORE_FIELDS

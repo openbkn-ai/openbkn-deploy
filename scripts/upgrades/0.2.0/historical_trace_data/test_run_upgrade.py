@@ -6,7 +6,7 @@ from types import ModuleType
 import unittest
 from unittest.mock import patch
 
-from run_upgrade import run, DeploymentRuntime
+from run_upgrade import run, DeploymentRuntime, _report
 from snapshot import canonical, digest, strict_loads
 from test_logs import row
 
@@ -96,6 +96,18 @@ class UpgradeRunnerTests(unittest.TestCase):
         runtime.opensearch_endpoint = "https://customer.example/opensearch"
         with patch.dict("os.environ", {}, clear=True):
             self.assertTrue(runtime._tls_options(False)["verify_tls"])
+
+    def test_report_includes_message_ledger_skip_count(self):
+        result = {
+            "state": "completed_with_skipped_history", "source_count": 1,
+            "target_verified_count": 1, "already_verified_count": 0, "retained_count": 0,
+            "message_ledger_skipped_count": 2,
+        }
+        captured = {}
+        with patch("run_upgrade.private_write", side_effect=lambda path, data: captured.setdefault(path.name, data)):
+            _report(self.root, result, Counter())
+        self.assertIn("Historical message Ledger events deliberately skipped (source retained): 2",
+                      captured["report.md"].decode())
 
     def test_unconverted_record_cannot_report_completion(self):
         runtime = FakeRuntime()
