@@ -127,7 +127,14 @@ def plan_core_history(source):
         rename={'attempt_no': 'attempt', 'required_receipt': 'required'},
         json_fields=('causation_event_ids', 'observed_evidence_refs', 'business_refs', 'artifact_refs', 'partial_reasons'),
         time_fields=('issued_at', 'terminal_at'), bool_fields=('required_receipt',))
-    for value, row in zip(core['receipts'], rows['receipts']): value['owner'] = _owner(row)
+    for value, row in zip(core['receipts'], rows['receipts']):
+        value['owner'] = _owner(row)
+        # 020 BusinessRef removed this 015 field; keep all other fields for native validation.
+        refs = value.get('business_refs')
+        if isinstance(refs, list):
+            for ref in refs:
+                if isinstance(ref, dict):
+                    ref.pop('business_domain_id', None)
     core['call_facts'] = _convert(rows['call_facts'], (
         'operation_id', 'attempt_no', 'conversation_id', 'interaction_id', 'receipt_id',
         'tool_name', 'protocol', 'source_module', 'parent_operation_id', 'capability_profile',

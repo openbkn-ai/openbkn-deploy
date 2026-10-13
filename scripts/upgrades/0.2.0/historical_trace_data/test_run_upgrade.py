@@ -11,6 +11,36 @@ from snapshot import canonical, digest, strict_loads
 from test_logs import row
 
 
+class NativeCommandVerdictTest(unittest.TestCase):
+    def runtime(self):
+        runtime = DeploymentRuntime()
+        runtime.context, runtime.pod, runtime.container = 'test', 'trace', 'trace'
+        return runtime
+
+    def test_nonzero_preflight_data_rejection_is_returned_without_retry(self):
+        from subprocess import CompletedProcess
+        verdict = b'{"verified":false,"reason":"native_core_import_failed_input"}'
+        for flag in ('--validate-core-records', '--validate-ledger-records', '--validate-provenance-records'):
+            with self.subTest(flag=flag), patch('run_upgrade.subprocess.run',
+                    return_value=CompletedProcess([], 1, verdict, b'rejected')) as runner:
+                self.assertEqual(self.runtime()._native([flag], b'{}'), verdict)
+                self.assertEqual(runner.call_count, 1)
+
+    def test_other_nonzero_commands_and_invalid_verdicts_remain_failures(self):
+        from subprocess import CompletedProcess
+        for flag, stdout in (
+                ('--import-core-records', b'{"verified":false}'),
+                ('--validate-core-records', b''),
+                ('--validate-core-records', b'not JSON'),
+                ('--validate-core-records', b'{"verified":0}'),
+                ('--validate-core-records', b'{"verified":true}'),
+                ('--validate-core-records', b'{"verified":false,"verified":true}')):
+            with self.subTest(flag=flag, stdout=stdout), patch('run_upgrade.subprocess.run',
+                    return_value=CompletedProcess([], 1, stdout, b'failed')):
+                with self.assertRaisesRegex(ValueError, 'deployment_command_failed'):
+                    self.runtime()._native([flag], b'{}')
+
+
 class FakeRuntime:
     def __init__(self):
         self.sent = []
