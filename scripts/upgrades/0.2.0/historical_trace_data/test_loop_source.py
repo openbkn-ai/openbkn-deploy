@@ -100,6 +100,15 @@ class LoopSourceTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'dependency_group_exceeds'):
                     list(source.batches())
 
+    def test_10000_record_override_preserves_every_record(self):
+        records = [{'kind': 'audit', 'source_id': 'vega', 'row': row(event_id=str(n))} for n in range(10003)]
+        with tempfile.TemporaryDirectory() as tmp, patch.dict('os.environ', {
+                'BKN_HISTORY_BATCH_RECORDS': '10000', 'BKN_HISTORY_BATCH_BYTES': str(32 << 20)}):
+            with self.source(Path(tmp), records) as source:
+                batches = list(source.batches())
+            self.assertEqual([len(batch) for batch in batches], [10000, 3])
+            self.assertEqual([item for batch in batches for item in batch], records)
+
     def test_invalid_limits_fail(self):
         for count in ('0', '10001'):
             with patch.dict('os.environ', {'BKN_HISTORY_BATCH_RECORDS': count}):
