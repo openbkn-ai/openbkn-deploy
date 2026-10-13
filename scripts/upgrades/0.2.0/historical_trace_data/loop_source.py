@@ -1,8 +1,9 @@
 """Bounded loop batches over frozen JSONL; no database or resumable scheduler.
 
 Small reference/offset files retain complete candidates without retaining source
-bodies. The files are disposable and rebuilt for each run. Each dependency group
-is indivisible; independent groups are packed to the configured count/byte caps.
+bodies. The files are disposable and rebuilt for each run. Conversation rows are
+shared parent context, rather than edges that merge every Interaction in a long
+conversation into one unbounded dependency group.
 """
 import hashlib
 import os
@@ -32,7 +33,11 @@ def references(record, deployment):
     if kind == 'agent_definition':
         return set()
     keys = set()
-    fields = {'conversation_id': 'conv', 'interaction_id': 'int', 'operation_id': 'op',
+    # conversation_id is deliberately not a graph edge. It is injected as a
+    # small shared parent record by LoopSource.group after the Interaction / Operation
+    # closure is complete. Treating it as an edge joins an entire long-running
+    # conversation, including every Call Fact, into one source batch.
+    fields = {'interaction_id': 'int', 'operation_id': 'op',
               'parent_operation_id': 'op', 'receipt_id': 'receipt', 'trace_id': 'trace',
               'request_id': 'request', 'bkn.request.id': 'request', 'event_id': 'event',
               'thread_id': 'thread', 'f_thread_id': 'thread', 'f_parent_thread_id': 'thread',
@@ -68,9 +73,12 @@ def references(record, deployment):
         keys.add('idempotency:' + canonical([row.get('scope'),
             [row.get(k) or '' for k in ('application_principal_id', 'effective_subject_type', 'effective_subject_id', 'delegation_id')],
             row.get('external_conversation_key'), row.get('idempotency_key')]))
-    if row.get('resource_type') in ('conversation', 'interaction') and row.get('resource_id'):
-        keys.add(('conv:' if row['resource_type'] == 'conversation' else 'int:') + row['resource_id'])
-    if row.get('external_conversation_key'):
+    if row.get('resource_type') == 'interaction' and row.get('resource_id'):
+        keys.add('int:' + row['resource_id'])
+    # Agent-thread linkage is intentionally retained. Core trace rows do not use
+    # an external conversation key as a graph edge, because it is another spelling
+    # of the same broad Conversation relation.
+    if kind.startswith('agent_') and row.get('external_conversation_key'):
         keys.add('external:' + row['external_conversation_key'])
     if kind == 'agent_thread':
         tid = row['f_thread_id']
@@ -104,6 +112,8 @@ class LoopSource:
             self.files.extend(buckets)
             definitions = (self.root / 'definitions.jsonl').open('wb')
             self.files.append(definitions)
+            conversations = (self.root / 'conversations.jsonl').open('wb')
+            self.files.append(conversations)
             actors = (self.root / 'actors.jsonl').open('wb')
             self.files.append(actors)
             for slot, snapshot in enumerate(self.snapshots):
@@ -120,6 +130,10 @@ class LoopSource:
                         self.count += 1
                         if record['kind'] == 'agent_definition':
                             definitions.write((canonical([record['row']['f_agent_id'], ordinal]) + '\n').encode())
+                        if record.get('locator', '').endswith('bkn_trace_conversations'):
+                            conversation_id = record['row'].get('conversation_id')
+                            if conversation_id:
+                                conversations.write((canonical([conversation_id, ordinal]) + '\n').encode())
                         if record['kind'] == 'audit':
                             row = record['row']
                             actor = row.get('actor_id') or row.get('user_id') or row.get('operator_id')
@@ -132,7 +146,7 @@ class LoopSource:
                         observer = getattr(self, 'observer', None)
                         if observer and self.count % 1000 == 0:
                             observer.update(indexed=self.count)
-            for stream in buckets + [definitions, actors]:
+            for stream in buckets + [definitions, conversations, actors]:
                 stream.close()
                 self.files.remove(stream)
             self.catalog.flush()
@@ -170,6 +184,17 @@ class LoopSource:
                     if key in wanted:
                         yield ordinal
 
+    def conversation_records(self, conversation_ids):
+        """Yield only parent conversation rows, never all rows sharing their ID."""
+        wanted = set(conversation_ids)
+        if not wanted:
+            return
+        with (self.root / 'conversations.jsonl').open('rb') as stream:
+            for line in bounded_lines(stream):
+                conversation_id, ordinal = strict_loads(line)
+                if conversation_id in wanted:
+                    yield ordinal
+
     def group(self, seeds):
         records, pending, searched, size = {}, set(seeds), set(), 0
         while pending:
@@ -193,6 +218,18 @@ class LoopSource:
                     pending.add(ordinal)
                     if len(records) + len(pending) > self.count_limit:
                         raise ValueError('dependency_group_exceeds_batch_limit')
+        # Conversation is parent context, not a transitive source-graph edge. Add
+        # its row without following its references, so each Interaction closure can
+        # be converted independently while Core still receives its parent.
+        conversation_ids = {record['row'].get('conversation_id') for record in records.values()
+                            if record['row'].get('conversation_id')}
+        for ordinal in self.conversation_records(conversation_ids):
+            if ordinal not in records:
+                record, length = self.record(ordinal)
+                records[ordinal] = record
+                size += length
+                if len(records) > self.count_limit or size > self.byte_limit:
+                    raise ValueError('dependency_group_exceeds_batch_limit')
         # Definitions are lookup-only: a shared Agent must not merge all threads.
         agents = {r['row'].get('f_agent_id') for r in records.values() if r['kind'].startswith('agent_')}
         with (self.root / 'definitions.jsonl').open('rb') as stream:
@@ -240,8 +277,23 @@ class LoopSource:
                     group, _ = self.group(seeds)
                     break
                 except ValueError as error:
-                    if str(error) != 'dependency_group_exceeds_batch_limit' or len(seeds) == 1:
+                    if str(error) != 'dependency_group_exceeds_batch_limit':
                         raise
+                    if len(seeds) == 1:
+                        # A single connected historical graph must remain whole.
+                        # Permit it only up to the documented absolute limits;
+                        # downstream Core/Artifact/Ledger transports still split
+                        # independently at their configured byte limits.
+                        count_limit, byte_limit = self.count_limit, self.byte_limit
+                        # 100 MiB bounds a large indivisible source graph;
+                        # every downstream native transport remains capped by
+                        # BKN_HISTORY_BATCH_BYTES (32 MiB by default).
+                        self.count_limit, self.byte_limit = 10000, 100 << 20
+                        try:
+                            group, _ = self.group(seeds)
+                        finally:
+                            self.count_limit, self.byte_limit = count_limit, byte_limit
+                        break
                     seeds = seeds[:max(1, len(seeds) // 2)]
             for ordinal, record in group.items():
                 if record['kind'] != 'agent_definition':

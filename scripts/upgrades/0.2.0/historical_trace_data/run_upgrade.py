@@ -23,10 +23,21 @@ from native_core import plan_core, core_import_batches, CORE_FIELDS
 from opensearch_history import OpenSearchHistoryWriter
 
 
+class DeploymentCommandError(ValueError):
+    """Private native-command failure details for migration diagnostics only."""
+
+    def __init__(self, returncode, stdout, stderr):
+        super().__init__("deployment_command_failed")
+        self.returncode = returncode
+        # Keep diagnostics bounded. These values are written only into a 0700 run directory.
+        self.stdout = stdout[-16384:]
+        self.stderr = stderr[-16384:]
+
+
 def _command(arguments, data=None):
     process = subprocess.run(arguments, input=data, capture_output=True)
     if process.returncode:
-        raise ValueError("deployment_command_failed")
+        raise DeploymentCommandError(process.returncode, process.stdout, process.stderr)
     return process.stdout
 
 
@@ -366,6 +377,9 @@ def _report(directory, result, reasons):
              "- Source records converted and native target verified: %d" % result["target_verified_count"],
              "- Already verified Audit records before publication: %d" % result["already_verified_count"],
              "- Source records not converted (originals retained): %d" % result["retained_count"],
+             "- Historical message rounds deliberately skipped (source retained): %d" % result.get("skipped_count", 0),
+             "- Historical Core Interaction groups deliberately skipped (source retained): %d" % result.get("core_skipped_count", 0),
+             "- Historical Ledger events deliberately skipped (source retained): %d" % result.get("ledger_skipped_count", 0),
              "- Core projection verified: " + str(result.get("core_projection", {}).get("verified", False)),
              "- Core projection documents verified: %d" % result.get("core_projection", {}).get("projected_count", 0),
              "- Core projection index: " + str(result.get("core_projection", {}).get("index_version", "not checked")),

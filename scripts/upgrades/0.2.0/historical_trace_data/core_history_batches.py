@@ -118,50 +118,96 @@ def core_history_import_batches(plan, max_bytes=64 << 20, max_interactions=100):
                 unit = {key: [] for key in HISTORY_CORE_FIELDS}
                 unit.update(conversations=[conv], idempotency_records=conv_idempotency[cid])
                 yield unit
+    def encoded_size(unit):
+        return len(canonical({key: unit[key] for key in HISTORY_CORE_FIELDS}).encode())
+
+    def split_oversized_interaction(unit):
+        """Split one large Interaction on Operation boundaries only.
+
+        Conversation/Interaction identity and their idempotency/revision context
+        repeat in every fragment.  An Operation, its Receipt(s), and Call Fact(s)
+        stay together, so a native Core request never observes a partial call.
+        """
+        if encoded_size(unit) <= max_bytes or not unit['interactions']:
+            yield unit
+            return
+        if len(unit['interactions']) != 1:
+            raise ValueError('historical oversized core interaction grouping invalid')
+        by_operation = defaultdict(lambda: {key: [] for key in HISTORY_CORE_FIELDS})
+        for row in unit['operations']:
+            by_operation[row['operation_id']]['operations'].append(row)
+        for key in ('receipts', 'call_facts'):
+            for row in unit[key]:
+                by_operation[row['operation_id']][key].append(row)
+        if not by_operation:
+            raise ValueError('historical core interaction exceeds batch limit')
+        shared = {key: list(unit[key]) for key in HISTORY_CORE_FIELDS}
+        shared['operations'], shared['receipts'], shared['call_facts'] = [], [], []
+        fragment = {key: list(shared[key]) for key in HISTORY_CORE_FIELDS}
+        for operation_id in sorted(by_operation):
+            candidate = {key: list(fragment[key]) for key in HISTORY_CORE_FIELDS}
+            for key in ('operations', 'receipts', 'call_facts'):
+                candidate[key].extend(by_operation[operation_id][key])
+            if encoded_size(candidate) > max_bytes:
+                if fragment['operations']:
+                    yield fragment
+                    fragment = {key: list(shared[key]) for key in HISTORY_CORE_FIELDS}
+                    for key in ('operations', 'receipts', 'call_facts'):
+                        fragment[key].extend(by_operation[operation_id][key])
+                    if encoded_size(fragment) > max_bytes:
+                        raise ValueError('historical core operation exceeds batch limit')
+                else:
+                    raise ValueError('historical core operation exceeds batch limit')
+            else:
+                fragment = candidate
+        if fragment['operations']:
+            yield fragment
+
     # The caller stages and validates every batch on disk before importing.
     batch = {key: {} for key in HISTORY_CORE_FIELDS}
     overhead = len(canonical({key: [] for key in HISTORY_CORE_FIELDS}).encode())
     size = overhead
-    for unit in units():
-        additions = {
-            key: {
-                _identity(key, row): row
-                for row in unit[key]
-                if _identity(key, row) not in batch[key]
-            }
-            for key in HISTORY_CORE_FIELDS
-        }
-        added_size = sum(
-            len(canonical(row).encode()) + (bool(batch[key]) or position > 0)
-            for key in HISTORY_CORE_FIELDS
-            for position, row in enumerate(additions[key].values())
-        )
-        if any(batch.values()) and (
-            size + added_size > max_bytes
-            or len(batch["interactions"]) + len(additions["interactions"])
-            > max_interactions
-        ):
-            yield (
-                canonical(
-                    {key: list(batch[key].values()) for key in HISTORY_CORE_FIELDS}
-                ).encode()
-            )
-            batch = {key: {} for key in HISTORY_CORE_FIELDS}
-            size = overhead
+    for raw_unit in units():
+        for unit in split_oversized_interaction(raw_unit):
             additions = {
-                key: {_identity(key, row): row for row in unit[key]}
+                key: {
+                    _identity(key, row): row
+                    for row in unit[key]
+                    if _identity(key, row) not in batch[key]
+                }
                 for key in HISTORY_CORE_FIELDS
             }
             added_size = sum(
-                len(canonical(row).encode()) + (position > 0)
+                len(canonical(row).encode()) + (bool(batch[key]) or position > 0)
                 for key in HISTORY_CORE_FIELDS
                 for position, row in enumerate(additions[key].values())
             )
-        if size + added_size > max_bytes:
-            raise ValueError("historical core interaction exceeds batch limit")
-        for key in HISTORY_CORE_FIELDS:
-            batch[key].update(additions[key])
-        size += added_size
+            if any(batch.values()) and (
+                size + added_size > max_bytes
+                or len(batch["interactions"]) + len(additions["interactions"])
+                > max_interactions
+            ):
+                yield (
+                    canonical(
+                        {key: list(batch[key].values()) for key in HISTORY_CORE_FIELDS}
+                    ).encode()
+                )
+                batch = {key: {} for key in HISTORY_CORE_FIELDS}
+                size = overhead
+                additions = {
+                    key: {_identity(key, row): row for row in unit[key]}
+                    for key in HISTORY_CORE_FIELDS
+                }
+                added_size = sum(
+                    len(canonical(row).encode()) + (position > 0)
+                    for key in HISTORY_CORE_FIELDS
+                    for position, row in enumerate(additions[key].values())
+                )
+            if size + added_size > max_bytes:
+                raise ValueError("historical core interaction exceeds batch limit")
+            for key in HISTORY_CORE_FIELDS:
+                batch[key].update(additions[key])
+            size += added_size
     if any(batch.values()):
         yield (
             canonical(

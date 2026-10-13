@@ -182,10 +182,84 @@ def prepare_retained_history(runtime, state_root, deployment, evidence_records, 
             'source_manifest': manifest}
 
 
+_MESSAGE_LEDGER_MAX_BYTES = 1024 * 1024
+_MESSAGE_LEDGER_MAX_RECORDS = 100
+
+
+def _message_event_batches(events):
+    """Yield small, deterministic native-preflight inputs.
+
+    The byte limit is deliberately much lower than the normal 32 MiB transport
+    batch: message-event payloads can contain large historical references and
+    run through kubectl exec before reaching the validator.
+    """
+    envelope = len(canonical({'message_events': []}).encode())
+    current, used = [], envelope
+    for event in events:
+        event_bytes = len(canonical(event).encode()) + 1
+        if current and (len(current) >= _MESSAGE_LEDGER_MAX_RECORDS or
+                        used + event_bytes > _MESSAGE_LEDGER_MAX_BYTES):
+            yield current
+            current, used = [], envelope
+        current.append(event)
+        used += event_bytes
+    if current:
+        yield current
+
+
+def _message_event_identity(event):
+    """Keep only linkage metadata; never copy message payload/content here."""
+    keys = ('event_id', 'conversation_id', 'interaction_id', 'owner',
+            'producer_id', 'producer_stream_id', 'producer_epoch',
+            'producer_sequence', 'started_at', 'observed_at', 'emitted_at',
+            'ingested_at', 'event_type')
+    return {key: event[key] for key in keys if event.get(key) not in (None, '')}
+
+
+def _native_failure_summary(error):
+    """Persist useful operational facts without persisting native response text."""
+    result = {'error_class': type(error).__name__,
+              'native_response_redacted': True}
+    for name in ('returncode',):
+        value = getattr(error, name, None)
+        if value is not None:
+            result[name] = value
+    for name in ('stdout', 'stderr'):
+        value = getattr(error, name, None)
+        if isinstance(value, (bytes, bytearray, str)):
+            result[name + '_bytes'] = len(value)
+    return result
+
+
+def _prepare_message_ledger(runtime, events, skipped):
+    """Prepare ledger rows, bisecting failed native requests down to one event."""
+    if not events:
+        return []
+    try:
+        derived = strict_loads(runtime._native(['--prepare-message-ledger'],
+                              canonical({'message_events': events}).encode()))
+        ledger = derived.get('ledger')
+        if not isinstance(ledger, list) or len(ledger) != len(events):
+            raise ValueError('thread_message_ledger_count_mismatch')
+        return ledger
+    except (KeyError, TypeError, ValueError) as error:
+        if len(events) > 1:
+            midpoint = len(events) // 2
+            return (_prepare_message_ledger(runtime, events[:midpoint], skipped) +
+                    _prepare_message_ledger(runtime, events[midpoint:], skipped))
+        skipped.append({
+            'reason': 'native_message_ledger_preflight_rejected',
+            'message_event': _message_event_identity(events[0]),
+            'native_failure': _native_failure_summary(error),
+        })
+        return []
+
+
 def merge_thread_history(plan, threads, runtime):
     """Add actual stored message rounds without replacing original Core facts."""
-    if threads['issues']:
-        raise ValueError('thread_source_conversion_issues')
+    # A message without an evidenced Interaction is deliberately omitted, not guessed.
+    # Keep its source identifiers in the private staged batch for reconciliation.
+    plan['thread_skipped_items'] = list(threads['issues'])
     from thread_content_recovery import plan_thread_content_recovery
     recovery = plan_thread_content_recovery(plan, threads['message_content_recovery'])
     if recovery['issues']:
@@ -196,12 +270,15 @@ def merge_thread_history(plan, threads, runtime):
     for key in HISTORY_CORE_FIELDS:
         plan['core'][key].extend(threads['core'][key])
     plan['artifacts'].extend(threads['artifacts'])
-    if threads['message_events']:
-        derived = strict_loads(runtime._native(['--prepare-message-ledger'],
-                              canonical({'message_events': threads['message_events']}).encode()))
-        if len(derived['ledger']) != len(threads['message_events']):
-            raise ValueError('thread_message_ledger_count_mismatch')
-        plan['ledger'].extend(derived['ledger'])
+    # Do not send a whole source batch through one kubectl-exec/native command.
+    # A single large event or a transient native-command failure must not discard
+    # every other agent message in the batch. The recursive split retains all
+    # independently valid events and leaves an identifier-only reconciliation
+    # record for an event that still cannot be prepared by itself.
+    plan['thread_message_ledger_skipped'] = []
+    for events in _message_event_batches(threads['message_events']):
+        plan['ledger'].extend(_prepare_message_ledger(runtime, events,
+                                                       plan['thread_message_ledger_skipped']))
     plan['thread_mappings'] = threads['source_map']
     plan['thread_defaults'] = threads['defaults']
     if threads['core']['interactions']:

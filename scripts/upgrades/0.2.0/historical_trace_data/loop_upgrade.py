@@ -73,9 +73,23 @@ class Progress:
             safe = 'private_detail_redacted'
         frames = [{'file': Path(frame.filename).name, 'function': frame.name, 'line': frame.lineno}
                   for frame in traceback.extract_tb(error.__traceback__)]
-        atomic_json(self.directory / 'error.json', {'phase': self.values['phase'],
-                    'exception_class': type(error).__name__, 'message': safe, 'stack': frames,
-                    'batch': self.values.get('batch'), 'source_snapshots': 'reuse frozen snapshots on rerun'})
+        detail = {'phase': self.values['phase'],
+                  'exception_class': type(error).__name__, 'message': safe, 'stack': frames,
+                  'batch': self.values.get('batch'), 'source_snapshots': 'reuse frozen snapshots on rerun'}
+        # Persist identifiers only; never expose message bodies, checkpoints or blobs.
+        fields = ('reason', 'source_kind', 'source_id', 'source_message_id',
+                  'thread_id', 'task_id', 'conversation_id', 'interaction_id')
+        issues = []
+        for issue in getattr(error, 'thread_issues', ()):
+            if isinstance(issue, dict):
+                safe_issue = {key: issue[key] for key in fields
+                              if key in issue and isinstance(issue[key], (str, int, float, bool, type(None)))}
+                if safe_issue:
+                    issues.append(safe_issue)
+        if issues:
+            detail['thread_issue_count'] = len(issues)
+            detail['thread_issues'] = issues
+        atomic_json(self.directory / 'error.json', detail)
         self.update(error_file=str(self.directory / 'error.json'))
 
 
@@ -144,6 +158,213 @@ def freeze(runtime, state_root, deployment, before, progress):
     return [source, core, agent], before
 
 
+def _native_preflight(runtime, flag, data):
+    """Return a safe, private diagnostic for one native validation request."""
+    try:
+        raw = runtime._native([flag], data)
+    except ValueError as error:
+        # run_upgrade.py can be loaded both as __main__ and as a module.  Do
+        # not rely on exception-class identity across those two module objects.
+        if not all(hasattr(error, field) for field in ('returncode', 'stdout', 'stderr')):
+            raise
+        return False, {
+            'reason': 'native_validator_command_failed',
+            'native_exit_code': error.returncode,
+            'native_stdout': error.stdout.decode(errors='replace'),
+            'native_stderr': error.stderr.decode(errors='replace'),
+        }
+    try:
+        answer = strict_loads(raw)
+    except (TypeError, ValueError):
+        return False, {
+            'reason': 'native_validator_invalid_response',
+            'native_stdout': raw[-16384:].decode(errors='replace'),
+        }
+    if answer.get('verified') is True:
+        return True, {'verified': True}
+    return False, {
+        'reason': answer.get('reason', 'native_core_preflight_rejected'),
+        'native_response': answer,
+    }
+
+
+def _core_failure_stage(runtime, unit):
+    """Locate the first rejected Core category without writing target data."""
+    from core_history_batches import HISTORY_CORE_FIELDS
+    original = strict_loads(unit)
+    probe = {key: [] for key in HISTORY_CORE_FIELDS}
+    for key in HISTORY_CORE_FIELDS:
+        probe[key] = original[key]
+        passed, detail = _native_preflight(runtime, '--validate-core-records', canonical(probe).encode())
+        if not passed:
+            return key, detail
+    return 'complete_core_unit', {'reason': 'native_core_preflight_rejected'}
+
+
+def _references_skipped(value, interaction_ids, operation_ids, receipt_ids):
+    """Check structured relationship fields only; never search opaque content text."""
+    keys = {
+        'interaction_id': interaction_ids,
+        'source_interaction_id': interaction_ids,
+        'target_interaction_id': interaction_ids,
+        'operation_id': operation_ids,
+        'parent_operation_id': operation_ids,
+        'receipt_id': receipt_ids,
+    }
+    if isinstance(value, dict):
+        for key, candidate in value.items():
+            if key in keys and isinstance(candidate, str) and candidate in keys[key]:
+                return True
+            if _references_skipped(candidate, interaction_ids, operation_ids, receipt_ids):
+                return True
+    elif isinstance(value, list):
+        return any(_references_skipped(item, interaction_ids, operation_ids, receipt_ids) for item in value)
+    elif isinstance(value, str) and value[:1] in '[{':
+        try:
+            return _references_skipped(strict_loads(value), interaction_ids, operation_ids, receipt_ids)
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+def _prune_skipped_core(plan, interaction_ids):
+    """Remove every target-side dependent of rejected Interaction units."""
+    interaction_ids = set(interaction_ids)
+    core = plan['core']
+    operation_ids = {row['operation_id'] for row in core['operations']
+                     if row.get('interaction_id') in interaction_ids}
+    receipt_ids = {row['receipt_id'] for row in core['receipts']
+                   if row.get('interaction_id') in interaction_ids or row.get('operation_id') in operation_ids}
+    before = {}
+    def filter_rows(name, predicate):
+        rows = plan[name] if name in plan else core[name]
+        before[name] = len(rows)
+        kept = [row for row in rows if not predicate(row)]
+        if name in plan:
+            plan[name] = kept
+        else:
+            core[name] = kept
+    filter_rows('interactions', lambda row: row.get('interaction_id') in interaction_ids)
+    filter_rows('operations', lambda row: row.get('interaction_id') in interaction_ids or row.get('operation_id') in operation_ids)
+    filter_rows('receipts', lambda row: row.get('interaction_id') in interaction_ids or row.get('operation_id') in operation_ids or row.get('receipt_id') in receipt_ids)
+    filter_rows('call_facts', lambda row: row.get('interaction_id') in interaction_ids or row.get('operation_id') in operation_ids or row.get('receipt_id') in receipt_ids)
+    filter_rows('assembly_revisions', lambda row: row.get('interaction_id') in interaction_ids)
+    filter_rows('idempotency_records', lambda row: row.get('resource_type') == 'interaction' and row.get('resource_id') in interaction_ids)
+    for name in ('artifacts', 'ledger', 'historical_projections', 'explanations', 'mapped_records'):
+        filter_rows(name, lambda row: _references_skipped(row, interaction_ids, operation_ids, receipt_ids))
+    if 'thread_mappings' in plan:
+        mappings = []
+        for row in plan['thread_mappings']:
+            copy = dict(row)
+            copy['interaction_ids'] = [iid for iid in copy.get('interaction_ids', []) if iid not in interaction_ids]
+            if copy['interaction_ids']:
+                mappings.append(copy)
+        plan['thread_mappings'] = mappings
+    if 'thread_defaults' in plan:
+        plan['thread_defaults'] = [row for row in plan['thread_defaults']
+                                   if row.get('interaction_id') not in interaction_ids]
+    if 'mappings' in plan:
+        plan['mappings'] = [row for row in plan['mappings']
+                            if not _references_skipped(row, interaction_ids, operation_ids, receipt_ids)]
+    return {
+        'interaction_ids': sorted(interaction_ids),
+        'operation_ids': sorted(operation_ids),
+        'receipt_ids': sorted(receipt_ids),
+        'removed': {name: count - (len(plan[name]) if name in plan else len(core[name]))
+                    for name, count in before.items()},
+    }
+
+
+def _stage_core_batches(runtime, plan, directory, progress):
+    """Stage valid Core batches; isolate and retain only rejected Interaction units."""
+    from core_history_batches import core_history_import_batches
+    folder = directory / 'core'
+    folder.mkdir(mode=0o700)
+    progress.update(phase='preflight_core')
+    number, skipped = 0, []
+    for data in core_history_import_batches(plan['core'], max_bytes=limits()[1]):
+        if len(data) > limits()[1]:
+            raise ValueError('native_batch_exceeds_content_limit')
+        passed, detail = _native_preflight(runtime, '--validate-core-records', data)
+        if passed:
+            private_write(folder / ('%08d.json' % number), data)
+            number += 1
+            continue
+        # A rejected aggregate is decomposed into complete single-Interaction units.
+        unit_plan = strict_loads(data)
+        units = list(core_history_import_batches(unit_plan, max_bytes=limits()[1], max_interactions=1))
+        for unit in units:
+            unit_rows = strict_loads(unit)
+            interaction_rows = unit_rows['interactions']
+            unit_passed, unit_detail = _native_preflight(runtime, '--validate-core-records', unit)
+            if unit_passed:
+                private_write(folder / ('%08d.json' % number), unit)
+                number += 1
+                continue
+            if len(interaction_rows) != 1:
+                raise ValueError('native_core_noninteraction_preflight_failed')
+            interaction = interaction_rows[0]
+            stage, stage_detail = _core_failure_stage(runtime, unit)
+            skipped.append({
+                'reason': 'native_core_preflight_rejected',
+                'interaction_id': interaction['interaction_id'],
+                'conversation_id': interaction['conversation_id'],
+                'failure_stage': stage,
+                'aggregate_preflight': detail,
+                'unit_preflight': unit_detail,
+                'stage_preflight': stage_detail,
+                'core_counts': {key: len(value) for key, value in unit_rows.items()},
+            })
+    return skipped
+
+
+def _ledger_skip_detail(row, native_preflight):
+    envelope = row.get('envelope')
+    if isinstance(envelope, str):
+        try:
+            envelope = strict_loads(envelope)
+        except (TypeError, ValueError):
+            envelope = {}
+    event = (envelope or {}).get('envelope', {})
+    event = event.get('event', event)
+    return {
+        'reason': 'native_ledger_preflight_rejected',
+        'interaction_id': row.get('interaction_id'),
+        'conversation_id': row.get('conversation_id'),
+        'ledger_id': row.get('ledger_id') or row.get('event_id') or row.get('id'),
+        'event_type': event.get('event_type') or event.get('type'),
+        'native_preflight': native_preflight,
+    }
+
+
+def _stage_ledger_batches(runtime, batches, directory, progress):
+    """Stage valid Ledger rows; retain rejected historical events in source only."""
+    folder = directory / 'ledger'
+    folder.mkdir(mode=0o700)
+    progress.update(phase='preflight_ledger')
+    number, skipped = 0, []
+    for data in batches:
+        if len(data) > limits()[1]:
+            raise ValueError('native_batch_exceeds_content_limit')
+        passed, detail = _native_preflight(runtime, '--validate-ledger-records', data)
+        if passed:
+            private_write(folder / ('%08d.json' % number), data)
+            number += 1
+            continue
+        # Validate each original Ledger event independently. A failure does not
+        # invalidate its already-validated Core interaction; it omits only the
+        # historical Ledger timeline event from 020.
+        for row in strict_loads(data)['ledger']:
+            unit = canonical({'ledger': [row]}).encode()
+            unit_passed, unit_detail = _native_preflight(runtime, '--validate-ledger-records', unit)
+            if unit_passed:
+                private_write(folder / ('%08d.json' % number), unit)
+                number += 1
+            else:
+                skipped.append(_ledger_skip_detail(row, unit_detail))
+    return skipped
+
+
 def stage_batch(runtime, records, before, deployment, directory, progress):
     from retained_runtime import select_core_before, merge_thread_history, normalize_artifacts_lossy, provenance_import_batches
     from history_restore import plan_retained_history
@@ -185,10 +406,23 @@ def stage_batch(runtime, records, before, deployment, directory, progress):
         for number, data in enumerate(batches):
             if len(data) > limits()[1]:
                 raise ValueError('native_batch_exceeds_content_limit')
-            if validation and strict_loads(runtime._native([validation], data)).get('verified') is not True:
-                raise ValueError('native_batch_preflight_failed')
+            if validation:
+                passed, detail = _native_preflight(runtime, validation, data)
+                if not passed:
+                    # Keep the exact failed request and bounded native response private;
+                    # public progress/error files remain content-free.
+                    private_write(directory / ('failed-' + category + '-preflight-%08d.json' % number), data)
+                    private_write(directory / ('failed-' + category + '-preflight-%08d-detail.json' % number),
+                                  canonical({'category': category, 'batch': number, 'validation': validation,
+                                             'native_preflight': detail}).encode())
+                    raise ValueError('native_batch_preflight_failed')
             private_write(folder / ('%08d.json' % number), data)
-    write_batches('core', core_history_import_batches(plan['core'], max_bytes=limits()[1]), '--validate-core-records')
+    skipped_core = _stage_core_batches(runtime, plan, directory, progress)
+    skipped_core_detail = _prune_skipped_core(plan, {item['interaction_id'] for item in skipped_core}) if skipped_core else {
+        'interaction_ids': [], 'operation_ids': [], 'receipt_ids': [], 'removed': {}}
+    # These need to survive a later Ledger/Projection preflight failure.
+    private_write(directory / 'skipped-core-interactions.json', canonical(skipped_core).encode())
+    private_write(directory / 'skipped-core-dependencies.json', canonical(skipped_core_detail).encode())
     write_batches('artifact', artifact_import_batches(plan['artifacts'], settings, max_bytes=min(8 << 20, limits()[1])))
     # The plan is already bounded; Ledger is still emitted as bounded transports.
     def ledger_batches():
@@ -204,7 +438,10 @@ def stage_batch(runtime, records, before, deployment, directory, progress):
                 raise ValueError('native_ledger_record_exceeds_limit')
         if rows:
             yield canonical({'ledger': rows}).encode()
-    write_batches('ledger', ledger_batches(), '--validate-ledger-records')
+    skipped_ledger = _stage_ledger_batches(runtime, ledger_batches(), directory, progress)
+    # Persist independently from the final summary so a later projection check
+    # cannot erase the ledger-level reconciliation evidence.
+    private_write(directory / 'skipped-ledger-records.json', canonical(skipped_ledger).encode())
     write_batches('provenance', provenance_import_batches(plan, max_bytes=limits()[1]), '--validate-provenance-records')
     receipts = [r for r in plan['core']['receipts'] if r.get('trace_id') and r.get('terminal_at')]
     documents, rejected = plan_aggregates(plan['mapped_records'], datetime.now(timezone.utc), receipts=receipts)
@@ -244,13 +481,36 @@ def stage_batch(runtime, records, before, deployment, directory, progress):
             reasons[item['reason']] += 1
     private_jsonl(directory / 'audits.jsonl', items)
     defaults = plan.get('defaults', [])
+    skipped = plan.get('thread_skipped_items', [])
+    skipped_reasons = Counter(item.get('reason', 'thread_message_skipped') for item in skipped)
+    skipped_message_ledger = plan.get('thread_message_ledger_skipped', [])
+    skipped_message_ledger_reasons = Counter(
+        item.get('reason', 'native_message_ledger_preflight_rejected')
+        for item in skipped_message_ledger)
     for name, value in [('original-identity-mappings', plan['mappings']), ('original-content-issues', plan['issues']),
                         ('thread-identity-mappings', plan['thread_mappings']), ('thread-field-defaults', plan['thread_defaults']),
-                        ('retained-artifact-field-defaults', defaults)]:
+                        ('retained-artifact-field-defaults', defaults), ('skipped-thread-message-rounds', skipped),
+                        ('skipped-thread-message-ledger-events', skipped_message_ledger)]:
         private_write(directory / (name + '.json'), canonical(value).encode())
-    summary = {'source_count': len(audits) + len(evidence) + plan['stats']['verified_source_count'],
-               'original_count': plan['stats']['verified_source_count'], 'evidence_count': len(evidence),
-               'audit_count': len(audits), 'field_conversion_count': len(defaults), 'reasons': dict(reasons)}
+    # The old accounting counts Core/ledger/projection source rows. Each skipped
+    # dependency is deliberately retained in the immutable source snapshot rather
+    # than counted as a verified target record.
+    skipped_source_count = sum(skipped_core_detail['removed'].get(name, 0) for name in (
+        'interactions', 'operations', 'receipts', 'call_facts', 'idempotency_records',
+        'assembly_revisions', 'ledger', 'historical_projections', 'explanations')) + len(skipped_ledger)
+    original_count = max(0, plan['stats']['verified_source_count'] - skipped_source_count)
+    evidence_count = max(0, len(evidence) - skipped_core_detail['removed'].get('mapped_records', 0))
+    summary = {'source_count': len(audits) + evidence_count + original_count,
+               'original_count': original_count, 'evidence_count': evidence_count,
+               'audit_count': len(audits), 'field_conversion_count': len(defaults), 'reasons': dict(reasons),
+               'skipped_count': len(skipped), 'skipped_reasons': dict(skipped_reasons),
+               'message_ledger_skipped_count': len(skipped_message_ledger),
+               'message_ledger_skipped_reasons': dict(skipped_message_ledger_reasons),
+               'core_skipped_count': len(skipped_core),
+               'core_skipped_source_count': skipped_source_count,
+               'core_skipped_reasons': {'native_core_preflight_rejected': len(skipped_core)} if skipped_core else {},
+               'ledger_skipped_count': len(skipped_ledger),
+               'ledger_skipped_reasons': {'native_ledger_preflight_rejected': len(skipped_ledger)} if skipped_ledger else {}}
     private_write(directory / 'summary.json', canonical(summary).encode())
     return summary
 
@@ -346,7 +606,8 @@ def run_loop(runtime, state_root):
     directory = state_root / ('run-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '-' + uuid.uuid4().hex[:8])
     directory.mkdir(mode=0o700)
     result = {'complete': False, 'state': 'precheck_failed', 'source_count': 0, 'target_verified_count': 0,
-              'already_verified_count': 0, 'retained_count': 0, 'run_directory': str(directory)}
+              'already_verified_count': 0, 'retained_count': 0, 'skipped_count': 0,
+              'core_skipped_count': 0, 'ledger_skipped_count': 0, 'run_directory': str(directory)}
     reasons = Counter()
     # Temporary files can contain business content, even though logs cannot.
     os.chmod(directory, 0o700)
@@ -382,6 +643,12 @@ def run_loop(runtime, state_root):
                     summary = stage_batch(runtime, records, before, deployment, batches / ('%08d' % number), progress)
                     result['source_count'] += summary['source_count']
                     result['field_conversion_count'] = result.get('field_conversion_count', 0) + summary['field_conversion_count']
+                    result['skipped_count'] += summary.get('skipped_count', 0)
+                    result['core_skipped_count'] += summary.get('core_skipped_count', 0)
+                    result['ledger_skipped_count'] += summary.get('ledger_skipped_count', 0)
+                    reasons.update(summary.get('skipped_reasons', {}))
+                    reasons.update(summary.get('core_skipped_reasons', {}))
+                    reasons.update(summary.get('ledger_skipped_reasons', {}))
                     total = number + 1
                     progress.update(prepared_batches=total, prepared_records=result['source_count'])
                     records = None
@@ -398,7 +665,8 @@ def run_loop(runtime, state_root):
             progress.update(phase='rebuild_core_projection')
             result['core_projection'] = runtime.rebuild_core_projection()
             result['complete'] = result['target_verified_count'] == result['source_count'] and result['retained_count'] == 0
-            result['state'] = 'completed' if result['complete'] else 'partial_requires_reconciliation'
+            result['state'] = ('completed_with_skipped_history' if result['complete'] and (result['skipped_count'] or result['core_skipped_count'] or result['ledger_skipped_count'])
+                               else 'completed' if result['complete'] else 'partial_requires_reconciliation')
         except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
             progress.error(error)
             result['state'] = progress.values['phase'] + '_failed'
