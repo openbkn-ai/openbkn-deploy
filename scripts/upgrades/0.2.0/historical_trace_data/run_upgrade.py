@@ -23,9 +23,17 @@ from native_core import plan_core, core_import_batches, CORE_FIELDS
 from opensearch_history import OpenSearchHistoryWriter
 
 
-def _command(arguments, data=None):
+def _command(arguments, data=None, validation_verdict=False):
     process = subprocess.run(arguments, input=data, capture_output=True)
     if process.returncode:
+        # Native preflight uses exit 1 for a data rejection as well as command failures.
+        if validation_verdict and process.returncode == 1:
+            try:
+                verdict = strict_loads(process.stdout)
+            except (TypeError, ValueError):
+                verdict = None
+            if isinstance(verdict, dict) and verdict.get("verified") is False:
+                return process.stdout
         raise ValueError("deployment_command_failed")
     return process.stdout
 
@@ -117,7 +125,9 @@ class DeploymentRuntime:
     def _native(self, flags, data):
         command = ["kubectl", "--context", self.context, "-n", "openbkn", "exec", "-i", self.pod,
                    "-c", self.container, "--", getattr(self, "native_program", "/app/historical-data-validate")] + flags
-        return _command(command, data)
+        validation_verdict = flags in (["--validate-core-records"], ["--validate-ledger-records"],
+                                       ["--validate-provenance-records"])
+        return _command(command, data, validation_verdict=validation_verdict)
 
     def _native_ee_projection(self, data):
         helper = os.environ.get("BKN_HISTORY_PROVENANCE_HELPER")

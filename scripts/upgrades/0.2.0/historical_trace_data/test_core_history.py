@@ -3,6 +3,8 @@
 # Licensed under the OpenBKN License. See LICENSE-OPENBKN.txt.
 import copy
 import json
+import os
+import subprocess
 import unittest
 from core_history import plan_core_history, map_outbox
 
@@ -39,6 +41,47 @@ def producer_observation(**fields):
 
 
 class CoreHistoryTest(unittest.TestCase):
+    def test_receipt_business_refs_remove_only_deprecated_domain_without_mutating_source(self):
+        refs = [{'ref_type': 'object', 'ref_id': str(i), 'version': 'v1',
+                 'business_domain_id': 'legacy', 'other_unknown': 'keep'} for i in range(658)]
+        for encoded in (refs, json.dumps(refs)):
+            with self.subTest(encoded=isinstance(encoded, str)):
+                source = fixture()
+                source['bkn_trace_receipts'][0]['business_refs'] = encoded
+                original = copy.deepcopy(source)
+                plan = plan_core_history(source)
+                expected = [{k: v for k, v in ref.items() if k != 'business_domain_id'} for ref in refs]
+                self.assertEqual(plan['core']['receipts'][0]['business_refs'], expected)
+                self.assertEqual(source, original)
+                self.assertEqual(plan['ledger'], original['bkn_trace_evidence_event_ledger'])
+
+    @unittest.skipUnless(os.environ.get('BKN_TEST_CORE_VALIDATOR'), 'set native Core binary path')
+    def test_native_core_accepts_converted_legacy_refs_but_rejects_other_unknown_fields(self):
+        from snapshot import canonical, strict_loads
+        source = fixture()
+        refs = [{'ref_type': 'object_type', 'ref_id': 'object:kn:' + str(i),
+                 'version': 'v1', 'business_domain_id': 'legacy'} for i in range(658)]
+        source['bkn_trace_receipts'][0]['business_refs'] = json.dumps(refs)
+        core = plan_core_history(source)['core']
+
+        def validate():
+            result = subprocess.run([os.environ['BKN_TEST_CORE_VALIDATOR'], '--validate-core-records'],
+                                    input=canonical(core).encode(), capture_output=True)
+            return result.returncode, strict_loads(result.stdout)
+
+        code, verdict = validate()
+        self.assertEqual(code, 0)
+        self.assertIs(verdict['verified'], True)
+        core['receipts'][0]['business_refs'] = refs
+        code, verdict = validate()
+        self.assertEqual(code, 1)
+        self.assertEqual(verdict, {'verified': False, 'reason': 'native_core_import_failed_input'})
+        core['receipts'][0]['business_refs'] = [{'ref_type': 'object_type', 'ref_id': 'object:kn:0',
+                                                'version': 'v1', 'other_unknown': 'keep'}]
+        code, verdict = validate()
+        self.assertEqual(code, 1)
+        self.assertIs(verdict['verified'], False)
+
     def test_producer_different_app_same_subject_links_only_round_keeps_child_identity(self):
         from history_plan import map_evidence_records
         core = plan_core_history(fixture())['core']
