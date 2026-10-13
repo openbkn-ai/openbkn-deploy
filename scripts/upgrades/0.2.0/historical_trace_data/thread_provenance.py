@@ -5,6 +5,16 @@
 from snapshot import canonical, strict_loads
 
 
+def precheck_thread_projections(native):
+    """Exercise the actual configured helper before preparing Agent history."""
+    try:
+        output = strict_loads(native(b'{"interactions":[]}'))
+    except (OSError, ValueError) as error:
+        raise ValueError('native_ee_projection_precheck_failed') from error
+    if not isinstance(output, dict) or output.get('historical_projections') != []:
+        raise ValueError('native_ee_projection_precheck_invalid_response')
+
+
 def prepare_thread_projections(plan, threads, native):
     core = threads['core']
     if not core['interactions']:

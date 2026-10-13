@@ -657,6 +657,12 @@ def run_loop(runtime, state_root):
                 raise ValueError('invalid_instance_identity')
             before = os.environ.get('BKN_HISTORY_BEFORE') or datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
             snapshots, before = freeze(runtime, state_root, deployment, before, progress)
+            # Only Agent history needs the EE converter. Audit/Core-only
+            # upgrades must not gain an unrelated Enterprise prerequisite.
+            if strict_loads((Path(snapshots[-1]) / 'snapshot.json').read_text())['record_count']:
+                from thread_provenance import precheck_thread_projections
+                progress.update(phase='precheck_ee_projection')
+                precheck_thread_projections(runtime._native_ee_projection)
             result['agent_cutover_before'] = before
             result['captured_source_records'] = sum(strict_loads((Path(p) / 'snapshot.json').read_text())['record_count']
                                                     for p in snapshots)
