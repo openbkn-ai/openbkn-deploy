@@ -234,6 +234,27 @@ class LoopUpgradeTests(unittest.TestCase):
         error = strict_loads((Path(result['run_directory']) / 'error.json').read_text())
         self.assertEqual(error['message'], 'native_evidence_conversion_incomplete')
 
+    def test_missing_projection_converter_stops_before_prepare_or_target_write(self):
+        runtime = LoopRuntime()
+        agent = {'kind': 'agent_thread', 'source_id': 'bkn-agent', 'row': {'f_thread_id': 'thread-one'}}
+        with patch('agent_history.export_agent_source', return_value=([agent], [])), \
+                patch.object(runtime, '_native_ee_projection', side_effect=FileNotFoundError('missing helper')):
+            result = self.run_quiet(runtime)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['state'], 'precheck_ee_projection_failed')
+        self.assertEqual(runtime.snapshot_calls, 1)
+        self.assertEqual(runtime.native_calls, [])
+        self.assertEqual(runtime.publish_calls, [])
+        error = strict_loads((Path(result['run_directory']) / 'error.json').read_text())
+        self.assertEqual(error['message'], 'native_ee_projection_precheck_failed')
+
+    def test_audit_only_migration_does_not_require_ee_converter(self):
+        runtime = LoopRuntime(1)
+        with patch.object(runtime, '_native_ee_projection', side_effect=FileNotFoundError('missing helper')) as helper:
+            result = self.run_quiet(runtime)
+        self.assertTrue(result['complete'], result)
+        helper.assert_not_called()
+
     def test_interrupted_import_can_be_repeated_without_duplicate_publication(self):
         runtime = LoopRuntime()
         publish = runtime.publish

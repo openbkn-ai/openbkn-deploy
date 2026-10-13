@@ -37,6 +37,9 @@ class FakeRuntime:
         self.snapshot_calls += 1
         return self.rows, []
 
+    def _native_ee_projection(self, data):
+        return b'{"historical_projections":[]}'
+
     def validate(self, requests):
         from snapshot import canonical, digest
         return [dict(accepted=True, reason="valid", canonical_payload=request["payload"],
