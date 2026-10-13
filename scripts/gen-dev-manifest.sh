@@ -15,6 +15,8 @@
 #
 # Resolution per chart (stable-first, so an untouched component stays on a
 # known-good release and any regression is attributable to your branch):
+#     explicit template version (must exist in GHCR)
+#       otherwise:
 #     --branch=<X>'s newest build   (only the components X rebuilt have one)
 #       └─ else  latest stable       (highest clean semver, e.g. 0.1.0)
 #            └─ else  --base branch's newest build   (default: main)
@@ -229,6 +231,11 @@ def newest_branch_build(tags, san, line=None):
 
 def resolve(chart):
     tags=reg_tags(chart)
+    pinned=template_versions.get(chart)
+    if pinned and pinned != 'main':
+        # A reviewed component can be released independently of the product.
+        # Never silently replace its exact version with an older stable build.
+        return (pinned, "pinned") if pinned in tags else (None, "missing-pin")
     # 0) --latest: newest main build per chart (wins over branch); else stable;
     #    else fall through to the normal missing/error handling.
     if LATEST:
@@ -255,14 +262,17 @@ lines=open(TEMPLATE).read().splitlines()
 in_rel=False; cur_chart=None
 # map line_index -> chart (the version line to rewrite)
 ver_lines={}
+template_versions={}
 for i,ln in enumerate(lines):
     if re.match(r'^releases:\s*$', ln): in_rel=True; continue
     if in_rel:
         if re.match(r'^\S', ln): in_rel=False; continue   # left releases block
         m=re.match(r'^    chart:\s*(\S+)', ln)
         if m: cur_chart=m.group(1); continue
-        if re.match(r'^    version:\s*\S+', ln) and cur_chart:
+        m=re.match(r'^    version:\s*(\S+)', ln)
+        if m and cur_chart:
             ver_lines[i]=cur_chart
+            template_versions[cur_chart]=m.group(1).strip('\"\'')
 
 charts=list(dict.fromkeys(ver_lines.values()))
 mode=("latest (newest main build per chart, else stable)" if LATEST

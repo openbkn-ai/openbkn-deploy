@@ -179,7 +179,14 @@ chart's version from GHCR and writes a manifest you pass with `--version_file`:
 sudo bash ./deploy.sh --distro=k3s openbkn install --version_file=/tmp/m.yaml
 ```
 
-Per-chart resolution (stable-first): `--branch` newest build → latest stable →
+An exact chart version in the composition template is preserved and must exist
+in GHCR. The `main` placeholder uses the resolution rules below. The sample
+service is pinned to `0.1.0-main.20261013062625.shaafa25ac`, which includes dynamic
+sample uninstall (#125, backported to 0.2.0 by #130). Its chart pins the service
+image by digest. Keep this component version when assembling the 0.2.0 release
+lockfile; refreshing the sample catalog does not update the service image.
+
+Per-chart resolution for placeholders (stable-first): `--branch` newest build → latest stable →
 `--base` newest build → error. The generated manifest annotates each chart's
 source (`branch` / `stable` / `base`). A release branch starts with a full build;
 later builds update only the charts that changed. Requires `python3`; see

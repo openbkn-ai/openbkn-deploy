@@ -62,7 +62,8 @@ releases:
   bkn-studio:
     chart: bkn-studio
     version: main
-  # Studio sample catalog, published from openbkn-ai/bkn-samples.
+  # Reviewed sample service build with dynamic uninstall (#125 / 020 backport #130).
+  # Keep this explicit pin until a replacement release has been verified.
   bkn-sample-studio:
     chart: bkn-sample-studio
-    version: main
+    version: 0.1.0-main.20261013062625.shaafa25ac
