@@ -22,7 +22,7 @@ tree = ast.parse(embedded.group(1))
 functions = [
     node for node in tree.body
     if isinstance(node, ast.FunctionDef)
-    and node.name in {"sanitize", "branch_channel", "newest_branch_build"}
+    and node.name in {"sanitize", "branch_channel", "newest_branch_build", "resolve"}
 ]
 namespace = {"re": re}
 exec(compile(ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[])),
@@ -42,6 +42,25 @@ assert newest_branch_build(tags, "release", "2.0.0") == tags[2]
 assert newest_branch_build(tags[:2], "release", "2.0.0") == tags[1]
 assert newest_branch_build(tags, "release", "2.0.1") is None
 assert newest_branch_build(tags, "main") is None
+
+# Independently published sample services must not fall back to old stable
+# packages, including when a newer branch build or --latest is requested.
+pin = "0.1.0-main.20261013062625.shaafa25ac"
+namespace.update(template_versions={"bkn-sample-studio": pin},
+                 reg_tags=lambda chart: ["0.1.0", pin], LATEST=False,
+                 SAN_BRANCH="release", BRANCH_LINE="0.2.0", SAN_BASE="main",
+                 BASE_LINE=None)
+assert namespace["resolve"]("bkn-sample-studio") == (pin, "pinned")
+namespace["LATEST"] = True
+assert namespace["resolve"]("bkn-sample-studio") == (pin, "pinned")
+namespace["reg_tags"] = lambda chart: ["0.1.0"]
+assert namespace["resolve"]("bkn-sample-studio") == (None, "missing-pin")
+
+# Charts with the main placeholder retain the existing branch/stable behavior.
+namespace.update(template_versions={"bkn-backend": "main"}, LATEST=False,
+                 reg_tags=lambda chart: [tags[3]],
+                 highest_semver=lambda values: None)
+assert namespace["resolve"]("bkn-backend") == (tags[3], "branch")
 PY
 
 test_bin="$(mktemp -d)"

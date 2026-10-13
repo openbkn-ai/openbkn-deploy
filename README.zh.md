@@ -157,6 +157,12 @@ sudo bash ./onboard.sh --help # 全部参数（--config=models.yaml、--enable-b
 
 ### 开发/测试：选择 chart 版本（`--version_file`）
 
+组合模板中明确指定的 chart 版本会被保留，并检查该版本已存在于 GHCR；
+`main` 占位符仍按分支、稳定版和主线的既有规则解析。样例服务固定使用
+`0.1.0-main.20261013062625.shaafa25ac`，包含动态卸载修复 #125（通过 #130
+同步到 0.2.0），对应 chart 已固定服务镜像摘要。编制 0.2.0 正式发布清单时
+应保留此组件版本；刷新样例目录不会更新服务镜像。
+
 正式安装会在提交进仓库的 manifest（`release-manifests/0.1.5/openbkn.yaml`）里
 **钉死**各 chart 版本 —— 即 lockfile，可复现。
 

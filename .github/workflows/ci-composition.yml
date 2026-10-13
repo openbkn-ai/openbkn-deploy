@@ -1,0 +1,32 @@
+name: Product composition
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/bkn-foundry.template.yaml'
+      - 'scripts/gen-dev-manifest.sh'
+      - 'scripts/tests/test-gen-dev-manifest.sh'
+      - '.github/workflows/ci-composition.yml'
+  push:
+    branches: [main, release/0.2.0]
+    paths:
+      - 'scripts/bkn-foundry.template.yaml'
+      - 'scripts/gen-dev-manifest.sh'
+      - 'scripts/tests/test-gen-dev-manifest.sh'
+      - '.github/workflows/ci-composition.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  composition-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check manifest version selection
+        run: |
+          bash -n scripts/gen-dev-manifest.sh scripts/tests/test-gen-dev-manifest.sh
+          bash scripts/tests/test-gen-dev-manifest.sh
