@@ -1442,7 +1442,7 @@ for argument in sys.argv[1:]:
             field = []
         else:
             # Helm starts a list only when the value begins with an opening brace.
-            if character == "{" and field and field[-1] == "=":
+            if character == "{" and "=" in field and field.index("=") == len(field) - 1:
                 depth = 1
             elif character == "}" and depth:
                 depth = 0

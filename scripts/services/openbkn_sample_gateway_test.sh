@@ -35,7 +35,7 @@ for combined in 'baseURL=http://operator-custom.example,replicaCount=1' 'replica
     HELM_VALUES='{"baseURL":"http://operator-custom.example"}'
     _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0
 done
-for scalar in 'http://operator-custom.example/path}' 'http://operator-custom.example/path{'; do
+for scalar in 'http://operator-custom.example/path}' 'http://operator-custom.example/path{' 'http://operator-custom.example/?q={abc' 'http://operator-custom.example/?q={abc}'; do
     CORE_SET_VALUES=("baseURL=${scalar},replicaCount=1")
     _openbkn_release_extra_sets bkn-sample-studio openbkn
     [[ "${CORE_RELEASE_EXTRA_SET_STRINGS[*]}" == "baseURL=${scalar}" ]]
