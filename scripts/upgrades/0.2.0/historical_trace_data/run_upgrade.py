@@ -147,6 +147,10 @@ class DeploymentRuntime:
         self._audit_published = False
         return answers
 
+    def fetch_batch(self, items):
+        # The caller owns the round: missing IDs must not trigger cache refreshes.
+        return reconcile.fetch_audits(self.source, [item["target_id"] for item in items])
+
     def fetch(self, item):
         # reconcile.fetch_audit reads the 020 bkn_audit month/dedup tables via
         # the discovered MariaDB connection; it never queries the 015 source
@@ -388,6 +392,12 @@ def _report(directory, result, reasons):
              "- Native Core import: " + canonical(result.get("core_import", {})),
              "- Converted records with explicit field defaults or identity mapping: %d" % result.get("field_conversion_count", 0),
              "", "## Conversion Losses and Execution Failures", ""]
+    if "audit_total" in result:
+        lines[-3:-3] = ["- Audit planned: %d" % result["audit_total"],
+                      "- Audit published (Kafka acknowledged): %d" % result["audit_published"],
+                      "- Audit target verified (including already verified): %d" % result["audit_verified"],
+                      "- Audit published or attempted but not read back: %d" % result["audit_pending"],
+                      "- Audit retained: %d" % result["audit_retained"]]
     lines.extend("- %s: %d" % entry for entry in sorted(reasons.items()))
     if not reasons:
         lines.append("- No failed or unconverted source rows.")

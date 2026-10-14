@@ -76,6 +76,9 @@ class FakeRuntime:
                      content_hash="sha256:" + digest(canonical(request["payload"]).encode()),
                      event_id=request["payload"]["event_id"]) for request in requests]
 
+    def fetch_batch(self, items):
+        return {item['target_id']: row for item in items if (row := self.fetch(item)) is not None}
+
     def fetch(self, item):
         if self.existing:
             occurred = item["payload"]["occurred_at"]
