@@ -79,13 +79,21 @@ class LoopUpgradeTests(unittest.TestCase):
         self.assertEqual(runtime.publish_calls, [5, 5, 3])
         self.assertEqual(first['source_count'], 13)
         self.assertEqual(first['target_verified_count'], 13)
+        self.assertEqual({key: first[key] for key in ('audit_total', 'audit_published', 'audit_verified', 'audit_pending', 'audit_retained')},
+                         {'audit_total': 13, 'audit_published': 13, 'audit_verified': 13, 'audit_pending': 0, 'audit_retained': 0})
+        self.assertIn('Audit published (Kafka acknowledged): 13', (Path(first['run_directory']) / 'report.md').read_text())
         second = self.run_quiet(runtime)
         self.assertTrue(second['complete'], second)
         self.assertEqual(runtime.publish_calls, [5, 5, 3])
         self.assertEqual(second['already_verified_count'], 13)
+        self.assertEqual(second['audit_published'], 0)
+        self.assertEqual(second['audit_verified'], 13)
         progress = strict_loads((Path(second['run_directory']) / 'progress.json').read_text())
         self.assertEqual(progress['completed_batches'], 3)
         self.assertEqual(progress['phase'], 'completed')
+        self.assertEqual(progress['audit_total'], 3)
+        self.assertEqual(progress['audit_already_verified'], 3)
+        self.assertEqual(progress['audit_readback_round'], 0)
 
     def test_late_preflight_failure_prevents_all_target_writes(self):
         runtime = LoopRuntime(6)

@@ -263,8 +263,12 @@ def paths(folder):
         number += 1
 
 
+AUDIT_READBACK_ROUNDS = 5
+AUDIT_READBACK_WINDOW_SECONDS = 8
+
+
 def import_batch(runtime, directory, progress):
-    from run_upgrade import _status
+    from reconcile import check
     verified, already, retained = 0, 0, 0
     reasons = Counter()
     for category in ('artifact', 'core', 'ledger', 'provenance'):
@@ -288,53 +292,87 @@ def import_batch(runtime, directory, progress):
         if counts['conflict']:
             raise ValueError('native_evidence_content_conflict')
         verified += summary['evidence_count']
-    progress.update(phase='import_audit')
+    progress.update(phase='import_audit', audit_total=0, audit_already_verified=0,
+                    audit_published=0, audit_verified=0, audit_pending=0,
+                    audit_retained=0, audit_readback_round=0, audit_readback_elapsed_seconds=0)
     # At most the current source batch is in memory, including audit validation/cache.
     with (directory / 'audits.jsonl').open('rb') as stream:
         from snapshot import bounded_lines
         items = [strict_loads(line) for line in bounded_lines(stream)]
+    progress.update(audit_total=len(items))
     runtime.validate([{'kind': 'audit', 'payload': item['payload'], 'broker_time': '2000-01-01T00:00:00Z'}
                       for item in items if item['disposition'] == 'convert'])
+    candidates = [item for item in items if item['disposition'] == 'convert']
+    rows = runtime.fetch_batch(candidates)
+    audit_verified, audit_retained, published = 0, 0, 0
     missing = []
     for item in items:
         if item['disposition'] != 'convert':
             retained += 1
+            audit_retained += 1
             reasons[item['reason']] += 1
             continue
-        status = _status(runtime, item)
+        status = check([item], lambda candidate: rows.get(candidate['target_id']))['results'][0]['status']
         if status == 'verified':
             verified += 1
             already += 1
+            audit_verified += 1
             item.update(disposition='writer_verified', state='already_verified')
         elif status == 'missing':
             missing.append(item)
         else:
             retained += 1
+            audit_retained += 1
             reasons['target_content_conflict'] += 1
             item.update(disposition='requires_reconciliation', reason='target_content_conflict')
+    progress.update(audit_total=len(items), audit_already_verified=already,
+                    audit_verified=audit_verified, audit_pending=len(missing), audit_retained=audit_retained)
     if missing:
         clock = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         try:
-            runtime.publish([{'kind': 'audit', 'payload': item['payload'], 'broker_time': clock} for item in missing])
+            replies = runtime.publish([{'kind': 'audit', 'payload': item['payload'], 'broker_time': clock} for item in missing])
+            published = sum(reply.get('accepted') is True for reply in replies)
         except InterruptedError:
             raise
         except (OSError, RuntimeError, ValueError) as error:
             progress.error(error)
-        for item in missing:
-            status = 'missing'
-            for attempt in range(5):
-                status = _status(runtime, item)
-                if status != 'missing':
-                    break
-                if attempt < 4:
-                    time.sleep(2)
-            if status == 'verified':
-                verified += 1
-                item.update(disposition='writer_verified', state='created')
-            else:
-                retained += 1
-                reasons['publication_requires_readback'] += 1
-                item.update(disposition='requires_reconciliation', reason='publication_requires_readback')
+        pending = missing
+        started = time.monotonic()
+        deadline = started + AUDIT_READBACK_WINDOW_SECONDS
+        progress.update(audit_published=published)
+        for attempt in range(AUDIT_READBACK_ROUNDS):
+            if attempt and time.monotonic() > deadline:
+                break
+            rows = runtime.fetch_batch(pending)
+            remaining = []
+            for item in pending:
+                status = check([item], lambda candidate: rows.get(candidate['target_id']))['results'][0]['status']
+                if status == 'verified':
+                    verified += 1
+                    audit_verified += 1
+                    item.update(disposition='writer_verified', state='created')
+                elif status == 'conflict':
+                    retained += 1
+                    audit_retained += 1
+                    reasons['target_content_conflict'] += 1
+                    item.update(disposition='requires_reconciliation', reason='target_content_conflict')
+                else:
+                    remaining.append(item)
+            pending = remaining
+            progress.update(audit_verified=audit_verified, audit_pending=len(pending),
+                            audit_retained=audit_retained, audit_readback_round=attempt + 1,
+                            audit_readback_elapsed_seconds=round(time.monotonic() - started, 1))
+            budget = deadline - time.monotonic()
+            if not pending or budget <= 0 or attempt == AUDIT_READBACK_ROUNDS - 1:
+                break
+            time.sleep(min(2 ** attempt, budget))
+        for item in pending:
+            retained += 1
+            audit_retained += 1
+            reasons['publication_requires_readback'] += 1
+            item.update(disposition='requires_reconciliation', reason='publication_requires_readback')
+        progress.update(audit_retained=audit_retained,
+                        audit_readback_elapsed_seconds=round(time.monotonic() - started, 1))
     private_jsonl(directory / 'final-items.jsonl', items)
     return verified, already, retained, reasons
 
@@ -347,6 +385,7 @@ def run_loop(runtime, state_root):
     directory.mkdir(mode=0o700)
     result = {'complete': False, 'state': 'precheck_failed', 'source_count': 0, 'target_verified_count': 0,
               'already_verified_count': 0, 'retained_count': 0, 'run_directory': str(directory)}
+    result.update({key: 0 for key in ('audit_total', 'audit_published', 'audit_verified', 'audit_pending', 'audit_retained')})
     reasons = Counter()
     # Temporary files can contain business content, even though logs cannot.
     os.chmod(directory, 0o700)
@@ -400,6 +439,8 @@ def run_loop(runtime, state_root):
                 result['already_verified_count'] += already
                 result['retained_count'] += retained
                 reasons.update(issues)
+                for key in ('audit_total', 'audit_published', 'audit_verified', 'audit_pending', 'audit_retained'):
+                    result[key] += progress.values[key]
                 progress.update(completed_batches=number + 1, verified_records=result['target_verified_count'])
             progress.update(phase='rebuild_core_projection')
             result['core_projection'] = runtime.rebuild_core_projection()
