@@ -18,7 +18,6 @@ class AuditReadbackTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
-        (self.directory / 'summary.json').write_text(canonical({'original_count': 0, 'evidence_count': 0}))
         self.items = []
         for number in range(5000):
             payload = {'event_id': str(uuid.UUID(int=number)), 'source_id': 'vega',
@@ -51,6 +50,8 @@ class AuditReadbackTests(unittest.TestCase):
                 'topic': 'openbkn.audit.v1', 'partition': 0, 'offset': 1}
 
     def run_batch(self):
+        (self.directory / 'summary.json').write_text(canonical({
+            'original_count': 0, 'evidence_count': 0, 'audit_count': len(self.items)}))
         private_jsonl(self.directory / 'audits.jsonl', self.items)
         self.progress = Progress(self.directory)
         with contextlib.redirect_stderr(io.StringIO()), \
