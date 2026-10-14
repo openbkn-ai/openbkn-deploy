@@ -559,6 +559,7 @@ AUDIT_READBACK_WINDOW_SECONDS = 8
 
 def import_batch(runtime, directory, progress):
     from reconcile import check
+    summary = strict_loads((directory / 'summary.json').read_text())
     verified, already, retained = 0, 0, 0
     reasons = Counter()
     for category in ('artifact', 'core', 'ledger', 'provenance'):
@@ -567,7 +568,6 @@ def import_batch(runtime, directory, progress):
             answer = strict_loads(runtime._native(['--import-' + category + '-records'], path.read_bytes()))
             if answer.get('verified') is not True:
                 raise ValueError('retained_history_readback_failed')
-    summary = strict_loads((directory / 'summary.json').read_text())
     verified += summary['original_count']
     def documents():
         for path in paths(directory / 'evidence'):
@@ -582,9 +582,13 @@ def import_batch(runtime, directory, progress):
         if counts['conflict']:
             raise ValueError('native_evidence_content_conflict')
         verified += summary['evidence_count']
-    progress.update(phase='import_audit', audit_total=0, audit_already_verified=0,
+    progress.update(phase='import_audit_skipped' if summary['audit_count'] == 0 else 'import_audit',
+                    audit_total=0, audit_already_verified=0,
                     audit_published=0, audit_verified=0, audit_pending=0,
                     audit_retained=0, audit_readback_round=0, audit_readback_elapsed_seconds=0)
+    if summary['audit_count'] == 0:
+        private_jsonl(directory / 'final-items.jsonl', ())
+        return verified, already, retained, reasons
     # At most the current source batch is in memory, including audit validation/cache.
     with (directory / 'audits.jsonl').open('rb') as stream:
         from snapshot import bounded_lines
