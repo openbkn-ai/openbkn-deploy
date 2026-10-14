@@ -734,13 +734,18 @@ def run_loop(runtime, state_root):
             records = None
             for number in range(total):
                 progress.update(batch=number + 1)
-                verified, already, retained, issues = import_batch(runtime, batches / ('%08d' % number), progress)
+                try:
+                    verified, already, retained, issues = import_batch(runtime, batches / ('%08d' % number), progress)
+                finally:
+                    # Preserve current-batch Audit counters even if readback fails.
+                    # Earlier import phases must not re-add the preceding batch.
+                    if progress.values['phase'] == 'import_audit':
+                        for key in ('audit_total', 'audit_published', 'audit_verified', 'audit_pending', 'audit_retained'):
+                            result[key] += progress.values[key]
                 result['target_verified_count'] += verified
                 result['already_verified_count'] += already
                 result['retained_count'] += retained
                 reasons.update(issues)
-                for key in ('audit_total', 'audit_published', 'audit_verified', 'audit_pending', 'audit_retained'):
-                    result[key] += progress.values[key]
                 progress.update(completed_batches=number + 1, verified_records=result['target_verified_count'])
             progress.update(phase='rebuild_core_projection')
             result['core_projection'] = runtime.rebuild_core_projection()
@@ -749,6 +754,9 @@ def run_loop(runtime, state_root):
                                else 'completed' if result['complete'] else 'partial_requires_reconciliation')
         except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
             progress.error(error)
+            if progress.values['phase'] == 'import_audit':
+                result['audit_retained'] += (progress.values['audit_total'] - progress.values['audit_verified']
+                                            - progress.values['audit_retained'])
             result['state'] = progress.values['phase'] + '_failed'
             reasons[result['state']] += 1
             result['retained_count'] = max(result['retained_count'], result['source_count'] - result['target_verified_count'])

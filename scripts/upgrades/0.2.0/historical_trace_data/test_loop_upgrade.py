@@ -238,6 +238,47 @@ class LoopUpgradeTests(unittest.TestCase):
         self.assertEqual(progress['audit_already_verified'], 3)
         self.assertEqual(progress['audit_readback_round'], 0)
 
+    def test_failed_readback_preserves_current_batch_audit_report(self):
+        runtime = LoopRuntime(6)
+        fetch = runtime.fetch_batch
+        calls = 0
+        def readback(items):
+            nonlocal calls
+            calls += 1
+            # First batch succeeds. The second publishes, then loses its DB connection.
+            if calls == 4:
+                raise ValueError('database_readback_failed')
+            return fetch(items)
+        runtime.fetch_batch = readback
+        result = self.run_quiet(runtime)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['state'], 'import_audit_failed')
+        self.assertEqual(result['audit_total'], 6)
+        self.assertEqual(result['audit_published'], 6)
+        self.assertEqual(result['audit_verified'], 5)
+        self.assertEqual(result['audit_pending'], 1)
+        self.assertEqual(result['audit_retained'], 1)
+        report = (Path(result['run_directory']) / 'report.md').read_text()
+        self.assertIn('Audit published (Kafka acknowledged): 6', report)
+        self.assertIn('Audit retained: 1', report)
+
+    def test_failure_before_audit_does_not_recount_previous_batch(self):
+        runtime = LoopRuntime(6)
+        # Audit-only batches have no artifact file; inject failure at batch entry.
+        from loop_upgrade import import_batch
+        def failing_import(runtime, directory, progress):
+            if runtime.publish_calls:
+                progress.update(phase='import_artifact')
+                raise ValueError('native_import_failed')
+            return import_batch(runtime, directory, progress)
+        with patch('loop_upgrade.import_batch', side_effect=failing_import):
+            result = self.run_quiet(runtime)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['audit_total'], 5)
+        self.assertEqual(result['audit_published'], 5)
+        self.assertEqual(result['audit_verified'], 5)
+        self.assertEqual(result['audit_retained'], 0)
+
     def test_late_preflight_failure_prevents_all_target_writes(self):
         runtime = LoopRuntime(6)
         runtime.rows[-1] = {'kind': 'evidence', 'source_id': 'backend', 'row': {'envelope': 'invalid'}}
