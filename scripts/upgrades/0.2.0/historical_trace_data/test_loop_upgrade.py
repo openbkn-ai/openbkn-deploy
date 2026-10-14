@@ -68,6 +68,50 @@ class LoopUpgradeTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
 
+    def test_empty_audit_preserves_other_imports_and_resets_batch_progress(self):
+        from loop_upgrade import import_batch
+        directory = self.root / 'mixed-batch'
+        directory.mkdir()
+        payloads = {
+            'artifact': {'artifacts': [{'artifact_id': 'artifact-one'}]},
+            'core': {'conversations': [{'conversation_id': 'conversation-one'}]},
+        }
+        for category in ('artifact', 'core', 'ledger', 'provenance', 'evidence'):
+            folder = directory / category
+            folder.mkdir()
+            if category in payloads:
+                (folder / '00000000.json').write_text(canonical(payloads[category]))
+        (directory / 'audits.jsonl').write_bytes(b'')
+        (directory / 'summary.json').write_text(canonical({
+            'audit_count': 0, 'evidence_count': 0, 'original_count': 1}))
+        runtime = LoopRuntime(0)
+        progress = Progress(directory)
+        audit_keys = ('audit_total', 'audit_already_verified', 'audit_published', 'audit_verified',
+                      'audit_pending', 'audit_retained', 'audit_readback_round', 'audit_readback_elapsed_seconds')
+        # Simulate counters left by a preceding nonempty Audit batch.
+        progress.values.update({key: 7 for key in audit_keys})
+        original_open = Path.open
+
+        def guarded_open(path, *args, **kwargs):
+            if path == directory / 'audits.jsonl':
+                raise AssertionError('empty Audit must not be opened')
+            return original_open(path, *args, **kwargs)
+
+        with patch.object(Path, 'open', autospec=True, side_effect=guarded_open), \
+                patch.object(runtime, 'validate') as validate, \
+                patch.object(runtime, 'fetch_batch') as fetch, \
+                patch.object(runtime, 'publish') as publish, contextlib.redirect_stderr(io.StringIO()):
+            verified, already, retained, reasons = import_batch(runtime, directory, progress)
+        validate.assert_not_called()
+        fetch.assert_not_called()
+        publish.assert_not_called()
+        self.assertEqual(runtime.native_calls, [['--import-artifact-records'], ['--import-core-records']])
+        self.assertEqual((verified, already, retained, dict(reasons)), (1, 0, 0, {}))
+        self.assertEqual(progress.values['phase'], 'import_audit_skipped')
+        self.assertEqual({key: progress.values[key] for key in audit_keys}, {key: 0 for key in audit_keys})
+        self.assertEqual((directory / 'audits.jsonl').read_bytes(), b'')
+        self.assertEqual((directory / 'final-items.jsonl').read_bytes(), b'')
+
     def run_quiet(self, runtime):
         with contextlib.redirect_stderr(io.StringIO()):
             return run_loop(runtime, self.root)
