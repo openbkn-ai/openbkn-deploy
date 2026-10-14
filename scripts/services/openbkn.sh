@@ -1498,6 +1498,13 @@ except (ValueError, AttributeError, TypeError):
 ' "${CORE_RELEASE_EXTRA_SETS[@]}" <<<"${values}"
 }
 
+_openbkn_sample_gateway_base_url() {
+    if _openbkn_last_set_value baseURL "${CORE_SET_VALUES[@]-}"; then
+        return 0
+    fi
+    printf '%s' 'http://ingress-nginx-controller.ingress-nginx.svc.cluster.local'
+}
+
 _openbkn_release_extra_sets() {
     local release_name="$1"
     local namespace="${2:-${CORE_NAMESPACE}}"
@@ -1526,13 +1533,9 @@ _openbkn_release_extra_sets() {
             CORE_RELEASE_EXTRA_SETS+=("namespace=${namespace}")
         fi
     elif [[ "${release_name}" == "bkn-sample-studio" ]]; then
-        local base_url
-        base_url="$(get_access_address_base_url)"
-        if [[ -n "${base_url}" ]]; then
-            CORE_RELEASE_EXTRA_SET_STRINGS+=("baseURL=${base_url}")
-        else
-            log_warn "accessAddress is not recorded; bkn-sample-studio has no gateway URL, so sample install cannot call OpenBKN."
-        fi
+        # Public accessAddress may use a private CA. Samples use the existing
+        # internal HTTP Ingress; explicit operator --set overrides still win.
+        CORE_RELEASE_EXTRA_SET_STRINGS+=("baseURL=$(_openbkn_sample_gateway_base_url)")
     elif [[ "${release_name}" == "bkn-safe" ]]; then
         _openbkn_safe_audit_profile_sets "${namespace}"
         local initial_pwd
@@ -1714,6 +1717,19 @@ _openbkn_should_skip_upgrade() {
             esac
             ;;
     esac
+    if [[ "${release_name}" == "bkn-sample-studio" ]]; then
+        local installed_gateway expected_gateway
+        expected_gateway="$(_openbkn_sample_gateway_base_url)"
+        if ! installed_gateway="$(set -o pipefail; helm get values "${release_name}" -n "${namespace}" --all -o json |
+            python3 -c 'import json,sys; print(json.load(sys.stdin).get("baseURL", "") or "")')"; then
+            log_warn "Cannot read sample gateway Helm value; preserving the version-skip decision."
+            return 0
+        fi
+        if [[ "${installed_gateway}" != "${expected_gateway}" ]]; then
+            log_info "Reconcile bkn-sample-studio: installed API gateway differs."
+            return 1
+        fi
+    fi
     if [[ "${release_name}" == "bkn-safe" ]]; then
         _openbkn_safe_audit_profile_matches "${namespace}"
         case "$?" in
