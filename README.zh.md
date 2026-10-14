@@ -373,7 +373,7 @@ host/port/type,丢弃 password/user/key/token),也不暴露健康端点的原始
 
 ### Studio 一键体验
 
-标准产品清单包含 `bkn-sample-studio`。安装脚本通过现有 Chart 的 `baseURL` 配置传递网关地址，继续支持显式 `--set` 覆盖。发布的样例 Chart 固定服务及执行器镜像摘要。安装脚本不根据 Chart 版本或组件名称推断 API 兼容性。
+标准产品清单包含 `bkn-sample-studio`。安装脚本通过 Chart 的 `baseURL` 配置传递现有集群内 ingress-nginx HTTP 入口，不依赖外部 HTTPS 访问地址，继续支持管理员显式 `--set` 覆盖。即使 Chart 版本未改变，也会更新样例服务中留存的错误网关地址。发布的样例 Chart 固定服务及执行器镜像摘要。安装脚本不根据 Chart 版本或组件名称推断 API 兼容性。
 
 使用支持标准 API 默认配置的样例服务版本时，将 `platform.version`、`platform.capabilities` 留空：服务通过 `GET /api/bkn-backend/v1/health` 读取后端版本，并校验所需 API 适配器名称是否由安装器实现。目标 API 的实际可用性、权限和许可由安装调用判定，失败记录到对应步骤。`GET /api/safe/v1/capabilities` 描述授权能力，不作为样例 API 清单。旧版样例服务仍需显式配置，请使用包含默认配置改动的已发布版本。配置见 [样例服务部署指南](https://github.com/openbkn-ai/bkn-samples/blob/main/docs/sample-service-deployment.md)。配置／预检通过不能替代完整全新产品安装验收。
 
