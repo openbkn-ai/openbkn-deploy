@@ -1632,9 +1632,9 @@ _openbkn_should_skip_upgrade() {
         local installed_gateway expected_gateway
         expected_gateway="$(_openbkn_sample_gateway_base_url)"
         if ! installed_gateway="$(set -o pipefail; helm get values "${release_name}" -n "${namespace}" --all -o json |
-            python3 -c 'import json,sys; print(json.load(sys.stdin).get("baseURL", "") or "")')"; then
-            log_warn "Cannot read sample gateway Helm value; preserving the version-skip decision."
-            return 0
+            python3 -c 'import json,sys; print(json.load(sys.stdin).get("baseURL", "") or "")' 2>/dev/null)"; then
+            log_warn "Cannot verify the installed sample gateway; reconciling instead of skipping."
+            return 1
         fi
         if [[ "${installed_gateway}" != "${expected_gateway}" ]]; then
             log_info "Reconcile bkn-sample-studio: installed API gateway differs."
