@@ -1423,6 +1423,39 @@ except (ValueError, TypeError, AttributeError):
 ' "${expected[@]}" <<<"${values}"
 }
 
+_openbkn_sample_gateway_base_url() {
+    # Helm --set accepts multiple assignments, escaped commas and list values.
+    # Only extract the top-level scalar gateway; leave other profiles unchanged.
+    python3 - "${CORE_SET_VALUES[@]-}" <<'PY_GATEWAY'
+import sys
+value = "http://ingress-nginx-controller.ingress-nginx.svc.cluster.local"
+for argument in sys.argv[1:]:
+    fields, field, escaped, depth = [], [], False, 0
+    for character in argument:
+        if escaped:
+            field.append(character)
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == "," and depth == 0:
+            fields.append("".join(field))
+            field = []
+        else:
+            # Helm starts a list only when the value begins with an opening brace.
+            if character == "{" and "=" in field and field.index("=") == len(field) - 1:
+                depth = 1
+            elif character == "}" and depth:
+                depth = 0
+            field.append(character)
+    fields.append("".join(field))
+    for assignment in fields:
+        key, separator, candidate = assignment.partition("=")
+        if separator and key == "baseURL":
+            value = candidate
+print(value)
+PY_GATEWAY
+}
+
 _openbkn_release_extra_sets() {
     local release_name="$1"
     local namespace="${2:-${CORE_NAMESPACE}}"
@@ -1451,13 +1484,14 @@ _openbkn_release_extra_sets() {
             CORE_RELEASE_EXTRA_SETS+=("namespace=${namespace}")
         fi
     elif [[ "${release_name}" == "bkn-sample-studio" ]]; then
-        local base_url
-        base_url="$(get_access_address_base_url)"
-        if [[ -n "${base_url}" ]]; then
-            CORE_RELEASE_EXTRA_SET_STRINGS+=("baseURL=${base_url}")
-        else
-            log_warn "accessAddress is not recorded; bkn-sample-studio has no gateway URL, so sample install cannot call OpenBKN."
-        fi
+        # Public accessAddress may use a private CA. Samples use the existing
+        # internal HTTP Ingress; explicit operator --set overrides still win.
+        local sample_gateway
+        sample_gateway="$(_openbkn_sample_gateway_base_url)"
+        # Preserve scalar URL punctuation when passing it through Helm strvals again.
+        sample_gateway="${sample_gateway//\\/\\\\}"
+        sample_gateway="${sample_gateway//,/\\,}"
+        CORE_RELEASE_EXTRA_SET_STRINGS+=("baseURL=${sample_gateway}")
     elif [[ "${release_name}" == "bkn-safe" ]]; then
         _openbkn_safe_audit_profile_sets "${namespace}"
         local initial_pwd
@@ -1624,6 +1658,19 @@ _openbkn_should_skip_upgrade() {
 
     if ! should_skip_upgrade_same_chart_version "${release_name}" "${namespace}" "${chart_name}" "${target_version}"; then
         return 1
+    fi
+    if [[ "${release_name}" == "bkn-sample-studio" ]]; then
+        local installed_gateway expected_gateway
+        expected_gateway="$(_openbkn_sample_gateway_base_url)"
+        if ! installed_gateway="$(set -o pipefail; helm get values "${release_name}" -n "${namespace}" --all -o json |
+            python3 -c 'import json,sys; print(json.load(sys.stdin).get("baseURL", "") or "")' 2>/dev/null)"; then
+            log_warn "Cannot verify the installed sample gateway; reconciling instead of skipping."
+            return 1
+        fi
+        if [[ "${installed_gateway}" != "${expected_gateway}" ]]; then
+            log_info "Reconcile bkn-sample-studio: installed API gateway differs."
+            return 1
+        fi
     fi
     if [[ "${release_name}" == "bkn-safe" ]]; then
         _openbkn_safe_audit_profile_matches "${namespace}"
