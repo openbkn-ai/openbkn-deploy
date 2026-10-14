@@ -66,4 +66,4 @@ releases:
   # Keep this explicit pin until a replacement release has been verified.
   bkn-sample-studio:
     chart: bkn-sample-studio
-    version: 0.1.0-main.20261013062625.shaafa25ac
+    version: main
