@@ -32,7 +32,7 @@ tools=/opt/bitnami/kafka/bin
 if ! "$tools/kafka-topics.sh" "${admin[@]}" --describe --topic openbkn.audit.v1 >"$details" 2>&1; then
   # Fail closed for unrecognized CLI errors, auth failures, and timeouts. Do not
   # translate an arbitrary failed describe into permission to create a topic.
-  if ! grep -Fq "Topic 'openbkn.audit.v1' does not exist as expected" "$details" ||
+  if ! grep -Eq "Topic '(openbkn[.]audit[.]v1|Optional\\[openbkn[.]audit[.]v1\\])' does not exist as expected" "$details" ||
      grep -Eiq 'AuthenticationException|AuthorizationException|TimeoutException' "$details"; then
     echo 'Audit topic describe failed; check connectivity/authentication/permissions.' >&2
     exit 1
