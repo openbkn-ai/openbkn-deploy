@@ -58,6 +58,7 @@ done
 if [[ " $* " == *" --describe "* ]]; then
   case "$TASK_STATE" in
     missing) echo "Error: java.lang.IllegalArgumentException: Topic 'openbkn.audit.v1' does not exist as expected"; exit 1 ;;
+    missing_optional) echo "Error: java.lang.IllegalArgumentException: Topic 'Optional[openbkn.audit.v1]' does not exist as expected"; exit 1 ;;
     auth) echo 'SaslAuthenticationException: private auth failure'; exit 1 ;;
     denied) echo 'TopicAuthorizationException'; exit 1 ;;
     timeout) echo 'TimeoutException'; exit 1 ;;
@@ -94,10 +95,12 @@ echo "message.timestamp.type=$TASK_TIMESTAMP sensitive=false synonyms={DEFAULT_C
         self.assertNotIn("--delete", calls)
 
     def test_missing_topic_created_with_append_time(self):
-        result, calls, _ = self.run_admin(state="missing")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--create --if-not-exists --topic openbkn.audit.v1", calls)
-        self.assertIn("message.timestamp.type=LogAppendTime", calls)
+        for state in ("missing", "missing_optional"):
+            with self.subTest(state=state):
+                result, calls, _ = self.run_admin(state=state)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("--create --if-not-exists --topic openbkn.audit.v1", calls)
+                self.assertIn("message.timestamp.type=LogAppendTime", calls)
 
     def test_auth_permission_timeout_and_unknown_errors_do_not_create(self):
         for state in ("auth", "denied", "timeout", "unknown"):
