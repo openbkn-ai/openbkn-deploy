@@ -1533,6 +1533,24 @@ _openbkn_release_extra_sets() {
             CORE_RELEASE_EXTRA_SETS+=("namespace=${namespace}")
         fi
     elif [[ "${release_name}" == "bkn-sample-studio" ]]; then
+        # Use the product MariaDB distribution for the shared sample server,
+        # preserving offline registry selection instead of pulling a new source.
+        local sample_database_image sample_database_registry
+        sample_database_image="${MARIADB_IMAGE:-}"
+        if [[ -z "${sample_database_image}" ]]; then
+            sample_database_registry="$(resolve_openbkn_image_registry "${MARIADB_IMAGE_REGISTRY:-}")"
+            sample_database_image="$(compose_image_ref "${sample_database_registry}" "${MARIADB_IMAGE_REPOSITORY:-mariadb}" "${MARIADB_IMAGE_TAG}")"
+        fi
+        if [[ "${sample_database_image}" == *@sha256:* ]]; then
+            CORE_RELEASE_EXTRA_SET_STRINGS+=("sampleDatabase.image.repository=${sample_database_image%@*}")
+            CORE_RELEASE_EXTRA_SET_STRINGS+=("sampleDatabase.image.digest=${sample_database_image##*@}")
+        else
+            CORE_RELEASE_EXTRA_SET_STRINGS+=("sampleDatabase.image.repository=${sample_database_image%:*}")
+            CORE_RELEASE_EXTRA_SET_STRINGS+=("sampleDatabase.image.tag=${sample_database_image##*:}")
+        fi
+        if [[ -n "${MARIADB_STORAGE_CLASS:-}" ]]; then
+            CORE_RELEASE_EXTRA_SET_STRINGS+=("sampleDatabase.persistence.storageClass=${MARIADB_STORAGE_CLASS}")
+        fi
         # Public accessAddress may use a private CA. Samples use the existing
         # internal HTTP Ingress; explicit operator --set overrides still win.
         CORE_RELEASE_EXTRA_SET_STRINGS+=("baseURL=$(_openbkn_sample_gateway_base_url)")

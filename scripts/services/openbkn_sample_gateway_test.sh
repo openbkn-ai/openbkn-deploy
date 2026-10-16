@@ -6,9 +6,10 @@ log_warn() { :; }
 get_access_address_base_url() { printf '%s' 'https://untrusted-public.example'; }
 source "${SCRIPT_DIR}/scripts/services/openbkn.sh"
 CORE_SET_VALUES=()
+MARIADB_IMAGE=registry.example/mariadb:11.4.7
 expected='http://ingress-nginx-controller.ingress-nginx.svc.cluster.local'
 _openbkn_release_extra_sets bkn-sample-studio openbkn
-[[ "${CORE_RELEASE_EXTRA_SET_STRINGS[*]}" == "baseURL=${expected}" ]]
+[[ " ${CORE_RELEASE_EXTRA_SET_STRINGS[*]} " == *" baseURL=${expected} "* ]]
 should_skip_upgrade_same_chart_version() { return 0; }
 HELM_EXIT=0
 helm() { [[ "${HELM_EXIT}" == 0 ]] || return "${HELM_EXIT}"; printf '%s' "${HELM_VALUES}"; }
@@ -22,7 +23,7 @@ HELM_VALUES="{\"baseURL\":\"${expected}\"}"
 _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0
 CORE_SET_VALUES=('baseURL=http://operator-custom.example')
 _openbkn_release_extra_sets bkn-sample-studio openbkn
-[[ "${CORE_RELEASE_EXTRA_SET_STRINGS[*]}" == 'baseURL=http://operator-custom.example' ]]
+[[ " ${CORE_RELEASE_EXTRA_SET_STRINGS[*]} " == *' baseURL=http://operator-custom.example '* ]]
 HELM_VALUES='{"baseURL":"http://operator-custom.example"}'
 _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0
 HELM_VALUES='{"baseURL":"http://ingress-nginx-controller.ingress-nginx.svc.cluster.local"}'
