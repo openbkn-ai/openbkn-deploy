@@ -28,6 +28,28 @@ HELM_VALUES='{"baseURL":"http://operator-custom.example"}'
 _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0
 HELM_VALUES='{"baseURL":"http://ingress-nginx-controller.ingress-nginx.svc.cluster.local"}'
 if _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0; then exit 1; fi
+# Valid combined --set forms must compare with the effective scalar URL.
+for combined in 'baseURL=http://operator-custom.example,replicaCount=1' 'replicaCount=1,baseURL=http://operator-custom.example' 'labels={one,two},baseURL=http://operator-custom.example' 'baseURL=http://old.example,baseURL=http://operator-custom.example'; do
+    CORE_SET_VALUES=("${combined}")
+    _openbkn_release_extra_sets bkn-sample-studio openbkn
+    [[ "${CORE_RELEASE_EXTRA_SET_STRINGS[*]}" == 'baseURL=http://operator-custom.example' ]]
+    HELM_VALUES='{"baseURL":"http://operator-custom.example"}'
+    _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0
+done
+for scalar in 'http://operator-custom.example/path}' 'http://operator-custom.example/path{' 'http://operator-custom.example/?q={abc' 'http://operator-custom.example/?q={abc}'; do
+    CORE_SET_VALUES=("baseURL=${scalar},replicaCount=1")
+    _openbkn_release_extra_sets bkn-sample-studio openbkn
+    [[ "${CORE_RELEASE_EXTRA_SET_STRINGS[*]}" == "baseURL=${scalar}" ]]
+    HELM_VALUES="{\"baseURL\":\"${scalar}\"}"
+    _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0
+done
+CORE_SET_VALUES=('baseURL=http://operator-custom.example/path\,part,replicaCount=1')
+_openbkn_release_extra_sets bkn-sample-studio openbkn
+[[ "${CORE_RELEASE_EXTRA_SET_STRINGS[*]}" == 'baseURL=http://operator-custom.example/path\,part' ]]
+HELM_VALUES='{"baseURL":"http://operator-custom.example/path,part"}'
+_openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0
+CORE_SET_VALUES=('baseURL=http://old.example' 'replicaCount=1,baseURL=http://operator-custom.example')
+[[ "$(_openbkn_sample_gateway_base_url)" == 'http://operator-custom.example' ]]
 CORE_SET_VALUES=()
 for invalid in 'not-json' '[]'; do
     HELM_VALUES="${invalid}"

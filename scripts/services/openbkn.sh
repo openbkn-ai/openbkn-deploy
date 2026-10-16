@@ -1499,10 +1499,36 @@ except (ValueError, AttributeError, TypeError):
 }
 
 _openbkn_sample_gateway_base_url() {
-    if _openbkn_last_set_value baseURL "${CORE_SET_VALUES[@]-}"; then
-        return 0
-    fi
-    printf '%s' 'http://ingress-nginx-controller.ingress-nginx.svc.cluster.local'
+    # Helm --set accepts multiple assignments, escaped commas and list values.
+    # Only extract the top-level scalar gateway; leave other profiles unchanged.
+    python3 - "${CORE_SET_VALUES[@]-}" <<'PY_GATEWAY'
+import sys
+value = "http://ingress-nginx-controller.ingress-nginx.svc.cluster.local"
+for argument in sys.argv[1:]:
+    fields, field, escaped, depth = [], [], False, 0
+    for character in argument:
+        if escaped:
+            field.append(character)
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == "," and depth == 0:
+            fields.append("".join(field))
+            field = []
+        else:
+            # Helm starts a list only when the value begins with an opening brace.
+            if character == "{" and "=" in field and field.index("=") == len(field) - 1:
+                depth = 1
+            elif character == "}" and depth:
+                depth = 0
+            field.append(character)
+    fields.append("".join(field))
+    for assignment in fields:
+        key, separator, candidate = assignment.partition("=")
+        if separator and key == "baseURL":
+            value = candidate
+print(value)
+PY_GATEWAY
 }
 
 _openbkn_release_extra_sets() {
@@ -1553,7 +1579,12 @@ _openbkn_release_extra_sets() {
         fi
         # Public accessAddress may use a private CA. Samples use the existing
         # internal HTTP Ingress; explicit operator --set overrides still win.
-        CORE_RELEASE_EXTRA_SET_STRINGS+=("baseURL=$(_openbkn_sample_gateway_base_url)")
+        local sample_gateway
+        sample_gateway="$(_openbkn_sample_gateway_base_url)"
+        # Preserve scalar URL punctuation when passing it through Helm strvals again.
+        sample_gateway="${sample_gateway//\\/\\\\}"
+        sample_gateway="${sample_gateway//,/\\,}"
+        CORE_RELEASE_EXTRA_SET_STRINGS+=("baseURL=${sample_gateway}")
     elif [[ "${release_name}" == "bkn-safe" ]]; then
         _openbkn_safe_audit_profile_sets "${namespace}"
         local initial_pwd
