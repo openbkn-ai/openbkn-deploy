@@ -1,10 +1,10 @@
 name: Sample gateway contract
 on:
   pull_request:
-    paths: ['scripts/services/openbkn.sh', 'scripts/services/openbkn_sample_gateway_test.sh', '.github/workflows/ci-sample-gateway.yml']
+    paths: ['scripts/services/openbkn.sh', 'scripts/services/openbkn_sample_gateway_test.sh', 'scripts/services/openbkn_sample_database_test.sh', '.github/workflows/ci-sample-gateway.yml']
   push:
     branches: [main, release/0.2.0]
-    paths: ['scripts/services/openbkn.sh', 'scripts/services/openbkn_sample_gateway_test.sh', '.github/workflows/ci-sample-gateway.yml']
+    paths: ['scripts/services/openbkn.sh', 'scripts/services/openbkn_sample_gateway_test.sh', 'scripts/services/openbkn_sample_database_test.sh', '.github/workflows/ci-sample-gateway.yml']
 permissions:
   contents: read
 jobs:
@@ -12,5 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: bash -n scripts/services/openbkn.sh scripts/services/openbkn_sample_gateway_test.sh
+      - run: bash -n scripts/services/openbkn.sh scripts/services/openbkn_sample_gateway_test.sh scripts/services/openbkn_sample_database_test.sh
       - run: bash scripts/services/openbkn_sample_gateway_test.sh
+      - run: bash scripts/services/openbkn_sample_database_test.sh
