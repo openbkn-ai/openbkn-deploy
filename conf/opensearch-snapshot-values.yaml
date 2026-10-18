@@ -1,0 +1,18 @@
+# One-time setup for the bundled single-node HTTP OpenSearch deployment.
+# Review existing config/volumes and merge before applying. See BACKUP.zh.md.
+config:
+  opensearch.yml: |
+    cluster.name: opensearch-cluster
+    network.host: 0.0.0.0
+    plugins.security.disabled: true
+    path.repo: ["/usr/share/opensearch/snapshots"]
+
+extraVolumes:
+  - name: snapshot-repo
+    hostPath:
+      path: /mnt/openbkn-snapshots
+      type: Directory
+
+extraVolumeMounts:
+  - name: snapshot-repo
+    mountPath: /usr/share/opensearch/snapshots

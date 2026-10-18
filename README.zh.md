@@ -6,6 +6,8 @@
 
 本仓库提供脚本安装 OpenBKN 及其依赖，包括 Kubernetes、基础设施服务和数据服务。
 
+MariaDB 与 OpenSearch 的单文件备份、跨环境恢复及首次快照目录配置，见 [备份恢复操作说明](BACKUP.zh.md)。命令入口为 `deploy.sh backup check|run` 和 `deploy.sh restore check|run`。
+
 **平台说明：** **Linux** 是推荐且文档最完整的目标环境（`preflight.sh`、k3s/kubeadm、数据服务等）。**macOS** 仅作**本机开发/验证**可选方案（Docker + kind + `dev/mac.sh`），详见 **[Mac 安装（开发向）](dev/README.zh.md)**（[English](dev/README.md)），**不能**替代 Linux 上的生产安装。
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE.txt)
