@@ -28,6 +28,32 @@ def stop(process):
             process.wait()
 
 
+def memory_credentials(work, password, stack):
+    """Exercise Java's Secret-file reader without persisting a password to disk.
+
+    Integration runs on Linux (including the Ubuntu CI runner). Java inherits
+    only this descriptor; opening the symlink gives each client its own reader.
+    """
+    if not hasattr(os, 'memfd_create'):
+        raise RuntimeError('SASL integration requires Linux memfd_create and /proc/self/fd')
+    descriptor = os.memfd_create('openbkn-kafka-test', os.MFD_CLOEXEC)
+    stack.callback(os.close, descriptor)
+    os.fchmod(descriptor, 0o600)
+    payload = password.encode()
+    if os.write(descriptor, payload) != len(payload):
+        raise OSError('Incomplete in-memory test credential write')
+    directory = work / 'credentials'
+    directory.mkdir(mode=0o700)
+    (directory / 'password').symlink_to('/proc/self/fd/%d' % descriptor)
+    return directory, descriptor
+
+
+def sasl_jaas(password):
+    escaped = password.replace('\\', '\\\\').replace('"', '\\"')
+    return ('org.apache.kafka.common.security.plain.PlainLoginModule required '
+            'username="kafkauser" password="%s" user_kafkauser="%s";' % (escaped, escaped))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--java', default='java')
@@ -43,6 +69,16 @@ def main():
             ports.add(free_port())
         source, source_controller, target, target_controller = sorted(ports)
         password = 'test"password\\with-escape'
+        environment = dict(os.environ, TASK_KAFKA_PROTOCOL='SASL_PLAINTEXT' if args.sasl else 'PLAINTEXT',
+                           TASK_KAFKA_USER='kafkauser', TASK_KAFKA_MECHANISM='PLAIN', TASK_KAFKA_REPLICAS='1',
+                           TASK_KAFKA_LEDGER_RESTORED='true', KAFKA_BACKUP_DISPOSABLE_TEST='yes')
+        inherited = ()
+        credential_option = []
+        if args.sasl:
+            directory, descriptor = memory_credentials(work, password, stack)
+            inherited = (descriptor,)
+            credential_option = ['-Dopenbkn.kafka.credentials=' + str(directory)]
+            environment['KAFKA_TEST_JAAS'] = sasl_jaas(password)
         for node, port, controller in [(1, source, source_controller), (2, target, target_controller)]:
             props = work / ('broker-%d.properties' % node)
             values = {
@@ -58,18 +94,18 @@ def main():
                 'num.network.threads': 2, 'num.io.threads': 2,
             }
             if args.sasl:
-                jaas = ('org.apache.kafka.common.security.plain.PlainLoginModule required '
-                        'username="kafkauser" password="${env:KAFKA_TEST_PASSWORD}" '
-                        'user_kafkauser="${env:KAFKA_TEST_PASSWORD}";')
                 values.update({'sasl.enabled.mechanisms': 'PLAIN', 'sasl.mechanism.inter.broker.protocol': 'PLAIN',
-                               'listener.name.client.plain.sasl.jaas.config': jaas})
+                               'config.providers': 'env',
+                               'config.providers.env.class': 'org.apache.kafka.common.config.provider.EnvVarConfigProvider',
+                               'config.providers.env.param.allowlist.pattern': 'KAFKA_TEST_JAAS',
+                               'listener.name.client.plain.sasl.jaas.config': '${env:KAFKA_TEST_JAAS}'})
             props.write_text('\n'.join('%s=%s' % item for item in values.items()) + '\n')
             cluster = base64.urlsafe_b64encode(uuid.uuid4().bytes).decode().rstrip('=')
             subprocess.run([args.java, '-Xmx128m', '-cp', libs, 'kafka.tools.StorageTool', 'format',
-                            '-t', cluster, '-c', str(props)], check=True, capture_output=True)
+                            '-t', cluster, '-c', str(props)], check=True, capture_output=True, env=environment)
             log = stack.enter_context(open(work / ('broker-%d.log' % node), 'w+'))
             process = subprocess.Popen([args.java, '-Xms64m', '-Xmx256m', '-cp', libs, 'kafka.Kafka', str(props)],
-                                       stdout=log, stderr=log)
+                                       stdout=log, stderr=log, env=environment)
             stack.callback(stop, process)
             deadline = time.monotonic() + 60
             while time.monotonic() < deadline and process.poll() is None:
@@ -82,15 +118,10 @@ def main():
                 log.flush()
                 raise RuntimeError('Disposable broker failed: ' + Path(log.name).read_text()[-8000:])
         jars = root / 'tools/kafka-backup'
-        environment = dict(os.environ, TASK_KAFKA_PROTOCOL='SASL_PLAINTEXT' if args.sasl else 'PLAINTEXT',
-                           TASK_KAFKA_USER='kafkauser', TASK_KAFKA_MECHANISM='PLAIN', TASK_KAFKA_REPLICAS='1',
-                           TASK_KAFKA_LEDGER_RESTORED='true',
-                           KAFKA_BACKUP_DISPOSABLE_TEST='yes',
-                           KAFKA_TEST_PASSWORD=password)
-        command = [args.java, '-Xmx256m', '-Djava.io.tmpdir=' + str(work),
+        command = [args.java, '-Xmx256m', '-Djava.io.tmpdir=' + str(work), *credential_option,
                    '-cp', '%s:%s:%s' % (jars / 'kafka-backup.jar', jars / 'kafka-backup-tests.jar', libs),
                    'KafkaBackupSmoke', '127.0.0.1:%d' % source, '127.0.0.1:%d' % target, str(work / 'smoke')]
-        subprocess.run(command, env=environment, check=True, timeout=240)
+        subprocess.run(command, env=environment, pass_fds=inherited, check=True, timeout=240)
         # Independently validate Java exports using the portable host archive reader.
         import tarfile
         from kafka_worker import inventory

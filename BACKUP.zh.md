@@ -459,7 +459,7 @@ make ci
 python3 scripts/kafka_backup_integration.py --kafka-home /path/to/kafka --java /path/to/java
 ```
 
-加 `--sasl` 可验证默认部署使用的 SASL/PLAIN 及密码转义。演练同时使用 Zstd 压缩消息；工具将 Java 临时目录指向可写的 `/work`，使压缩库在只读容器文件系统中也能加载。
+加 `--sasl` 可验证默认部署使用的 SASL/PLAIN 及密码转义。该隔离测试的 SASL 模式要求 Linux（含 Ubuntu CI），使用 memfd 和 `/proc/self/fd` 向 Java 提供内存中的凭证文件，不把测试密码写入磁盘配置；Broker 通过显式配置的环境变量提供器读取 JAAS。演练同时使用 Zstd 压缩消息；工具将 Java 临时目录指向可写的 `/work`，使压缩库在只读容器文件系统中也能加载。
 
 或复用原生 Kafka 镜像运行隔离 Docker Compose 测试，无需构建备份镜像：
 
