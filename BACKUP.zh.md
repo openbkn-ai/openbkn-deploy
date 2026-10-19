@@ -1,10 +1,25 @@
-# MariaDB + OpenSearch + Redis + MinIO 备份恢复
+# OpenBKN 数据备份恢复与 Kubernetes 配置留档
 
-默认备份 MariaDB 业务库、OpenSearch 索引、Redis 全部 DB 和 MinIO 业务 bucket 的当前对象。Kafka 可通过 `kafka backup/restore` 单独操作，或在完整备份时使用 `--include-kafka` 加入，详见本文 Kafka 一节。目标是在另一台已经部署好相同版本 OpenBKN 的环境中恢复数据。Hydra PostgreSQL、Kubernetes/Helm 配置、用户权限和应用密钥不在包内；该包不是完整环境的灾备副本。
+默认备份五个数据组件及 Kubernetes 配置留档：MariaDB 业务库、OpenSearch 索引、Redis 全部 DB、MinIO 业务 bucket 的当前对象和 Kafka 保留的已提交消息，以及 K8s 配置参考文件。可用 `--components` 选择一个或多个组件，详见下文。目标是在另一台已经部署好相同版本 OpenBKN 的环境中恢复数据。Hydra PostgreSQL、Kubernetes/Helm 配置、用户权限和应用密钥不在包内；该包不是完整环境的灾备副本。
 
 ## 按组件检查、备份和恢复
 
-支持 `mariadb`、`opensearch`、`redis`、`minio` 四个组件。单组件命令只发现、连接和检查选中的存储；不要求其他存储存在或正常运行。命令格式：
+```bash
+# 默认全部五个数据组件及 K8s 配置留档，生成一个备份包
+bash deploy.sh backup run --output-dir /var/backups/openbkn
+
+# 指定一个或多个；只检查、连接所选组件，生成一个备份包
+bash deploy.sh backup check --components mariadb opensearch
+bash deploy.sh backup run --components mariadb opensearch redis --output-dir /var/backups/openbkn
+
+# 从包中恢复多个组件；不指定 --components 则恢复包内全部组件
+bash deploy.sh restore check <备份包> --components mariadb opensearch
+bash deploy.sh restore run <备份包> --components mariadb opensearch --writers-stopped --overwrite
+```
+
+组件名称空格分隔，不能重复；不支持的名称、与单组件入口混用、与 `--skip-redis/--skip-minio` 或 `--include-kafka` 混用均报错。恢复选择的组件必须存在于包内，否则在连接集群前拒绝。执行顺序由工具固定，不受参数排列顺序影响；Kafka 消费组、空分区及账本确认等保护保持生效。
+
+支持 `mariadb`、`opensearch`、`redis`、`minio`、`kafka` 五个数据组件，以及仅支持备份的 `k8s`。单组件命令只发现、连接和检查选中的存储；不要求其他存储存在或正常运行。命令格式：
 
 ```bash
 bash deploy.sh mariadb backup check
@@ -27,7 +42,7 @@ bash deploy.sh minio restore run /var/backups/openbkn/openbkn-<时间>-<后缀>.
 
 单组件恢复先校验包的整体文件列表及路径安全，再只解包、校验选中组件的文件、清单和版本；不检查其他组件的 payload 校验和或内容。gzip 文件必须能正常读取；若压缩文件本身损坏，即使只恢复某组件也可能无法解包。包中不存在指定组件时，在连接 Kubernetes 前报错。
 
-旧命令保持兼容：`bash deploy.sh backup check|run` 默认处理原有四组件，Kafka 需加 `--include-kafka`；`bash deploy.sh restore check|run <包>` 恢复该包声明的全部组件，包括只有一个组件的包。`--skip-redis`、`--skip-minio` 仅供完整备份排除组件；恢复或单组件命令不接受这些开关。Python 入口也支持 `python3 scripts/backup.py restore run <包> --component minio ...`。
+**默认范围变更：**`bash deploy.sh backup check|run` 现在包含五个数据组件（含 Kafka）及 K8s 配置留档，任何选中组件检查失败都会中止，不会静默跳过。原 `--include-kafka` 保留为兼容参数，已无需指定；`bash deploy.sh restore check|run <包>` 恢复该包声明的数据组件，自动跳过 K8s 配置留档；仅含 K8s 的包会提示没有可自动恢复的数据。`--skip-redis`、`--skip-minio` 仅供完整备份排除组件；恢复或显式选择组件时不接受这些开关。Python 入口也支持 `python3 scripts/backup.py restore run <包> --component minio ...`。
 
 新备份统一写入 `format: 4`，使用 `components` 明确声明内容；v1/v2/v3 包仍支持完整或单组件恢复。旧脚本不能恢复 v4 包，目标机需要同步新版脚本。单组件文件名为 `openbkn-<组件>-<时间>-<后缀>.tar.gz`，包内只有清单和相应数据文件：
 
@@ -37,7 +52,8 @@ bash deploy.sh minio restore run /var/backups/openbkn/openbkn-<时间>-<后缀>.
 | OpenSearch | `repository.tar` | `snapshot`、`indices`、`opensearch_version` |
 | Redis | `redis.rdb` | `redis` |
 | MinIO | `minio.tar` | `minio` |
-| Kafka（显式启用） | `kafka.tar` | `kafka`（Topic、分区边界、消息校验和、消费位置） |
+| Kafka | `kafka.tar` | `kafka`（Topic、分区边界、消息校验和、消费位置） |
+| K8s（仅留档） | `k8s.tar` | `k8s`（命名空间、Secret 显式清单、不支持自动恢复） |
 
 例如只备份 MinIO 的清单核心字段：
 
@@ -50,15 +66,82 @@ bash deploy.sh minio restore run /var/backups/openbkn/openbkn-<时间>-<后缀>.
 }
 ```
 
-完整备份顺序为 MariaDB、OpenSearch、Redis、MinIO、Kafka（显式启用时）；完整恢复顺序为 OpenSearch、MariaDB、Redis、MinIO、Kafka，均只执行包内选中的组件。某一步失败时不会回滚其他已恢复组件。保持相关业务停写，修正问题后，用同一完整包执行失败组件的恢复命令；Kafka 已部分导入时需先按其失败处理说明准备空 Topic。不同时间或不同环境的单组件包可能存在业务关联不一致，例如数据库文件记录与 MinIO 对象不匹配；单组件重试建议使用原来那一次完整备份包。
+完整备份顺序为 MariaDB、OpenSearch、Redis、MinIO、Kafka、K8s 配置留档；完整恢复顺序为 OpenSearch、MariaDB、Redis、MinIO、Kafka，均只执行包内选中的组件。某一步失败时不会回滚其他已恢复组件。保持相关业务停写，修正问题后，用同一完整包执行失败组件的恢复命令；Kafka 已部分导入时需先按其失败处理说明准备空 Topic。不同时间或不同环境的单组件包可能存在业务关联不一致，例如数据库文件记录与 MinIO 对象不匹配；单组件重试建议使用原来那一次完整备份包。
+
+## Kubernetes 配置留档（只备份，不自动恢复）
+
+```bash
+bash deploy.sh k8s backup check
+bash deploy.sh k8s backup run --output-dir /var/backups/openbkn
+
+# 与数据合并为一个压缩包
+bash deploy.sh backup run --components mariadb opensearch k8s
+
+# 自定义命名空间，按需显式导出应用 Secret
+bash deploy.sh k8s backup run --k8s-namespaces openbkn resource \
+  --k8s-secrets openbkn/app-key openbkn/app-tls
+
+# 人工查看（文件可能很大，且可能含密码；仅在受控环境查看）
+tar -xzf <备份包> -C <已创建的私有目录> k8s.tar
+tar -xf <私有目录>/k8s.tar -C <已创建的恢复准备目录>
+```
+
+默认范围为 `openbkn` 和 `resource`；包含 Deployment、StatefulSet、DaemonSet、Service、Ingress、ConfigMap、CronJob、Job、HPA、NetworkPolicy、PDB、PVC、ServiceAccount、Role、RoleBinding，及所选命名空间关联的 PV 和集群 StorageClass。保存各命名空间可见 Helm release 的名称、Chart/应用版本、修订号及用户 values。它不是集群全部资源导出，不包含 CRD/自定义资源、集群级 RBAC、etcd、节点证书、kubeconfig 或 PVC 实际数据；不导出 Helm 内部 Secret 或 ServiceAccount token。缺少命名空间、权限不足或导出失败时中止，不发布成功包。
+
+Secret 默认不导出，`--k8s-secrets namespace/name` 只允许选择 `--k8s-namespaces` 范围内的应用 Secret。**即使没有选择 Secret，Helm values、ConfigMap 和工作负载环境变量仍可能包含密码。** 备份包权限为 0600，不依赖 age、不自动加密，需限制访问和传输范围。
+
+`k8s.tar` 按可供人工恢复的格式打包，而非只有一个汇总文件：
+
+```text
+manifest.json                              # 文件列表及 SHA-256
+RESTORE.zh.md                              # 人工恢复顺序、命令和边界
+inventory.json                             # 原配置参考及版本信息
+manifests/cluster/namespace/<名称>.json
+manifests/cluster/storageclass/<名称>.json
+manifests/namespaced/<命名空间>/<资源类型>/<名称>.json
+helm/<命名空间>/<release>/release.json      # Chart/应用版本、修订号
+helm/<命名空间>/<release>/values.json       # 可传给 Helm -f
+reference/persistentvolumes/<名称>.json     # 原磁盘路径、CSI 句柄，仅供存储重建参考
+reference/jobs/<命名空间>/<名称>.json        # 已执行 Job，不自动重跑
+```
+
+资源文件是标准 Kubernetes JSON，能作为 `kubectl apply -f <文件>` 的输入；JSON 也可作为 Helm values。导出清单移除旧 UID、status、ownerReferences、finalizers、普通 Service ClusterIP/NodePort、PVC volumeName 等旧集群分配字段，保留 Headless Service 的 `clusterIP: None`。存储类、节点选择器、宿主机路径、域名及外部地址仍需按新环境审核修改。PVC 清单仅能重建存储申请，不含实际数据；业务数据必须通过各组件数据包恢复。
+
+人工恢复时先创建命名空间和基础依赖，再按需恢复 Secret/ConfigMap/RBAC 等资源、安装业务，恢复数据后才启动业务及定时任务。Helm 管理的资源优先按包中的 Chart 版本和 `values.json` 重装；**本包不包含 Chart 文件和镜像，需从部署仓库或制品库准备对应版本**。不要对全部清单一次递归 apply，也不要对同一资源同时用 Helm 和清单重复恢复。未显式备份的 Secret 必须在恢复时另行准备；这不是完整集群离线灾备副本。
+
+目前只实现备份，不执行自动恢复。`restore_supported: false` 表示当前工具不提供自动恢复，并非清单不能用于人工恢复。默认恢复混合包跳过 K8s；显式 `k8s restore` 或 `--components k8s` 在访问集群前拒绝，并提示查看包内 `RESTORE.zh.md`。默认恢复五个数据组件的原有备份包仍可正常执行，不要求存在 K8s 配置。
+
+K8s 备份仅对 Kubernetes 和 Helm 执行只读命令，不创建工具 Pod，不暂停业务、不重启服务。执行机需安装 Helm，账号需读取上述资源、相关 PV/StorageClass，以及 Helm release 元数据；显式导出应用 Secret 时还需对应 Secret 的读取权限。
 
 ## 环境要求
 
 适用环境：本仓库部署的单 Pod MariaDB（业务表必须使用 InnoDB）、单节点 HTTP 无认证 OpenSearch。MariaDB 主版本必须一致，OpenSearch 主次版本必须一致；建议源端与目标端使用完全相同版本。Redis 仅支持 Redis 7、单副本 StatefulSet、无 Redis Cluster、无已连接副本、无 Module，并要求数据目录直接挂载可写 PVC；源端与目标端 Redis 版本必须完全一致。多节点、HTTPS/认证 OpenSearch、外部数据库暂不支持，不能为使用此工具关闭已有集群认证。
 
-执行机需要 Python 3.9+、kubectl 与可访问目标集群的 kubeconfig。MariaDB Pod 内需要 mariadb、mariadb-dump 及 MARIADB_ROOT_PASSWORD（或 MYSQL_ROOT_PASSWORD）环境变量；OpenSearch Pod 内需要 curl、tar、sh、mkdir、rmdir。Redis 容器需要 redis-cli、redis-server、redis-check-rdb、sha256sum 和 REDIS_PASSWORD 环境变量（默认 ACL 用户 root）。Redis CONFIG 默认重命名为 CONFIG_NEW，工具通过该命令读取持久化配置。密码直接从 Pod 环境使用，不写进备份包。MinIO 容器需要 mc、sh、mkdir、rm、cat，以及 MINIO_ROOT_USER/MINIO_ROOT_PASSWORD（也支持 MINIO_ACCESS_KEY/MINIO_SECRET_KEY 或 root 凭证的 *_FILE 环境变量）。执行机不依赖 age、mc、jq、yq 或数据库客户端。
+执行机需要 Python 3.9+、kubectl 与可访问目标集群的 kubeconfig。MariaDB Pod 内需要 mariadb、mariadb-dump 及 MARIADB_ROOT_PASSWORD（或 MYSQL_ROOT_PASSWORD）环境变量；OpenSearch Pod 内需要 curl、tar、sh、mkdir、rmdir。Redis 容器需要 redis-cli、redis-server、redis-check-rdb、sha256sum 和 REDIS_PASSWORD 环境变量（默认 ACL 用户 root）。Redis CONFIG 默认重命名为 CONFIG_NEW，工具通过该命令读取持久化配置。数据组件认证密码直接从 Pod 环境使用，不主动写进数据 payload；K8s 配置留档可能包含部署密码，见上文。MinIO 容器需要 mc、sh、mkdir、rm、cat，以及 MINIO_ROOT_USER/MINIO_ROOT_PASSWORD（也支持 MINIO_ACCESS_KEY/MINIO_SECRET_KEY 或 root 凭证的 *_FILE 环境变量）。执行机不依赖 age、mc、jq、yq 或数据库客户端。
 
 ## 一次性配置 OpenSearch 快照目录
+
+新版 `bash deploy.sh opensearch install` 在**新安装**时默认配置快照目录和 `path.repo`。init 容器复用部署的 BusyBox 镜像，通过 `DirectoryOrCreate` 在 Pod 所在节点创建目录，并按 OpenSearch Helm values 中的 UID/GID 设置权限（默认 1000:1000、目录权限 700）。无需在执行部署命令的机器上手动建目录。
+
+```bash
+# 新安装，默认宿主机目录 /mnt/openbkn-snapshots
+bash deploy.sh opensearch install
+
+# 新安装时指定专用目录
+OPENSEARCH_SNAPSHOT_HOST_PATH=/backup/opensearch bash deploy.sh opensearch install
+
+# 新安装时不启用快照目录
+OPENSEARCH_SNAPSHOT_ENABLED=false bash deploy.sh opensearch install
+
+# 已有环境显式启用；会触发滚动更新，应安排维护窗口
+bash deploy.sh opensearch enable-snapshots
+```
+
+`enable-snapshots` 读取现有 Helm values，保留安全设置、自定义配置及其他挂载，只合并快照相关配置。它要求匹配的本地 Chart；再次运行沿用同一目录，不清理快照文件。已有 `snapshot-repo` 指向其他存储、容器挂载冲突或无法安全合并自定义 `path.repo` 时会拒绝，需人工合并；不会自动迁移快照目录。现有环境运行 `install` 保持原升级策略，不会隐式启用快照。
+
+宿主机目录仍是节点本地存储，不等于异地备份。独立存储须预先挂载到该节点的目录并确认 `findmnt -T <目录>`；多节点环境须使用共享仓库。init 容器需要以 root 设置该目录权限，禁止 root init 容器的环境需按下面步骤手动准备目录和挂载。
+
+### 手动配置（兼容已有环境）
 
 你前面确定的目录关系为：宿主机 `/mnt/openbkn-snapshots` → 容器 `/usr/share/opensearch/snapshots`。`path.repo` 必须允许这个容器路径。
 
@@ -285,8 +368,8 @@ bash deploy.sh kafka backup run --output-dir /var/backups/openbkn
 bash deploy.sh kafka backup run --output-dir /var/backups/openbkn \
   --kafka-topics tenant_a.dip.model_manager.quota_data
 
-# 原有四组件完整备份显式加入 Kafka。
-bash deploy.sh backup run --include-kafka --output-dir /var/backups/openbkn
+# 默认备份五个数据组件及 K8s 配置留档。
+bash deploy.sh backup run --output-dir /var/backups/openbkn
 
 # 向已经部署好的 Kafka 恢复；也可从完整包只恢复 Kafka。
 bash deploy.sh kafka restore check /var/backups/openbkn/<备份包>.tar.gz

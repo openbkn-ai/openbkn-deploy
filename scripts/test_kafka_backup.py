@@ -292,7 +292,7 @@ class KafkaTests(unittest.TestCase):
 
     def test_default_scope_and_include_flag(self):
         args = backup.parser().parse_args(['backup', 'run'])
-        self.assertNotIn('kafka', backup.configured_components(args))
+        self.assertEqual(list(backup.PAYLOADS), backup.configured_components(args))
         args.include_kafka = True
         self.assertIn('kafka', backup.configured_components(args))
 

@@ -40,10 +40,11 @@ usage() {
     echo "Usage: $0 <module> [action]"
     echo ""
     echo "Modules and Actions:"
-    echo "  backup check|run [options]    Back up MariaDB + OpenSearch + Redis + MinIO (add --include-kafka for Kafka)"
-    echo "  restore check|run <archive> [options]  Validate/restore a backup (see BACKUP.zh.md)"
-    echo "  <mariadb|opensearch|redis|minio|kafka> backup check|run [options]  Back up one component"
+    echo "  backup check|run [options]    Back up all data components + K8s config; use --components <name> [name ...] to select"
+    echo "  restore check|run <archive> [options]  Validate/restore archive components; optionally select with --components"
+    echo "  <mariadb|opensearch|redis|minio|kafka|k8s> backup check|run [options]  Back up one component"
     echo "  <mariadb|opensearch|redis|minio|kafka> restore check|run <archive> [options]  Restore one component"
+    echo "  k8s backup check|run          Export Kubernetes reference configuration (no automatic restore)"
     echo "  k8s install                   Initialize K8s master node with CNI and DNS"
     echo "  k8s reset                     Reset Kubernetes cluster state (kubeadm reset -f + cleanup)"
     echo "  k8s status                    Show cluster status"
@@ -61,6 +62,7 @@ usage() {
     echo "  data-services install         Install MariaDB, Redis, Kafka, OpenSearch (cluster must exist)"
     echo "  data-services uninstall       Uninstall those bundles (ingress only if AUTO_INSTALL_INGRESS_NGINX=true)"
     echo "  opensearch install            Install single-node OpenSearch"
+    echo "  opensearch enable-snapshots    Configure snapshot storage for an existing release (may restart)"
     echo "  opensearch set-memory <size> Set JVM heap; request is calculated automatically (1Gi|2Gi|4Gi|8Gi|16Gi)"
     echo "  opensearch uninstall          Uninstall OpenSearch (optionally purge PVC)"
     echo "  ingress-nginx install         Install ingress-nginx-controller"
@@ -509,7 +511,7 @@ main() {
         return $?
     fi
 
-    if [[ "${module}" =~ ^(mariadb|opensearch|redis|minio|kafka)$ ]] && [[ "${action}" == "backup" || "${action}" == "restore" ]]; then
+    if [[ "${module}" =~ ^(mariadb|opensearch|redis|minio|kafka|k8s)$ ]] && [[ "${action}" == "backup" || "${action}" == "restore" ]]; then
         local backup_action="${1:-}"
         shift 1 2>/dev/null || true
         python3 "${SCRIPT_DIR}/scripts/backup.py" "${action}" "${backup_action}" "$@" --component "${module}"
@@ -753,6 +755,10 @@ main() {
             install|init)
                 require_root_for_helm_cluster_addons_only
                 install_opensearch
+                ;;
+            enable-snapshots)
+                require_root_for_helm_cluster_addons_only
+                enable_opensearch_snapshots "$@"
                 ;;
             set-memory)
                 require_root_for_helm_cluster_addons_only

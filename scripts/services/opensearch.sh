@@ -201,6 +201,42 @@ _opensearch_upgrade_legacy_image() {
     fi
 }
 
+# Explicit opt-in for existing releases: read and merge their effective values.
+enable_opensearch_snapshots() {
+    if [[ "$#" -ne 0 ]]; then
+        log_error "Usage: OPENSEARCH_SNAPSHOT_HOST_PATH=/mnt/openbkn-snapshots deploy.sh opensearch enable-snapshots"
+        return 2
+    fi
+    if ! is_helm_installed "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}"; then
+        log_error "OpenSearch is not installed; run deploy.sh opensearch install."
+        return 1
+    fi
+    _opensearch_resolve_image_defaults
+    local chart_ref="${OPENSEARCH_CHART_TGZ}"
+    if [[ ! -f "${chart_ref}" ]]; then
+        log_error "Snapshot setup requires the matching local chart: ${chart_ref}"
+        return 1
+    fi
+    local values_file input_file
+    values_file="$(mktemp)"; input_file="$(mktemp)"
+    if ! helm get values "${OPENSEARCH_RELEASE_NAME}" -n "${OPENSEARCH_NAMESPACE}" --all -o json > "${input_file}"; then
+        rm -f "${input_file}" "${values_file}"
+        return 1
+    fi
+    if ! python3 "${SCRIPT_DIR}/scripts/lib/opensearch_snapshot.py" \
+        --host-path "${OPENSEARCH_SNAPSHOT_HOST_PATH}" --init-image "${OPENSEARCH_INIT_IMAGE}" \
+        < "${input_file}" > "${values_file}"; then
+        rm -f "${input_file}" "${values_file}"
+        return 1
+    fi
+    log_warn "Enabling snapshot storage ${OPENSEARCH_SNAPSHOT_HOST_PATH}; OpenSearch may restart."
+    local ec=0
+    helm upgrade "${OPENSEARCH_RELEASE_NAME}" "${chart_ref}" -n "${OPENSEARCH_NAMESPACE}" \
+        --reuse-values -f "${values_file}" --wait --timeout=900s || ec=$?
+    rm -f "${input_file}" "${values_file}"
+    return "${ec}"
+}
+
 install_opensearch() {
     log_info "Installing OpenSearch via Helm..."
 
@@ -332,6 +368,12 @@ plugins.security.disabled: true
 EOF
     fi
 
+    # Preserve the original OpenSearch configuration during limit reconciliation,
+    # including any snapshot path, TLS and custom settings enabled earlier.
+    if [[ "${fresh_install}" != "true" ]]; then
+        python3 -c 'import json,sys; v=json.loads(sys.argv[1]); old=v.get("config",{}).get("opensearch.yml"); p=sys.argv[2]; text=old if isinstance(old,str) and old.strip() else open(p).read(); open(p,"w").write(text)' "${existing_values}" "${tmp_os_yml}"
+    fi
+
     local -a helm_args
     helm_args=(
         upgrade --install "${OPENSEARCH_RELEASE_NAME}" "${chart_ref}"
@@ -383,6 +425,20 @@ EOF
     if [[ -n "${OPENSEARCH_MEMORY_REQUEST}" ]]; then
         helm_args+=(--set resources.requests.memory="${OPENSEARCH_MEMORY_REQUEST}")
     fi
+    local snapshot_values=""
+    if [[ "${fresh_install}" == "true" && "${OPENSEARCH_SNAPSHOT_ENABLED}" == "true" ]]; then
+        snapshot_values="$(mktemp)"
+        if ! python3 -c 'import json,sys; print(json.dumps({"config":{"opensearch.yml":open(sys.argv[1]).read()}}))' "${tmp_os_yml}" \
+            | python3 "${SCRIPT_DIR}/scripts/lib/opensearch_snapshot.py" \
+                --host-path "${OPENSEARCH_SNAPSHOT_HOST_PATH}" --init-image "${OPENSEARCH_INIT_IMAGE}" > "${snapshot_values}"; then
+            rm -f "${tmp_os_yml}" "${snapshot_values}"
+            return 1
+        fi
+        # --set-file has precedence over values files: use the merged config too.
+        python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["config"]["opensearch.yml"],end="")' "${snapshot_values}" > "${tmp_os_yml}"
+        helm_args+=(-f "${snapshot_values}")
+        log_info "Snapshot storage enabled: ${OPENSEARCH_SNAPSHOT_HOST_PATH} -> /usr/share/opensearch/snapshots (node-local)."
+    fi
     bkn_helm_uninstall_if_not_deployed "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}"
 
     local helm_ec=0
@@ -391,7 +447,7 @@ EOF
     else
         bkn_helm_upgrade_without_resource_limits "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}" "${helm_args[@]}" || helm_ec=$?
     fi
-    rm -f "${tmp_os_yml}" 2>/dev/null || true
+    rm -f "${tmp_os_yml}" "${snapshot_values}" 2>/dev/null || true
     if [[ "${helm_ec}" -ne 0 ]]; then
         log_error "OpenSearch Helm install/upgrade failed (exit ${helm_ec})."
         return 1

@@ -37,6 +37,10 @@ class ComponentTests(unittest.TestCase):
                 path.write_bytes(b'REDIS-test')
                 return {'version': '7.4.6', 'snapshot_time': 1792372153}
             cluster.redis.backup.side_effect = dump
+        if 'k8s' in components:
+            from test_k8s_backup import make_package as make_k8s_package
+            cluster.k8s = mock.Mock()
+            cluster.k8s.backup.side_effect = make_k8s_package
         if 'kafka' in components:
             cluster.kafka = mock.Mock()
             cluster.kafka.backup.side_effect = make_package
@@ -78,6 +82,8 @@ class ComponentTests(unittest.TestCase):
                 self.assertEqual({p.name for p in stage.iterdir()}, {'manifest.json', backup.PAYLOADS[component]})
                 if component == 'minio':
                     cluster.minio.objects = {}
+                if component == 'k8s':
+                    continue  # Configuration-only payload is never restored.
                 cluster.args.writers_stopped = True
                 with contextlib.redirect_stdout(io.StringIO()):
                     cluster.restore(stage, manifest)
@@ -165,7 +171,7 @@ class ComponentTests(unittest.TestCase):
                          mock.patch.object(backup.Cluster, 'check_opensearch') as opensearch, \
                          mock.patch.object(backup, 'RedisBackup') as redis, \
                          mock.patch.object(backup, 'MinioBackup') as minio, \
-                         mock.patch.object(backup, 'KafkaBackup') as kafka:
+                         mock.patch.object(backup, 'KafkaBackup') as kafka, mock.patch.object(backup, 'K8sBackup') as k8s:
                         cluster = backup.Cluster(args)
                         cluster.check()
                         self.assertEqual(mariadb.call_count, int(component == 'mariadb'))
@@ -173,6 +179,7 @@ class ComponentTests(unittest.TestCase):
                         self.assertEqual(redis.call_count, int(component == 'redis'))
                         self.assertEqual(minio.call_count, int(component == 'minio'))
                         self.assertEqual(kafka.call_count, int(component == 'kafka'))
+                        self.assertEqual(k8s.call_count, int(component == 'k8s'))
                         self.assertEqual(run.call_count, int(component in ('mariadb', 'opensearch')))
 
     def test_selected_restore_keeps_writer_and_overwrite_guards(self):
@@ -222,6 +229,67 @@ class ComponentTests(unittest.TestCase):
         result = subprocess.run(['bash', str(script), 'backup', 'check'], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines()[1:], ['backup', 'check'])
+
+    def test_default_backup_selects_all_data_and_k8s_components(self):
+        args = backup.parser().parse_args(['backup', 'run'])
+        self.assertEqual(backup.configured_components(args), list(backup.PAYLOADS))
+
+    def test_multiple_component_backup_and_subset_restore(self):
+        target = self.cluster(['mariadb', 'opensearch'])
+        def selected_cluster(args):
+            target.args, target.components = args, args.components
+            return target
+        outdir = self.root / 'multi'
+        with mock.patch.object(backup, 'Cluster', side_effect=selected_cluster), mock.patch.object(target, 'check'), contextlib.redirect_stdout(io.StringIO()):
+            backup.main(['backup', 'run', '--components', 'opensearch', 'mariadb', '--output-dir', str(outdir)])
+        package = next(outdir.glob('*.tar.gz'))
+        with tarfile.open(package) as archive:
+            manifest = json.load(archive.extractfile('manifest.json'))
+            self.assertEqual(manifest['components'], ['mariadb', 'opensearch'])
+            self.assertEqual(set(archive.getnames()), {'manifest.json', 'mariadb.sql', 'repository.tar'})
+        # A full archive has additional components; restore must neither extract
+        # nor contact those that were not selected.
+        source = self.cluster(list(backup.PAYLOADS))
+        full = self.package(source)
+        target.new = source.new
+        with mock.patch.object(backup, 'Cluster', side_effect=selected_cluster), mock.patch.object(target, 'check'), contextlib.redirect_stdout(io.StringIO()) as output:
+            backup.main(['restore', 'run', str(full), '--components', 'opensearch', 'mariadb', '--writers-stopped', '--overwrite'])
+        self.assertEqual(json.loads(output.getvalue())['components'], ['mariadb', 'opensearch'])
+        self.assertIn('import', target.events)
+        self.assertTrue(any('restore' in str(event) for event in target.events))
+
+    def test_multiple_selection_refuses_missing_component_before_cluster_access(self):
+        package = self.package(self.cluster(['mariadb']))
+        with mock.patch.object(backup, 'Cluster') as cluster:
+            with self.assertRaisesRegex(backup.BackupError, '不包含'):
+                backup.main(['restore', 'check', str(package), '--components', 'mariadb', 'opensearch'])
+        cluster.assert_not_called()
+
+    def test_selection_errors_do_not_access_cluster(self):
+        cases = [
+            ['--components', 'mariadb', 'mariadb'],
+            ['--components', 'mariadb', '--components', 'mariadb'],
+            ['--components', 'mariadb', '--skip-redis'],
+            ['--components', 'mariadb', '--skip-minio'],
+            ['--components', 'mariadb', '--include-kafka'],
+            ['--component', 'mariadb', '--components', 'redis'],
+            ['--components'], ['--components', 'unknown'],
+        ]
+        for options in cases:
+            with self.subTest(options=options), mock.patch.object(backup, 'Cluster') as cluster:
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises((backup.BackupError, SystemExit)):
+                    backup.main(['backup', 'check', *options])
+                cluster.assert_not_called()
+
+    def test_multiple_selection_discovery_does_not_contact_unselected_stores(self):
+        args = backup.parser().parse_args(['backup', 'check', '--components', 'redis', 'minio'])
+        args.components = backup.configured_components(args)
+        with mock.patch.object(backup, 'run', side_effect=AssertionError('unexpected kubectl')), mock.patch.object(backup, 'RedisBackup') as redis, mock.patch.object(backup, 'MinioBackup') as minio, mock.patch.object(backup, 'KafkaBackup') as kafka, mock.patch.object(backup, 'K8sBackup') as k8s:
+            cluster = backup.Cluster(args)
+            cluster.check()
+            redis.assert_called_once()
+            minio.assert_called_once()
+            kafka.assert_not_called()
 
 
 if __name__ == '__main__':
