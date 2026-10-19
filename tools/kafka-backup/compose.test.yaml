@@ -1,0 +1,49 @@
+# Isolated brokers without host ports or host data volumes. Never points to business Kafka.
+services:
+  source:
+    image: apache/kafka:3.9.0
+    environment: &kafka-env
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://source:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@source:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+    healthcheck: &health
+      test: [CMD-SHELL, /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+  target:
+    image: apache/kafka:3.9.0
+    environment:
+      <<: *kafka-env
+      CLUSTER_ID: ODA4NGQ0NWFlMmI4NGFmZj
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://target:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@target:9093
+    healthcheck: *health
+  verify:
+    image: apache/kafka:3.9.0
+    entrypoint: [java, -Xmx256m, -cp, '/code/tools/kafka-backup/kafka-backup.jar:/code/tools/kafka-backup/kafka-backup-tests.jar:/opt/kafka/libs/*', KafkaBackupSmoke]
+    command: [source:9092, target:9092, /work]
+    environment:
+      TASK_KAFKA_PROTOCOL: PLAINTEXT
+      KAFKA_BACKUP_DISPOSABLE_TEST: 'yes'
+      TASK_KAFKA_LEDGER_RESTORED: 'true'
+    volumes:
+      - ../..:/code:ro
+    tmpfs:
+      - /work:uid=1000,gid=1000,mode=1777
+    depends_on:
+      source:
+        condition: service_healthy
+      target:
+        condition: service_healthy

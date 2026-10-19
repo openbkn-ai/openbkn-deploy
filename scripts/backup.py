@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Portable MariaDB/OpenSearch/Redis/MinIO backup. Python standard library + kubectl only."""
+"""Portable component backups. Host requires Python standard library + kubectl only."""
 import argparse
 import contextlib
 import datetime
@@ -20,6 +20,11 @@ from urllib.parse import quote
 
 from redis_backup import RedisBackup, validate_manifest
 from minio_backup import MinioBackup, validate_metadata, archive_inventory
+from kafka_backup import KafkaBackup, add_arguments as add_kafka_arguments, archive_inventory as kafka_inventory
+from kafka_backup import validate_restore_metadata as validate_kafka_restore
+from kafka_backup import blocked_restore_topics as kafka_restore_blocked_topics
+from kafka_backup import require_restored_ledger as require_kafka_ledger
+from kafka_worker import ledger_restore_topics
 
 
 class BackupError(Exception):
@@ -27,14 +32,16 @@ class BackupError(Exception):
 
 
 SYSTEM_DATABASES = {'information_schema', 'performance_schema', 'mysql', 'sys'}
+DATABASE_NAME_PATTERN = r'[A-Za-z0-9_-]+'
 PAYLOADS = {'mariadb': 'mariadb.sql', 'opensearch': 'repository.tar',
-            'redis': 'redis.rdb', 'minio': 'minio.tar'}
+            'redis': 'redis.rdb', 'minio': 'minio.tar', 'kafka': 'kafka.tar'}
 
 
 def configured_components(args):
     if args.component != 'all':
         return [args.component]
-    return ['mariadb', 'opensearch'] + ([] if args.skip_redis else ['redis']) + ([] if args.skip_minio else ['minio'])
+    return (['mariadb', 'opensearch'] + ([] if args.skip_redis else ['redis'])
+            + ([] if args.skip_minio else ['minio']) + (['kafka'] if args.include_kafka else []))
 
 
 def manifest_components(manifest):
@@ -49,13 +56,15 @@ def manifest_components(manifest):
                 or any(not isinstance(n, str) or n not in PAYLOADS for n in names)
                 or len(set(names)) != len(names)):
             raise BackupError('备份包组件清单无效')
-        if any((name in manifest) != (name in names) for name in ('redis', 'minio')):
+        if any((name in manifest) != (name in names) for name in ('redis', 'minio', 'kafka')):
             raise BackupError('备份包组件清单与元数据不匹配')
         return names
     if (version == 1 and 'redis' in manifest or version == 2 and 'redis' not in manifest):
         raise BackupError('备份包版本与 Redis 元数据不匹配')
     if version < 3 and 'minio' in manifest:
         raise BackupError('旧格式备份包不能声明 MinIO')
+    if 'kafka' in manifest:
+        raise BackupError('旧格式备份包不能声明 Kafka')
     return ['mariadb', 'opensearch'] + (['redis'] if 'redis' in manifest else []) + (['minio'] if version == 3 else [])
 
 
@@ -162,9 +171,13 @@ def unpack(package, destination, components=None):
     if 'minio' in selected:
         validate_metadata(manifest.get('minio'), BackupError)
         archive_inventory(destination / 'minio.tar', manifest['minio'], BackupError)
+    if 'kafka' in selected:
+        if not isinstance(manifest.get('kafka'), dict):
+            raise BackupError('Kafka 备份包缺少组件元数据')
+        kafka_inventory(destination / 'kafka.tar', manifest.get('kafka'), BackupError)
     if 'mariadb' in selected:
         databases = manifest.get('databases', [])
-        if not isinstance(databases, list) or not databases or any(not isinstance(db, str) or not re.fullmatch(r'[A-Za-z0-9_]+', db) for db in databases):
+        if not isinstance(databases, list) or not databases or any(not isinstance(db, str) or not re.fullmatch(DATABASE_NAME_PATTERN, db) for db in databases):
             raise BackupError('数据库清单无效')
         if set(databases) & SYSTEM_DATABASES:
             raise BackupError('备份包不能包含系统库')
@@ -182,6 +195,7 @@ class Cluster:
         self.components = getattr(args, 'components', configured_components(args))
         self.redis = None
         self.minio = None
+        self.kafka = None
         self.targets = {}
         for service in ('mariadb', 'opensearch'):
             if service not in self.components:
@@ -223,7 +237,7 @@ class Cluster:
                   'test -n "$MYSQL_PWD" || { echo "Pod 缺少 root 密码环境变量" >&2; exit 1; }; ')
         if databases is not None:
             script += ('exec mariadb-dump --user=root --single-transaction --quick '
-                       '--routines --events --triggers --hex-blob --add-drop-database --databases "$@"')
+                       '--routines --events --triggers --hex-blob --add-drop-database --databases -- "$@"')
             command = ['sh', '-c', script, 'backup'] + databases
         else:
             script += 'exec mariadb --user=root --batch --skip-column-names'
@@ -264,6 +278,9 @@ class Cluster:
             self.redis = RedisBackup(self.args, run, BackupError, log)
         if 'minio' in self.components:
             self.minio = MinioBackup(self.args, run, BackupError, log)
+        if 'kafka' in self.components:
+            self.kafka = KafkaBackup(self.args, run, BackupError, log)
+            self.kafka.check()
 
     def check_mariadb(self):
         self.mariadb_version = self.sql('SELECT VERSION();').decode().strip()
@@ -271,8 +288,11 @@ class Cluster:
         all_databases = self.sql('SHOW DATABASES;').decode().splitlines()
         self.databases = self.args.databases or [db for db in all_databases if db not in
                          SYSTEM_DATABASES]
-        if (not self.databases and self.args.module == 'backup') or any(not re.fullmatch(r'[A-Za-z0-9_]+', db) for db in self.databases):
-            raise BackupError('无业务库或库名不受支持；请用 --databases 明确指定')
+        if not self.databases and self.args.module == 'backup':
+            raise BackupError('没有发现业务库；请确认目标 MariaDB 已初始化业务数据库')
+        unsupported = [db for db in self.databases if not re.fullmatch(DATABASE_NAME_PATTERN, db)]
+        if unsupported:
+            raise BackupError('库名目前仅支持字母、数字、下划线和横线；不支持: ' + ', '.join(unsupported))
         if set(self.databases) - set(all_databases):
             raise BackupError('指定的业务库不存在')
         if set(self.databases) & SYSTEM_DATABASES:
@@ -362,6 +382,8 @@ class Cluster:
             if 'minio' in self.components:
                 log('在线导出 MinIO 业务 bucket（不停止业务或 MinIO）')
                 manifest['minio'] = self.minio.backup(stage / 'minio.tar')
+            if 'kafka' in self.components:
+                manifest['kafka'] = self.kafka.backup(stage / 'kafka.tar')
             payloads = [PAYLOADS[c] for c in self.components]
             manifest['sha256'] = {name: digest(stage / name) for name in payloads}
             (stage / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
@@ -381,6 +403,14 @@ class Cluster:
                 partial.unlink(missing_ok=True)
             log('备份完成: ' + str(package))
             result = {'result': 'success', 'archive': str(package), 'components': self.components, 'format': manifest['format']}
+            if 'kafka' in manifest:
+                blocked = kafka_restore_blocked_topics(manifest['kafka'])
+                if blocked:
+                    result['restore_blocked_topics'] = blocked
+                    log('注意：备份文件已生成，但以下 Kafka Topic 当前尚不能恢复: ' + ', '.join(blocked))
+                ledger_topics = ledger_restore_topics(manifest['kafka'])
+                if ledger_topics:
+                    result['kafka_ledger_restore_required'] = ledger_topics
             if 'snapshot' in manifest:
                 result['snapshot'] = manifest['snapshot']
             print(json.dumps(result))
@@ -436,6 +466,9 @@ class Cluster:
     def restore_preflight(self, manifest):
         if set(self.components) - set(manifest_components(manifest)):
             raise BackupError('备份包不包含请求的恢复组件')
+        # Kafka capability/conflict checks must pass before any component is overwritten.
+        if 'kafka' in self.components:
+            self.kafka.preflight(manifest['kafka'], self.args.overwrite)
         if 'redis' in self.components:
             if getattr(self, 'redis', None) is None:
                 raise BackupError('备份范围包含 Redis，不能跳过恢复')
@@ -485,6 +518,9 @@ class Cluster:
     def restore(self, stage, manifest):
         if not self.args.writers_stopped:
             raise BackupError('恢复前请停止业务写入，并显式传入 --writers-stopped')
+        if 'kafka' in self.components:
+            validate_kafka_restore(manifest['kafka'], BackupError)
+            require_kafka_ledger(manifest['kafka'], self.args.kafka_ledger_restored, BackupError)
         with self.lock():
             conflicts = self.restore_preflight(manifest)
             if 'opensearch' in self.components:
@@ -501,6 +537,8 @@ class Cluster:
             if 'minio' in self.components:
                 log('恢复 MinIO 对象（覆盖同名对象，保留目标多出的对象）')
                 self.minio.restore(stage / 'minio.tar', manifest['minio'], self.args.overwrite)
+            if 'kafka' in self.components:
+                self.kafka.restore(stage / 'kafka.tar', manifest['kafka'], self.args.overwrite)
             log('恢复完成: ' + ', '.join(self.components) + '；请验证相关业务。')
             result = {'result': 'success', 'components': self.components,
                       'redis_restored': 'redis' in self.components, 'minio_restored': 'minio' in self.components}
@@ -533,7 +571,7 @@ class Cluster:
 
 
 def parser():
-    result = argparse.ArgumentParser(description='MariaDB + OpenSearch + Redis + MinIO 单文件备份恢复（单节点存储）')
+    result = argparse.ArgumentParser(description='MariaDB / OpenSearch / Redis / MinIO / Kafka 单文件备份恢复')
     result.add_argument('module', choices=['backup', 'restore'])
     result.add_argument('action', choices=['check', 'run'])
     result.add_argument('archive', nargs='?', help='恢复用的 .tar.gz 备份包')
@@ -545,7 +583,7 @@ def parser():
     result.add_argument('--timeout', type=int, default=3600)
     result.add_argument('--poll-interval', type=int, default=10)
     result.add_argument('--overwrite', action='store_true', help='允许替换目标业务库、同名索引、Redis 全部 DB，覆盖 MinIO 同名对象（保留多余对象）')
-    result.add_argument('--writers-stopped', action='store_true', help='确认业务服务已停止写入（恢复必需）')
+    result.add_argument('--writers-stopped', action='store_true', help='确认业务服务已停止写入；恢复 Kafka 时消费者也必须停止（恢复必需）')
     result.add_argument('--skip-minio', action='store_true', help='仅备份时使用：不包含 MinIO')
     result.add_argument('--minio-namespace', default=os.environ.get('MINIO_NAMESPACE', 'openbkn'))
     result.add_argument('--minio-selector', default='component=minio')
@@ -561,6 +599,7 @@ def parser():
     result.add_argument('--redis-container', default='redis')
     result.add_argument('--redis-user', default='root')
     result.add_argument('--redis-config-command', default='CONFIG_NEW', help='Redis 重命名后的 CONFIG 命令，原生命令可填 CONFIG')
+    add_kafka_arguments(result)
     for service, selector in [('mariadb', 'app=mariadb'), ('opensearch', 'app.kubernetes.io/instance=opensearch')]:
         result.add_argument('--' + service + '-namespace', default=os.environ.get(service.upper() + '_NAMESPACE', 'resource'))
         result.add_argument('--' + service + '-selector', default=selector)
@@ -570,6 +609,14 @@ def parser():
 
 
 def validate_options(args):
+    if args.include_kafka and (args.module != 'backup' or args.component != 'all'):
+        raise BackupError('--include-kafka 仅用于完整备份；单独操作请用 kafka backup/restore')
+    if args.kafka_topics and ('kafka' not in args.components or args.module != 'backup'):
+        raise BackupError('--kafka-topics 仅用于 Kafka 备份，恢复范围由包决定')
+    if args.kafka_replicas < 1:
+        raise BackupError('--kafka-replicas 必须为正数')
+    if args.kafka_ledger_restored and (args.module != 'restore' or 'kafka' not in args.components):
+        raise BackupError('--kafka-ledger-restored 仅用于包含 Kafka 的恢复')
     if 'opensearch' in args.components:
         if not re.fullmatch(r'[a-z0-9-]+', args.repository):
             raise BackupError('仓库名称只支持小写字母、数字和横线')
@@ -605,6 +652,9 @@ def main(argv=None):
                 result['minio'] = {'buckets': cluster.minio.buckets, 'pod': cluster.minio.pod}
             if 'redis' in args.components:
                 result['redis'] = {'version': cluster.redis.version, 'pvc': cluster.redis.pvc}
+            if 'kafka' in args.components:
+                result['kafka'] = {'topics': [t['name'] for t in cluster.kafka.metadata['topics']],
+                                   'restore_blocked_topics': kafka_restore_blocked_topics(cluster.kafka.metadata, counts_known=False)}
             print(json.dumps(result, ensure_ascii=False))
         else:
             destination = Path(args.output_dir).resolve()
@@ -624,11 +674,18 @@ def main(argv=None):
             manifest = unpack(args.archive, stage, selected)
             args.components = manifest_components(manifest) if selected is None else selected
             validate_options(args)
+            if 'kafka' in args.components:
+                validate_kafka_restore(manifest['kafka'], BackupError)
+                if args.action == 'run':
+                    require_kafka_ledger(manifest['kafka'], args.kafka_ledger_restored, BackupError)
             cluster = Cluster(args)
             cluster.check()
             if args.action == 'check':
                 cluster.restore_preflight(manifest)
                 result = {'result': 'ready', 'components': args.components, 'note': '校验完成，尚未恢复'}
+                if 'kafka' in args.components and ledger_restore_topics(manifest['kafka']):
+                    result['kafka_ledger_restore_required'] = ledger_restore_topics(manifest['kafka'])
+                    result['required_run_options'] = ['--writers-stopped', '--kafka-ledger-restored']
                 if 'opensearch' in args.components:
                     result['snapshot'] = manifest['snapshot']
                 print(json.dumps(result, ensure_ascii=False))

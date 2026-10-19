@@ -1,6 +1,6 @@
 # MariaDB + OpenSearch + Redis + MinIO 备份恢复
 
-默认备份 MariaDB 业务库、OpenSearch 索引、Redis 全部 DB 和 MinIO 业务 bucket 的当前对象。目标是在另一台已经部署好相同版本 OpenBKN 的环境中恢复数据。Kafka、Hydra PostgreSQL、Kubernetes/Helm 配置、用户权限和应用密钥不在包内，恢复后需单独检查这些依赖；该包不是完整环境的灾备副本。
+默认备份 MariaDB 业务库、OpenSearch 索引、Redis 全部 DB 和 MinIO 业务 bucket 的当前对象。Kafka 可通过 `kafka backup/restore` 单独操作，或在完整备份时使用 `--include-kafka` 加入，详见本文 Kafka 一节。目标是在另一台已经部署好相同版本 OpenBKN 的环境中恢复数据。Hydra PostgreSQL、Kubernetes/Helm 配置、用户权限和应用密钥不在包内；该包不是完整环境的灾备副本。
 
 ## 按组件检查、备份和恢复
 
@@ -27,7 +27,7 @@ bash deploy.sh minio restore run /var/backups/openbkn/openbkn-<时间>-<后缀>.
 
 单组件恢复先校验包的整体文件列表及路径安全，再只解包、校验选中组件的文件、清单和版本；不检查其他组件的 payload 校验和或内容。gzip 文件必须能正常读取；若压缩文件本身损坏，即使只恢复某组件也可能无法解包。包中不存在指定组件时，在连接 Kubernetes 前报错。
 
-旧命令保持兼容：`bash deploy.sh backup check|run` 默认处理全部组件；`bash deploy.sh restore check|run <包>` 恢复该包声明的全部组件，包括只有一个组件的包。`--skip-redis`、`--skip-minio` 仅供完整备份排除组件；恢复或单组件命令不接受这些开关。Python 入口也支持 `python3 scripts/backup.py restore run <包> --component minio ...`。
+旧命令保持兼容：`bash deploy.sh backup check|run` 默认处理原有四组件，Kafka 需加 `--include-kafka`；`bash deploy.sh restore check|run <包>` 恢复该包声明的全部组件，包括只有一个组件的包。`--skip-redis`、`--skip-minio` 仅供完整备份排除组件；恢复或单组件命令不接受这些开关。Python 入口也支持 `python3 scripts/backup.py restore run <包> --component minio ...`。
 
 新备份统一写入 `format: 4`，使用 `components` 明确声明内容；v1/v2/v3 包仍支持完整或单组件恢复。旧脚本不能恢复 v4 包，目标机需要同步新版脚本。单组件文件名为 `openbkn-<组件>-<时间>-<后缀>.tar.gz`，包内只有清单和相应数据文件：
 
@@ -37,6 +37,7 @@ bash deploy.sh minio restore run /var/backups/openbkn/openbkn-<时间>-<后缀>.
 | OpenSearch | `repository.tar` | `snapshot`、`indices`、`opensearch_version` |
 | Redis | `redis.rdb` | `redis` |
 | MinIO | `minio.tar` | `minio` |
+| Kafka（显式启用） | `kafka.tar` | `kafka`（Topic、分区边界、消息校验和、消费位置） |
 
 例如只备份 MinIO 的清单核心字段：
 
@@ -49,7 +50,7 @@ bash deploy.sh minio restore run /var/backups/openbkn/openbkn-<时间>-<后缀>.
 }
 ```
 
-完整备份顺序为 MariaDB、OpenSearch、Redis、MinIO；完整恢复顺序为 OpenSearch、MariaDB、Redis、MinIO，均只执行包内选中的组件。某一步失败时不会回滚其他已恢复组件。保持相关业务停写，修正问题后，用同一完整包执行失败组件的恢复命令。不同时间或不同环境的单组件包可能存在业务关联不一致，例如数据库文件记录与 MinIO 对象不匹配；单组件重试建议使用原来那一次完整备份包。
+完整备份顺序为 MariaDB、OpenSearch、Redis、MinIO、Kafka（显式启用时）；完整恢复顺序为 OpenSearch、MariaDB、Redis、MinIO、Kafka，均只执行包内选中的组件。某一步失败时不会回滚其他已恢复组件。保持相关业务停写，修正问题后，用同一完整包执行失败组件的恢复命令；Kafka 已部分导入时需先按其失败处理说明准备空 Topic。不同时间或不同环境的单组件包可能存在业务关联不一致，例如数据库文件记录与 MinIO 对象不匹配；单组件重试建议使用原来那一次完整备份包。
 
 ## 环境要求
 
@@ -100,7 +101,7 @@ bash ./deploy.sh backup check
 bash ./deploy.sh backup run --output-dir /var/backups/openbkn
 ```
 
-默认发现所有非系统数据库，如 `openbkn`、`safe`、`bkn_trace`；可明确指定：
+默认发现所有非系统数据库，如 `openbkn`、`safe`、`bkn_trace`；库名支持字母、数字、下划线及横线（例如 `ecommerce-ops`），检查、导出和恢复使用同一校验规则。也可明确指定：
 
 ```bash
 bash ./deploy.sh backup run --output-dir /var/backups/openbkn \
@@ -267,3 +268,121 @@ MinIO 备份不暂停业务、不停止 MinIO、不创建临时 Pod/PVC。工具
 本实现的离线测试覆盖真实 tar 导出/解包、空 bucket、零字节对象、S3FS 目录标记跳过、文件/前缀共存、覆盖保护、失败清理、无容器 tar 依赖、并发大小变化、安全路径和 v1/v2/v3 包兼容。实际 MinIO 版本、凭证权限、容器工具、磁盘空间和跨环境读写仍需在测试环境演练。
 
 MinIO 客户端参考：[mc cat](https://docs.min.io/aistor/reference/cli/mc-cat/)、[mc pipe](https://docs.min.io/aistor/reference/cli/mc-pipe/)。
+
+## Kafka 在线备份及向已部署环境恢复
+
+执行机只需 Python 3.9+、kubectl 和本仓库完整文件。工具自动复用现有 Broker 的镜像和节点，临时 Pod 使用 `imagePullPolicy: Never`，无需构建、导入或拉取备份镜像。约 20 KB 的 Java 小工具已随 `tools/kafka-backup/kafka-backup.jar` 交付，运行时不需要 Docker、JDK、pip、联网或手工编译。
+
+当前支持 Kafka 3.9.x 镜像已有的 Java 17+、Kafka 客户端和 Jackson 库，默认库目录 `/opt/bitnami/kafka/libs`。临时 Pod 使用独立 CPU/内存限制，只运行客户端，不启动 Broker、不挂载 Broker 数据卷。
+
+### 执行命令
+
+```bash
+bash deploy.sh kafka backup check
+bash deploy.sh kafka backup run --output-dir /var/backups/openbkn
+
+# 按需选择 Topic；默认枚举所有非内部 Topic。
+bash deploy.sh kafka backup run --output-dir /var/backups/openbkn \
+  --kafka-topics tenant_a.dip.model_manager.quota_data
+
+# 原有四组件完整备份显式加入 Kafka。
+bash deploy.sh backup run --include-kafka --output-dir /var/backups/openbkn
+
+# 向已经部署好的 Kafka 恢复；也可从完整包只恢复 Kafka。
+bash deploy.sh kafka restore check /var/backups/openbkn/<备份包>.tar.gz
+bash deploy.sh kafka restore run /var/backups/openbkn/<备份包>.tar.gz --writers-stopped
+```
+
+包内包含已消费的审计/Evidence 记录时，恢复运行还需确认原 MariaDB 账本已保留或使用同批备份恢复，且沿用原消费组：
+
+```bash
+bash deploy.sh kafka restore run /var/backups/openbkn/<备份包>.tar.gz \
+  --writers-stopped --kafka-ledger-restored
+```
+
+生成 `openbkn-kafka-<时间>-<后缀>.tar.gz`（或包含 Kafka 的完整包），可复制到其他机器。包内 `kafka.tar` 保存 Topic 关键配置、分区范围、消息及消费位置，外层清单保存 SHA-256；新旧 Kafka 包沿用相同逻辑格式。
+
+Kafka 在备份和恢复时都保持运行。备份不要求停业务、不修改源消费组。恢复前停止涉及这些 Topic 的目标业务生产者和消费者；`--writers-stopped` 是人工确认，工具不自动停止业务。
+
+### 自动发现与可选参数
+
+默认 namespace 为 `resource`，Broker selector 为 `app.kubernetes.io/name=kafka,app.kubernetes.io/component=broker`。多个就绪 Broker 时按名称选择一个作为镜像和节点来源；通过节点亲和性调度到同一节点，使用实际镜像摘要（可获取时）和缓存镜像。节点不能调度时会显示原因。
+
+按 Helm release 推导 Service `<release>.<namespace>.svc.cluster.local:9092` 和 Secret `<release>-sasl`。认证默认 SASL_PLAINTEXT / PLAIN，用户 `kafkauser`，密码读取 Secret 的 `client-passwords`。Secret 只挂载到临时 Pod，不读到执行机、不写入备份包；这是本仓库默认部署约定，不自动猜测任意外部 Kafka 的认证方式。
+
+| 参数 | 用途 |
+| --- | --- |
+| `--kafka-namespace` | Kafka 所在 namespace |
+| `--kafka-pod` / `--kafka-selector` | 指定用于镜像及节点发现的现有 Broker |
+| `--kafka-container` | 容器名，默认 `kafka` |
+| `--kafka-bootstrap` | 从临时 Pod 访问的 Kafka 地址 |
+| `--kafka-libs` | 镜像内 Kafka/Jackson 库目录，例如 Apache 镜像的 `/opt/kafka/libs` |
+| `--kafka-protocol` / `--kafka-mechanism` | PLAINTEXT、SSL、SASL_PLAINTEXT、SASL_SSL；PLAIN 或 SCRAM |
+| `--kafka-user` / `--kafka-secret` / `--kafka-password-key` | 已有账号及 Secret 引用 |
+| `--kafka-ca-secret` | TLS CA Secret，需包含 `ca.crt` |
+| `--kafka-replicas` | 新建目标 Topic 副本数，默认 1 |
+| `--kafka-ledger-restored` | 确认原审计/Evidence MariaDB 账本已保留或同批恢复，恢复后沿用原消费组 |
+| `--kafka-work-size` | 临时磁盘上限，默认 10Gi，至少容纳导出/导入数据 |
+
+多用户逗号分隔密码需要另提供只含单个账号密码的 Secret；暂不支持双向证书或 OAuth。工具 Pod 需要访问 Kafka `advertised.listeners` 的所有 Broker；有 NetworkPolicy 时需允许流量。执行账号需要 get/list/create/exec/delete Pods、读取 Events、create/delete 锁 ConfigMap 的权限。Kafka 账号需要读取 Topic、配置和消费位置；恢复额外需要建 Topic、修改 Topic 配置、写消息及修改消费位置。
+
+镜像不可用、Secret/key 缺失、容器启动失败时尽早报错；调度等待每 10 秒输出状态，最长 180 秒。无需 `--kafka-helper-image` 等旧镜像参数。
+
+### 数据范围与恢复保护
+
+每个分区开始时固定 `[low, high)`，`high` 为 read_committed 下的稳定结束位置。仅保存仍保留的已提交消息；新增消息不扩大范围，已过期、未提交及已中止事务中的消息不导出。Base64 保留二进制 key/value、null/空值、tombstone，以及 Header 的名称、顺序和重复项；保留原分区、源 offset 和消息时间。
+
+当前仅支持 `cleanup.policy=delete`，compacted Topic 会拒绝。保留期推进导致数据缺失、Topic 删除重建、分区数或关键配置变化时备份失败，不发布成功包。不同分区、消费组及 MariaDB 不是全局原子快照；不恢复源事务 ID、事务边界或生产者 epoch。
+
+恢复前校验包路径、文件、分区范围、数量、SHA-256 和消费位置。目标保留自身集群身份、凭证、内部 Topic 和数据卷。已有 Topic 必须是全新空分区，分区数匹配；关键配置以备份包为准，`restore check` 只报告差异，`restore run` 在写入消息前自动对齐并读回验证。只修改包内记录的配置项，其他配置不变；缺少的 Topic 按备份配置创建。目标非空时即使指定 `--overwrite` 也拒绝，工具不自动删除 Topic 或追加历史消息。
+
+按原分区顺序发送，逐条等待 Broker 确认并回读 key/value/headers 校验。消费位置按目标实际 offset 映射：源消息 `[100,101,105]` 导入为 `[0,1,2]`，源 committed offset `102` 映射到目标 `2`，全部已消费则映射到目标导入结束位置。所有分区通过后才修改消费组并回读确认；相关目标消费组必须停止，备份之外的消费位置会报错，无关 Topic 的位置不修改。
+
+`CreateTime` 尽量保留原时间，`LogAppendTime` 由目标 Broker 重新赋时；目标时间及 retention 约束仍生效。审计/Evidence 的消费端依赖 Broker 时间和 Kafka 坐标，所以不能把任意历史消息重新投入业务消费。
+
+对 `openbkn.audit.v1`、`openbkn.evidence.v1`，以下情况支持恢复：
+
+- 全新空分区（`low=high=count=0`），不要求存在消费组或账本确认。
+- 每个分区从 offset 0 完整保留、没有空洞（`low=0` 且消息数等于 `high`），对应账本消费组及包中其他相关消费组全部提交到 `high`。默认账本组分别为 `bkn-trace-audit-ledger-v1`、`bkn-trace-evidence-ledger-v1`；其他审计组名暂不自动推测。
+
+第二种情况保持每条消息的原 offset，并把原消费组恢复到末尾；已消费消息不会重新消费，新增消息从原来的末尾继续，避免复用 MariaDB 账本中已有的 Kafka 坐标。例如 117 条消息、offset 0～116、已提交位置 117，恢复后仍是原坐标，消费组从 117 接续。原业务账本须已保留或同批恢复，运行时要求 `--kafka-ledger-restored`，检查时会报告 `required_run_options`；该开关只是确认前置条件，不会替你恢复数据库。
+
+存在积压、缺少对应消费位置、保留范围从非零开始，或由于事务/保留策略出现 offset 空洞时，仍拒绝审计/Evidence 恢复，不能通过确认账本或 `--overwrite` 绕过。普通 Topic 仍使用上面的 offset 映射规则。需要重放这些受限历史消息来重建业务账本，需另做消费端迁移支持；当前流程不提供。
+
+备份检查按当前分区范围和消费进度提示限制，导出后再核对实际消息数量和连续性；受限的 Topic 在完成结果中列入 `restore_blocked_topics`。包含非空审计/Evidence 的包会列出 `kafka_ledger_restore_required`。受限包的恢复检查在连接 Kubernetes 前拒绝，不创建临时 Pod、不写目标数据。旧备份无需重做，使用新版脚本重新检查即可。Java 输出固定 UTF-8，并配置日志，避免中文问号及日志配置警告掩盖实际原因。
+
+配额链路的自动提交 offset、内存聚合后定时落库，仍可能使消费位置和 MariaDB 不同步；消息导入和 offset 映射不能替代持久化后提交或幂等重放改造，不承诺用量数据零丢失或不重复。
+
+### 失败处理与容量
+
+临时 Pod 内存限制 512MiB、Java 堆上限 256MiB，顺序处理分区，单条 Base64 记录上限 24MiB。emptyDir 暂存导出文件，tar 流传回执行机；恢复反向上传并校验。执行机需为内层 tar、压缩包及校验副本保留空间。超时、空间不足或校验失败不发布成功包。
+
+恢复失败可能已有部分消息或消费位置写入。保持目标业务停止，禁止向部分导入的非空 Topic 直接重试；确认目标可替换后，按运维流程保留原数据、清理并重新准备空 Topic，再使用原包恢复。工具不自动删除或回滚 Topic。
+
+正常结束自动清理临时 Pod。同 namespace、同 bootstrap 字符串使用原子 ConfigMap 锁，不能阻止其他工具或不同地址的并发操作。强制杀进程可能遗留 `openbkn-kafka-backup-*` Pod 或 `openbkn-kafka-lock-*` ConfigMap，确认没有任务后再清理。
+
+### 维护者构建与验证
+
+Java 源码和预编译 JAR 一起交付，`artifact.json` 保存校验和。修改源码后维护者需使用 Java 17+ JDK 和 Kafka 3.9 库重新构建；普通备份用户不用执行：
+
+```bash
+python3 tools/kafka-backup/build.py --classpath '/path/to/kafka/libs/*'
+make ci
+```
+
+使用已有 Kafka 3.9 发行包和 Java 17+，启动两个隔离本地进程演练，不连接 Kubernetes 或业务 Kafka：
+
+```bash
+python3 scripts/kafka_backup_integration.py --kafka-home /path/to/kafka --java /path/to/java
+```
+
+加 `--sasl` 可验证默认部署使用的 SASL/PLAIN 及密码转义。演练同时使用 Zstd 压缩消息；工具将 Java 临时目录指向可写的 `/work`，使压缩库在只读容器文件系统中也能加载。
+
+或复用原生 Kafka 镜像运行隔离 Docker Compose 测试，无需构建备份镜像：
+
+```bash
+make test-integration-kafka
+docker compose -p openbkn-kafka-backup-test -f tools/kafka-backup/compose.test.yaml down -v
+```
+
+覆盖在线生产期间导出、已中止事务排除、跨集群恢复、二进制/null/Unicode/重复 Header、原时间、offset 空洞映射、回读及重复导入拒绝。正式使用前仍需核对实际 Kubernetes 认证、调度、容量和业务结果。API 参考：[Kafka Admin](https://kafka.apache.org/39/javadoc/org/apache/kafka/clients/admin/Admin.html)、[KafkaConsumer](https://kafka.apache.org/39/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html)。

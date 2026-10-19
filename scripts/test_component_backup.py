@@ -13,6 +13,7 @@ from unittest import mock
 import backup
 from test_backup import FakeCluster
 from test_minio_backup import MinioHarness
+from test_kafka_backup import make_package
 
 
 class ComponentTests(unittest.TestCase):
@@ -36,6 +37,9 @@ class ComponentTests(unittest.TestCase):
                 path.write_bytes(b'REDIS-test')
                 return {'version': '7.4.6', 'snapshot_time': 1792372153}
             cluster.redis.backup.side_effect = dump
+        if 'kafka' in components:
+            cluster.kafka = mock.Mock()
+            cluster.kafka.backup.side_effect = make_package
         return cluster
 
     def package(self, cluster, directory='source'):
@@ -125,7 +129,7 @@ class ComponentTests(unittest.TestCase):
     def test_v1_v2_v3_packages_support_full_and_component_reads(self):
         for version, components in [(1, ['mariadb', 'opensearch']),
                                     (2, ['mariadb', 'opensearch', 'redis']),
-                                    (3, list(backup.PAYLOADS))]:
+                                    (3, ['mariadb', 'opensearch', 'redis', 'minio'])]:
             with self.subTest(version=version):
                 package = self.package(self.cluster(components), 'v' + str(version))
                 legacy = self.rewrite(package, self.root / ('legacy%d.tar.gz' % version),
@@ -160,13 +164,15 @@ class ComponentTests(unittest.TestCase):
                     with mock.patch.object(backup.Cluster, 'check_mariadb') as mariadb, \
                          mock.patch.object(backup.Cluster, 'check_opensearch') as opensearch, \
                          mock.patch.object(backup, 'RedisBackup') as redis, \
-                         mock.patch.object(backup, 'MinioBackup') as minio:
+                         mock.patch.object(backup, 'MinioBackup') as minio, \
+                         mock.patch.object(backup, 'KafkaBackup') as kafka:
                         cluster = backup.Cluster(args)
                         cluster.check()
                         self.assertEqual(mariadb.call_count, int(component == 'mariadb'))
                         self.assertEqual(opensearch.call_count, int(component == 'opensearch'))
                         self.assertEqual(redis.call_count, int(component == 'redis'))
                         self.assertEqual(minio.call_count, int(component == 'minio'))
+                        self.assertEqual(kafka.call_count, int(component == 'kafka'))
                         self.assertEqual(run.call_count, int(component in ('mariadb', 'opensearch')))
 
     def test_selected_restore_keeps_writer_and_overwrite_guards(self):
