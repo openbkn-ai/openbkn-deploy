@@ -24,6 +24,7 @@ jobs:
           version: v3.18.6
       - name: Syntax and helper tests (no Kubernetes access)
         run: |
+          make ci
           bash -n deploy.sh scripts/services/openbkn.sh
           PYTHONPATH=scripts/lib python3 -m unittest test_audit_consumer test_audit_helm_render audit_kafka_topic_job_test
           python3 scripts/lib/trace_kafka_topic_job_test.py
