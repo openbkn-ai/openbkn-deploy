@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Portable MariaDB/OpenSearch backup. Python standard library + kubectl only."""
+"""Portable MariaDB/OpenSearch/Redis/MinIO backup. Python standard library + kubectl only."""
 import argparse
 import contextlib
 import datetime
@@ -18,12 +18,45 @@ import time
 import uuid
 from urllib.parse import quote
 
+from redis_backup import RedisBackup, validate_manifest
+from minio_backup import MinioBackup, validate_metadata, archive_inventory
+
 
 class BackupError(Exception):
     pass
 
 
 SYSTEM_DATABASES = {'information_schema', 'performance_schema', 'mysql', 'sys'}
+PAYLOADS = {'mariadb': 'mariadb.sql', 'opensearch': 'repository.tar',
+            'redis': 'redis.rdb', 'minio': 'minio.tar'}
+
+
+def configured_components(args):
+    if args.component != 'all':
+        return [args.component]
+    return ['mariadb', 'opensearch'] + ([] if args.skip_redis else ['redis']) + ([] if args.skip_minio else ['minio'])
+
+
+def manifest_components(manifest):
+    if not isinstance(manifest, dict):
+        raise BackupError('备份包清单必须是 JSON 对象')
+    version = manifest.get('format')
+    if type(version) is not int or version not in (1, 2, 3, 4):
+        raise BackupError('不支持的备份包版本')
+    if version == 4:
+        names = manifest.get('components')
+        if (not isinstance(names, list) or not names
+                or any(not isinstance(n, str) or n not in PAYLOADS for n in names)
+                or len(set(names)) != len(names)):
+            raise BackupError('备份包组件清单无效')
+        if any((name in manifest) != (name in names) for name in ('redis', 'minio')):
+            raise BackupError('备份包组件清单与元数据不匹配')
+        return names
+    if (version == 1 and 'redis' in manifest or version == 2 and 'redis' not in manifest):
+        raise BackupError('备份包版本与 Redis 元数据不匹配')
+    if version < 3 and 'minio' in manifest:
+        raise BackupError('旧格式备份包不能声明 MinIO')
+    return ['mariadb', 'opensearch'] + (['redis'] if 'redis' in manifest else []) + (['minio'] if version == 3 else [])
 
 
 def log(message):
@@ -87,46 +120,72 @@ def safe_members(archive):
         yield member
 
 
-def unpack(package, destination):
+def unpack(package, destination, components=None):
+    """Check the envelope, then extract/hash only the requested component payloads."""
     with tarfile.open(package, 'r:gz') as archive:
         members = list(safe_members(archive))
-        if {m.name for m in members} != {'manifest.json', 'mariadb.sql', 'repository.tar'}:
-            raise BackupError('备份包文件列表不符合一期格式')
-        archive.extractall(destination, members=members)
-    manifest = json.loads((destination / 'manifest.json').read_text())
-    if manifest.get('format') != 1:
-        raise BackupError('不支持的备份包版本')
-    if set(manifest.get('sha256', {})) != {'mariadb.sql', 'repository.tar'}:
-        raise BackupError('备份包缺少校验清单')
-    for name, expected in manifest['sha256'].items():
-        if digest(destination / name) != expected:
+        names = {m.name for m in members}
+        if 'manifest.json' not in names or names - {'manifest.json'} - set(PAYLOADS.values()) or any(not m.isfile() for m in members):
+            raise BackupError('备份包文件列表不符合支持的格式')
+        with archive.extractfile('manifest.json') as source:
+            manifest = json.load(source)
+        available = manifest_components(manifest)
+        selected = available if components is None else components
+        if not selected or set(selected) - set(available):
+            raise BackupError('备份包不包含请求的组件: ' + ', '.join(set(selected) - set(available)))
+        expected_files = {PAYLOADS[c] for c in available}
+        if names != expected_files | {'manifest.json'}:
+            raise BackupError('备份包格式与文件列表不匹配')
+        if not isinstance(manifest.get('sha256'), dict) or set(manifest['sha256']) != expected_files:
+            raise BackupError('备份包缺少校验清单')
+        selected_files = {PAYLOADS[c] for c in selected}
+        destination.mkdir(parents=True, exist_ok=True)
+        archive.extractall(destination, members=[m for m in members if m.name in selected_files | {'manifest.json'}])
+    for name in selected_files:
+        if digest(destination / name) != manifest['sha256'][name]:
             raise BackupError('备份包校验失败: ' + name)
-    with tarfile.open(destination / 'repository.tar', 'r:') as archive:
-        members = list(safe_members(archive))
-        if not any(PurePosixPath(m.name).name.startswith('index-') for m in members):
-            raise BackupError('快照仓库缺少 index 元数据')
-    databases = manifest.get('databases', [])
-    if not databases or any(not re.fullmatch(r'[A-Za-z0-9_]+', db) for db in databases):
-        raise BackupError('数据库清单无效')
-    if not re.fullmatch(r'[a-z0-9-]+', manifest.get('snapshot', '')):
-        raise BackupError('快照名称无效')
-    if set(databases) & SYSTEM_DATABASES:
-        raise BackupError('备份包不能包含系统库')
-    indices = manifest.get('indices', [])
-    if not indices or any(not isinstance(i, str) or re.search(r'[*,/\\?#\s]', i) or i in ('.', '..') or not i
-                          for i in indices):
-        raise BackupError('索引清单无效或为空')
-    for name in ('mariadb_version', 'opensearch_version'):
-        if not re.match(r'^\d+\.\d+\.', manifest.get(name, '')):
-            raise BackupError('备份包缺少有效版本: ' + name)
+    if 'redis' in selected:
+        validate_manifest(manifest.get('redis'), BackupError)
+        with open(destination / 'redis.rdb', 'rb') as rdb:
+            if rdb.read(5) != b'REDIS':
+                raise BackupError('Redis RDB 文件头无效')
+    if 'opensearch' in selected:
+        with tarfile.open(destination / 'repository.tar', 'r:') as archive:
+            members = list(safe_members(archive))
+            if not any(PurePosixPath(m.name).name.startswith('index-') for m in members):
+                raise BackupError('快照仓库缺少 index 元数据')
+        if not re.fullmatch(r'[a-z0-9-]+', manifest.get('snapshot', '')):
+            raise BackupError('快照名称无效')
+        indices = manifest.get('indices', [])
+        if not isinstance(indices, list) or not indices or any(not isinstance(i, str) or re.search(r'[*,/\\?#\s]', i) or i in ('.', '..') or not i for i in indices):
+            raise BackupError('索引清单无效或为空')
+    if 'minio' in selected:
+        validate_metadata(manifest.get('minio'), BackupError)
+        archive_inventory(destination / 'minio.tar', manifest['minio'], BackupError)
+    if 'mariadb' in selected:
+        databases = manifest.get('databases', [])
+        if not isinstance(databases, list) or not databases or any(not isinstance(db, str) or not re.fullmatch(r'[A-Za-z0-9_]+', db) for db in databases):
+            raise BackupError('数据库清单无效')
+        if set(databases) & SYSTEM_DATABASES:
+            raise BackupError('备份包不能包含系统库')
+    for component in ('mariadb', 'opensearch'):
+        if component in selected:
+            version = manifest.get(component + '_version')
+            if not isinstance(version, str) or not re.match(r'^\d+\.\d+\.', version):
+                raise BackupError('备份包缺少有效版本: ' + component + '_version')
     return manifest
 
 
 class Cluster:
     def __init__(self, args):
         self.args = args
+        self.components = getattr(args, 'components', configured_components(args))
+        self.redis = None
+        self.minio = None
         self.targets = {}
         for service in ('mariadb', 'opensearch'):
+            if service not in self.components:
+                continue
             namespace = getattr(args, service + '_namespace')
             pod = getattr(args, service + '_pod')
             argv = ['kubectl', '-n', namespace, 'get', 'pods']
@@ -196,7 +255,17 @@ class Cluster:
         return '/_snapshot/' + self.args.repository
 
     def check(self):
-        log('检查 MariaDB 连接、业务库及 OpenSearch 快照路径')
+        log('检查组件: ' + ', '.join(self.components))
+        if 'mariadb' in self.components:
+            self.check_mariadb()
+        if 'opensearch' in self.components:
+            self.check_opensearch()
+        if 'redis' in self.components:
+            self.redis = RedisBackup(self.args, run, BackupError, log)
+        if 'minio' in self.components:
+            self.minio = MinioBackup(self.args, run, BackupError, log)
+
+    def check_mariadb(self):
         self.mariadb_version = self.sql('SELECT VERSION();').decode().strip()
         self.exec('mariadb', ['sh', '-c', 'command -v mariadb-dump >/dev/null'], timeout=60)
         all_databases = self.sql('SHOW DATABASES;').decode().splitlines()
@@ -208,6 +277,8 @@ class Cluster:
             raise BackupError('指定的业务库不存在')
         if set(self.databases) & SYSTEM_DATABASES:
             raise BackupError('一期只备份业务库，不能指定系统库')
+
+    def check_opensearch(self):
         info = self.api('GET', '/')
         self.opensearch_version = info['version']['number']
         nodes = self.api('GET', '/_nodes/settings?flat_settings=true')['nodes']
@@ -232,13 +303,24 @@ class Cluster:
 
     @contextlib.contextmanager
     def lock(self):
-        # Shared by backup/restore launched on different admin machines against this Pod.
-        lock = '/tmp/openbkn-data-backup.lock'
-        self.exec('opensearch', ['mkdir', lock], timeout=60)
-        try:
+        # Full and component commands use the same per-Pod lock. Redis already
+        # holds its PVC lock inside backup/restore; it never needs OpenSearch.
+        with contextlib.ExitStack() as stack:
+            for component in ('mariadb', 'opensearch', 'minio'):
+                if component not in self.components:
+                    continue
+                execute = self.minio.execute if component == 'minio' else lambda command, component=component, **kw: self.exec(component, command, **kw)
+                path = '/tmp/openbkn-data-backup.lock'
+                execute(['mkdir', path], timeout=60)
+                stack.callback(self.release_lock, execute, path)
             yield
-        finally:
-            self.exec('opensearch', ['rmdir', lock], timeout=60)
+
+    @staticmethod
+    def release_lock(execute, path):
+        try:
+            execute(['rm', '-d', '--', path], timeout=60)
+        except Exception:
+            log('组件锁清理失败；确认没有任务后再清理 Pod 内目录: ' + path)
 
     def register(self, readonly=False):
         existing = self.api('GET', '/_snapshot')
@@ -265,64 +347,30 @@ class Cluster:
     def backup(self, destination):
         with self.lock(), tempfile.TemporaryDirectory(prefix='.openbkn-backup-', dir=destination) as tmp:
             stage = Path(tmp)
-            log('1/5 导出 MariaDB 业务库: ' + ', '.join(self.databases))
-            db_list = ','.join("'%s'" % db for db in self.databases)
-            engines = self.sql('SELECT TABLE_SCHEMA,TABLE_NAME,ENGINE FROM information_schema.TABLES '
-                               'WHERE TABLE_SCHEMA IN (' + db_list + ") AND TABLE_TYPE='BASE TABLE' AND ENGINE <> 'InnoDB';")
-            if engines.strip():
-                raise BackupError('业务库存在非 InnoDB 表，无法保证在线事务一致性；一期暂不支持')
-            with open(stage / 'mariadb.sql', 'wb') as target:
-                self.sql(databases=self.databases, target=target)
-            if not (stage / 'mariadb.sql').stat().st_size:
-                raise BackupError('MariaDB 导出文件为空')
-            log('2/5 注册并校验快照仓库，创建 OpenSearch 快照')
-            self.idle()
-            self.register()
-            # Capture prior snapshots before creation; only prune this dedicated repository.
-            previous = self.snapshots()
-            snapshot = 'openbkn-' + datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M%S') + '-' + uuid.uuid4().hex[:8]
-            self.api('PUT', self.repository + '/' + snapshot,
-                     {'indices': '*', 'include_global_state': False, 'ignore_unavailable': False,
-                      'partial': False})
-            deadline = time.monotonic() + self.args.timeout
-            while True:
-                result = self.api('GET', self.repository + '/' + snapshot)['snapshots'][0]
-                if result['state'] == 'SUCCESS':
-                    break
-                if result['state'] != 'IN_PROGRESS':
-                    raise BackupError('快照失败或不完整: ' + json.dumps(result))
-                if time.monotonic() >= deadline:
-                    raise BackupError('等待快照超时；服务端可能仍在备份，请检查后重试')
-                log('OpenSearch 快照进行中: ' + snapshot)
-                time.sleep(self.args.poll_interval)
-            log('3/5 新快照成功，通过 API 删除本仓库中的旧快照')
-            for old in previous:
-                result = self.api('DELETE', self.repository + '/' + quote(old['snapshot'], safe=''), timeout=self.args.timeout)
-                if not result.get('acknowledged'):
-                    raise BackupError('旧快照删除未确认')
-            self.idle()
-            log('4/5 导出完整 OpenSearch 快照仓库')
-            inventory = self.snapshots()
-            with open(stage / 'repository.tar', 'wb') as target:
-                self.exec('opensearch', ['tar', '-C', self.args.repository_path, '-cf', '-', '.'], target=target)
-            self.idle()
-            if self.snapshots() != inventory:
-                raise BackupError('打包时仓库被其他任务修改，本次备份终止')
-            with tarfile.open(stage / 'repository.tar', 'r:') as archive:
-                list(safe_members(archive))
-            manifest = {'format': 1, 'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                        'databases': self.databases, 'snapshot': snapshot,
-                        'mariadb_version': self.mariadb_version, 'opensearch_version': self.opensearch_version,
-                        'sha256': {name: digest(stage / name) for name in ('mariadb.sql', 'repository.tar')}}
-            # Read back exact index names for safe conflict checks during restore.
-            manifest['indices'] = self.api('GET', self.repository + '/' + snapshot)['snapshots'][0]['indices']
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M%S') + '-' + uuid.uuid4().hex[:8]
+            name = 'openbkn-' + (self.components[0] + '-' if len(self.components) == 1 else '') + stamp
+            manifest = {'format': 4, 'components': self.components,
+                        'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+            if 'mariadb' in self.components:
+                self.backup_mariadb(stage / 'mariadb.sql')
+                manifest.update(databases=self.databases, mariadb_version=self.mariadb_version)
+            if 'opensearch' in self.components:
+                manifest.update(self.backup_opensearch(stage / 'repository.tar', name))
+            if 'redis' in self.components:
+                log('导出 Redis 全部 DB 的 RDB 快照')
+                manifest['redis'] = self.redis.backup(stage / 'redis.rdb')
+            if 'minio' in self.components:
+                log('在线导出 MinIO 业务 bucket（不停止业务或 MinIO）')
+                manifest['minio'] = self.minio.backup(stage / 'minio.tar')
+            payloads = [PAYLOADS[c] for c in self.components]
+            manifest['sha256'] = {name: digest(stage / name) for name in payloads}
             (stage / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
-            log('5/5 压缩备份包并校验')
-            package = destination / (snapshot + '.tar.gz')
+            log('压缩备份包并校验')
+            package = destination / (name + '.tar.gz')
             partial = destination / (package.name + '.partial')
             try:
                 with tarfile.open(partial, 'w:gz') as archive:
-                    for name in ('manifest.json', 'mariadb.sql', 'repository.tar'):
+                    for name in ['manifest.json'] + payloads:
                         archive.add(stage / name, arcname=name)
                 with tempfile.TemporaryDirectory(dir=destination) as verify:
                     unpack(partial, Path(verify))
@@ -332,21 +380,93 @@ class Cluster:
             finally:
                 partial.unlink(missing_ok=True)
             log('备份完成: ' + str(package))
-            print(json.dumps({'result': 'success', 'archive': str(package), 'snapshot': snapshot}))
+            result = {'result': 'success', 'archive': str(package), 'components': self.components, 'format': manifest['format']}
+            if 'snapshot' in manifest:
+                result['snapshot'] = manifest['snapshot']
+            print(json.dumps(result))
+
+    def backup_mariadb(self, path):
+        log('导出 MariaDB 业务库: ' + ', '.join(self.databases))
+        db_list = ','.join("'%s'" % db for db in self.databases)
+        engines = self.sql('SELECT TABLE_SCHEMA,TABLE_NAME,ENGINE FROM information_schema.TABLES '
+                           'WHERE TABLE_SCHEMA IN (' + db_list + ") AND TABLE_TYPE='BASE TABLE' AND ENGINE <> 'InnoDB';")
+        if engines.strip():
+            raise BackupError('业务库存在非 InnoDB 表，无法保证在线事务一致性；一期暂不支持')
+        with open(path, 'wb') as target:
+            self.sql(databases=self.databases, target=target)
+        if not path.stat().st_size:
+            raise BackupError('MariaDB 导出文件为空')
+
+    def backup_opensearch(self, path, snapshot):
+        log('注册并校验快照仓库，创建 OpenSearch 快照')
+        self.idle()
+        self.register()
+        previous = self.snapshots()
+        self.api('PUT', self.repository + '/' + snapshot,
+                 {'indices': '*', 'include_global_state': False, 'ignore_unavailable': False, 'partial': False})
+        deadline = time.monotonic() + self.args.timeout
+        while True:
+            result = self.api('GET', self.repository + '/' + snapshot)['snapshots'][0]
+            if result['state'] == 'SUCCESS':
+                break
+            if result['state'] != 'IN_PROGRESS':
+                raise BackupError('快照失败或不完整: ' + json.dumps(result))
+            if time.monotonic() >= deadline:
+                raise BackupError('等待快照超时；服务端可能仍在备份，请检查后重试')
+            log('OpenSearch 快照进行中: ' + snapshot)
+            time.sleep(self.args.poll_interval)
+        log('新快照成功，通过 API 删除本仓库中的旧快照')
+        for old in previous:
+            result = self.api('DELETE', self.repository + '/' + quote(old['snapshot'], safe=''), timeout=self.args.timeout)
+            if not result.get('acknowledged'):
+                raise BackupError('旧快照删除未确认')
+        self.idle()
+        log('导出完整 OpenSearch 快照仓库')
+        inventory = self.snapshots()
+        with open(path, 'wb') as target:
+            self.exec('opensearch', ['tar', '-C', self.args.repository_path, '-cf', '-', '.'], target=target)
+        self.idle()
+        if self.snapshots() != inventory:
+            raise BackupError('打包时仓库被其他任务修改，本次备份终止')
+        with tarfile.open(path, 'r:') as archive:
+            list(safe_members(archive))
+        return {'snapshot': snapshot, 'opensearch_version': self.opensearch_version,
+                'indices': self.api('GET', self.repository + '/' + snapshot)['snapshots'][0]['indices']}
 
     def restore_preflight(self, manifest):
+        if set(self.components) - set(manifest_components(manifest)):
+            raise BackupError('备份包不包含请求的恢复组件')
+        if 'redis' in self.components:
+            if getattr(self, 'redis', None) is None:
+                raise BackupError('备份范围包含 Redis，不能跳过恢复')
+            self.redis.preflight(manifest['redis'], self.args.overwrite)
+        if 'minio' in self.components:
+            if getattr(self, 'minio', None) is None:
+                raise BackupError('备份包包含 MinIO，不能跳过恢复')
+            self.minio.preflight(manifest['minio'], self.args.overwrite)
+        if 'mariadb' in self.components:
+            self.preflight_mariadb(manifest)
+        if 'opensearch' in self.components:
+            return self.preflight_opensearch(manifest)
+        return []
+
+    def preflight_mariadb(self, manifest):
         if self.mariadb_version.split('.')[0] != manifest['mariadb_version'].split('.')[0]:
             raise BackupError('一期要求 MariaDB 主版本一致')
-        if self.opensearch_version.split('.')[:2] != manifest['opensearch_version'].split('.')[:2]:
-            raise BackupError('一期要求 OpenSearch 主次版本一致')
         databases = manifest['databases']
         db_list = ','.join("'%s'" % db for db in databases)
         tables = self.sql('SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES '
                           'WHERE TABLE_SCHEMA IN (' + db_list + ');').decode().strip()
+        if tables and not self.args.overwrite:
+            raise BackupError('目标业务库已有表；覆盖恢复需要 --overwrite，并先停止业务写入')
+
+    def preflight_opensearch(self, manifest):
+        if self.opensearch_version.split('.')[:2] != manifest['opensearch_version'].split('.')[:2]:
+            raise BackupError('一期要求 OpenSearch 主次版本一致')
         current = self.api('GET', '/_cat/indices?format=json&expand_wildcards=all')
         conflicts = sorted({item['index'] for item in current} & set(manifest['indices']))
-        if (tables or conflicts) and not self.args.overwrite:
-            raise BackupError('目标业务库已有表或存在同名索引；覆盖恢复需要 --overwrite，并先停止业务写入')
+        if conflicts and not self.args.overwrite:
+            raise BackupError('目标存在同名索引；覆盖恢复需要 --overwrite，并先停止业务写入')
         # Do not merge repositories or overwrite a repository currently registered elsewhere.
         # The bundled OpenSearch image does not necessarily include `find`.
         # Use only POSIX shell globbing so this check works in the slim image.
@@ -367,49 +487,80 @@ class Cluster:
             raise BackupError('恢复前请停止业务写入，并显式传入 --writers-stopped')
         with self.lock():
             conflicts = self.restore_preflight(manifest)
-            log('1/4 将完整快照仓库复制到目标 Pod 持久卷')
-            with open(stage / 'repository.tar', 'rb') as source:
-                self.exec('opensearch', ['tar', '--no-same-owner', '-C', self.args.repository_path, '-xf', '-'], source=source)
-            self.register(readonly=True)
-            snapshots = self.snapshots()
-            snapshot = next((s for s in snapshots if s['snapshot'] == manifest['snapshot']), None)
-            if not snapshot or snapshot['state'] != 'SUCCESS' or sorted(snapshot['indices']) != sorted(manifest['indices']):
-                raise BackupError('仓库快照与备份清单不一致')
-            log('2/4 恢复 OpenSearch 索引' + ('（删除同名索引）' if conflicts else ''))
-            for index in conflicts:
-                if not self.api('DELETE', '/' + quote(index, safe='')).get('acknowledged'):
-                    raise BackupError('索引删除未确认: ' + index)
-            result = self.api('POST', self.repository + '/' + manifest['snapshot'] + '/_restore?wait_for_completion=true',
-                              {'indices': '*', 'include_global_state': False, 'include_aliases': True}, timeout=self.args.timeout)
-            shards = result.get('snapshot', {}).get('shards', {})
-            if shards.get('failed') != 0 or not shards.get('total') or shards.get('successful') != shards.get('total'):
-                raise BackupError('OpenSearch 恢复不完整: ' + json.dumps(result))
-            log('3/4 恢复 MariaDB 业务库（替换备份清单内的库）')
-            with open(stage / 'mariadb.sql', 'rb') as source:
-                self.sql(source=source)
-            log('4/4 验证目标业务库及索引可用')
-            for database in manifest['databases']:
-                self.sql('USE `' + database + '`; SHOW TABLES;')
-            health = self.api('GET', '/_cluster/health?wait_for_status=yellow&timeout=60s', timeout=75)
-            if health.get('timed_out') or health.get('status') == 'red':
-                raise BackupError('恢复后 OpenSearch 未达到 yellow 状态')
-            log('恢复完成；请验证业务后再启动业务服务。恢复仓库保持只读。')
-            print(json.dumps({'result': 'success', 'snapshot': manifest['snapshot'], 'databases': manifest['databases']}))
+            if 'opensearch' in self.components:
+                self.restore_opensearch(stage, manifest, conflicts)
+            if 'mariadb' in self.components:
+                log('恢复 MariaDB 业务库（替换备份清单内的库）')
+                with open(stage / 'mariadb.sql', 'rb') as source:
+                    self.sql(source=source)
+                for database in manifest['databases']:
+                    self.sql('USE `' + database + '`; SHOW TABLES;')
+            if 'redis' in self.components:
+                log('恢复 Redis 全部 DB（停止 Redis、转换 AOF 并验证重启）')
+                self.redis.restore(stage / 'redis.rdb', manifest['redis'], self.args.overwrite)
+            if 'minio' in self.components:
+                log('恢复 MinIO 对象（覆盖同名对象，保留目标多出的对象）')
+                self.minio.restore(stage / 'minio.tar', manifest['minio'], self.args.overwrite)
+            log('恢复完成: ' + ', '.join(self.components) + '；请验证相关业务。')
+            result = {'result': 'success', 'components': self.components,
+                      'redis_restored': 'redis' in self.components, 'minio_restored': 'minio' in self.components}
+            if 'mariadb' in self.components:
+                result['databases'] = manifest['databases']
+            if 'opensearch' in self.components:
+                result['snapshot'] = manifest['snapshot']
+            print(json.dumps(result))
+
+    def restore_opensearch(self, stage, manifest, conflicts):
+        log('将完整快照仓库复制到目标 Pod 持久卷')
+        with open(stage / 'repository.tar', 'rb') as source:
+            self.exec('opensearch', ['tar', '--no-same-owner', '-C', self.args.repository_path, '-xf', '-'], source=source)
+        self.register(readonly=True)
+        snapshot = next((s for s in self.snapshots() if s['snapshot'] == manifest['snapshot']), None)
+        if not snapshot or snapshot['state'] != 'SUCCESS' or sorted(snapshot['indices']) != sorted(manifest['indices']):
+            raise BackupError('仓库快照与备份清单不一致')
+        log('恢复 OpenSearch 索引' + ('（删除同名索引）' if conflicts else ''))
+        for index in conflicts:
+            if not self.api('DELETE', '/' + quote(index, safe='')).get('acknowledged'):
+                raise BackupError('索引删除未确认: ' + index)
+        result = self.api('POST', self.repository + '/' + manifest['snapshot'] + '/_restore?wait_for_completion=true',
+                          {'indices': '*', 'include_global_state': False, 'include_aliases': True}, timeout=self.args.timeout)
+        shards = result.get('snapshot', {}).get('shards', {})
+        if shards.get('failed') != 0 or not shards.get('total') or shards.get('successful') != shards.get('total'):
+            raise BackupError('OpenSearch 恢复不完整: ' + json.dumps(result))
+        health = self.api('GET', '/_cluster/health?wait_for_status=yellow&timeout=60s', timeout=75)
+        if health.get('timed_out') or health.get('status') == 'red':
+            raise BackupError('恢复后 OpenSearch 未达到 yellow 状态')
 
 
 def parser():
-    result = argparse.ArgumentParser(description='MariaDB + OpenSearch 单文件备份恢复（一期：单节点、HTTP 无认证 OpenSearch）')
+    result = argparse.ArgumentParser(description='MariaDB + OpenSearch + Redis + MinIO 单文件备份恢复（单节点存储）')
     result.add_argument('module', choices=['backup', 'restore'])
     result.add_argument('action', choices=['check', 'run'])
     result.add_argument('archive', nargs='?', help='恢复用的 .tar.gz 备份包')
+    result.add_argument('--component', choices=['all', *PAYLOADS], default='all', help='仅检查/备份/恢复指定组件，默认全部')
     result.add_argument('--output-dir', default='/var/backups/openbkn')
     result.add_argument('--repository', default='offsite-backup', help='专用仓库；备份成功后删除其中所有旧快照')
     result.add_argument('--repository-path', default='/usr/share/opensearch/snapshots')
     result.add_argument('--databases', nargs='+', help='默认自动发现所有非系统库')
     result.add_argument('--timeout', type=int, default=3600)
     result.add_argument('--poll-interval', type=int, default=10)
-    result.add_argument('--overwrite', action='store_true', help='允许替换目标业务库及同名索引')
+    result.add_argument('--overwrite', action='store_true', help='允许替换目标业务库、同名索引、Redis 全部 DB，覆盖 MinIO 同名对象（保留多余对象）')
     result.add_argument('--writers-stopped', action='store_true', help='确认业务服务已停止写入（恢复必需）')
+    result.add_argument('--skip-minio', action='store_true', help='仅备份时使用：不包含 MinIO')
+    result.add_argument('--minio-namespace', default=os.environ.get('MINIO_NAMESPACE', 'openbkn'))
+    result.add_argument('--minio-selector', default='component=minio')
+    result.add_argument('--minio-pod')
+    result.add_argument('--minio-container')
+    result.add_argument('--minio-endpoint', default='http://127.0.0.1:9000', help='从 MinIO 容器内访问的 S3 API 地址')
+    result.add_argument('--minio-part-size', default='8MiB', help='mc pipe 上传分片大小；小内存 Pod 可降低，范围由 mc 校验')
+    result.add_argument('--minio-buckets', nargs='+', help='仅备份时使用：默认备份所有业务 bucket，不含 MinIO 内部配置')
+    result.add_argument('--skip-redis', action='store_true', help='仅备份时使用：不包含 Redis')
+    result.add_argument('--redis-namespace', default=os.environ.get('REDIS_NAMESPACE', 'resource'))
+    result.add_argument('--redis-selector', default='app=redis-redis')
+    result.add_argument('--redis-pod')
+    result.add_argument('--redis-container', default='redis')
+    result.add_argument('--redis-user', default='root')
+    result.add_argument('--redis-config-command', default='CONFIG_NEW', help='Redis 重命名后的 CONFIG 命令，原生命令可填 CONFIG')
     for service, selector in [('mariadb', 'app=mariadb'), ('opensearch', 'app.kubernetes.io/instance=opensearch')]:
         result.add_argument('--' + service + '-namespace', default=os.environ.get(service.upper() + '_NAMESPACE', 'resource'))
         result.add_argument('--' + service + '-selector', default=selector)
@@ -418,22 +569,43 @@ def parser():
     return result
 
 
-def main(argv=None):
-    args = parser().parse_args(argv)
-    if not re.fullmatch(r'[a-z0-9-]+', args.repository):
-        raise BackupError('仓库名称只支持小写字母、数字和横线')
-    if not args.repository_path.startswith('/') or '..' in PurePosixPath(args.repository_path).parts or args.repository_path == '/':
-        raise BackupError('仓库路径必须是专用绝对路径')
+def validate_options(args):
+    if 'opensearch' in args.components:
+        if not re.fullmatch(r'[a-z0-9-]+', args.repository):
+            raise BackupError('仓库名称只支持小写字母、数字和横线')
+        if not args.repository_path.startswith('/') or '..' in PurePosixPath(args.repository_path).parts or args.repository_path == '/':
+            raise BackupError('仓库路径必须是专用绝对路径')
     if args.timeout < 1 or not 1 <= args.poll_interval <= 30:
         raise BackupError('timeout 必须为正数，poll-interval 必须在 1 到 30 秒之间')
+    if args.databases and ('mariadb' not in args.components or args.module == 'restore'):
+        raise BackupError('--databases 仅用于 MariaDB 备份，恢复库范围由备份包决定')
+    if args.minio_buckets and ('minio' not in args.components or args.module == 'restore'):
+        raise BackupError('--minio-buckets 仅用于 MinIO 备份，恢复范围由备份包决定')
+
+
+def main(argv=None):
+    args = parser().parse_args(argv)
+    if (args.skip_redis or args.skip_minio) and (args.module == 'restore' or args.component != 'all'):
+        raise BackupError('--skip-redis/--skip-minio 仅用于完整备份；单组件请通过组件名称选择')
     if args.module == 'backup':
         if args.archive:
             raise BackupError('backup 不接受备份包参数')
+        args.components = configured_components(args)
+        validate_options(args)
         cluster = Cluster(args)
         cluster.check()
         if args.action == 'check':
-            print(json.dumps({'result': 'ready', 'databases': cluster.databases,
-                              'repository_path': args.repository_path, 'note': '仅完成前置检查，尚未备份；请确保输出目录有足够空间'}))
+            result = {'result': 'ready', 'components': args.components,
+                      'note': '仅完成前置检查，尚未备份；请确保输出目录有足够空间'}
+            if 'mariadb' in args.components:
+                result['databases'] = cluster.databases
+            if 'opensearch' in args.components:
+                result['repository_path'] = args.repository_path
+            if 'minio' in args.components:
+                result['minio'] = {'buckets': cluster.minio.buckets, 'pod': cluster.minio.pod}
+            if 'redis' in args.components:
+                result['redis'] = {'version': cluster.redis.version, 'pvc': cluster.redis.pvc}
+            print(json.dumps(result, ensure_ascii=False))
         else:
             destination = Path(args.output_dir).resolve()
             destination.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -448,12 +620,18 @@ def main(argv=None):
             raise BackupError('restore 必须指定备份包')
         with tempfile.TemporaryDirectory(prefix='openbkn-restore-') as tmp:
             stage = Path(tmp)
-            manifest = unpack(args.archive, stage)
+            selected = None if args.component == 'all' else [args.component]
+            manifest = unpack(args.archive, stage, selected)
+            args.components = manifest_components(manifest) if selected is None else selected
+            validate_options(args)
             cluster = Cluster(args)
             cluster.check()
             if args.action == 'check':
                 cluster.restore_preflight(manifest)
-                print(json.dumps({'result': 'ready', 'snapshot': manifest['snapshot'], 'note': '校验完成，尚未恢复'}))
+                result = {'result': 'ready', 'components': args.components, 'note': '校验完成，尚未恢复'}
+                if 'opensearch' in args.components:
+                    result['snapshot'] = manifest['snapshot']
+                print(json.dumps(result, ensure_ascii=False))
             else:
                 cluster.restore(stage, manifest)
 

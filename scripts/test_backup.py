@@ -14,6 +14,7 @@ import backup
 class FakeCluster(backup.Cluster):
     def __init__(self, args):
         self.args = args
+        self.components = getattr(args, 'components', ['mariadb', 'opensearch'] if args.component == 'all' else [args.component])
         self.databases = ['openbkn', 'safe', 'bkn_trace']
         self.mariadb_version = '11.4.7-MariaDB'
         self.opensearch_version = '2.19.4'
@@ -106,7 +107,7 @@ class BackupTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.args = backup.parser().parse_args(['backup', 'run'])
+        self.args = backup.parser().parse_args(['backup', 'run', '--skip-redis', '--skip-minio'])
         self.cluster = FakeCluster(self.args)
 
     def package(self):
