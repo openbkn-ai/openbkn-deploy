@@ -57,7 +57,9 @@ jobs:
           path: _foundry
       - uses: actions/setup-go@v5
         with:
-          go-version-file: scripts/upgrades/0.1.5/permission_model_transition/authz_migrate/go.mod
+          # The migration module locally replaces bkn-safe/server with the
+          # checkout under _foundry, whose go.mod may require a newer Go.
+          go-version-file: _foundry/bkn-safe/server/go.mod
       - name: Verify shared receipt contract and migration writer
         run: |
           set -euo pipefail

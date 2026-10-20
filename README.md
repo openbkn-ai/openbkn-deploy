@@ -6,6 +6,8 @@ One-click deployment of **OpenBKN** onto a single-node Kubernetes cluster.
 
 This repository provides scripts to install OpenBKN along with its dependencies including Kubernetes, infrastructure services, and data services.
 
+For portable MariaDB and OpenSearch backups, restore commands, and initial snapshot directory setup, see the [backup and restore guide (中文)](BACKUP.zh.md). Entry points: `deploy.sh backup check|run` and `deploy.sh restore check|run`.
+
 **Platforms:** **Linux** is the recommended and fully documented install target (`preflight.sh`, k3s or kubeadm, data services). **macOS** is **optional** for **local development only** (Docker + kind + `dev/mac.sh`); see **[Mac install (dev)](dev/README.md)** ([中文](dev/README.zh.md)) — not a substitute for Linux production installs.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE.txt)

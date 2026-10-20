@@ -40,6 +40,8 @@ usage() {
     echo "Usage: $0 <module> [action]"
     echo ""
     echo "Modules and Actions:"
+    echo "  backup check|run [options]    Back up MariaDB + OpenSearch to one portable archive"
+    echo "  restore check|run <archive> [options]  Validate/restore a backup (see BACKUP.zh.md)"
     echo "  k8s install                   Initialize K8s master node with CNI and DNS"
     echo "  k8s reset                     Reset Kubernetes cluster state (kubeadm reset -f + cleanup)"
     echo "  k8s status                    Show cluster status"
@@ -498,6 +500,11 @@ main() {
     if [[ -z "${module}" ]]; then
         usage
         exit 0
+    fi
+
+    if [[ "${module}" == "backup" || "${module}" == "restore" ]]; then
+        python3 "${SCRIPT_DIR}/scripts/backup.py" "${module}" "${action}" "$@"
+        return $?
     fi
 
     if [[ "${module}" == "config" ]]; then
