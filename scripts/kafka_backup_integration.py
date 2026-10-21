@@ -42,11 +42,7 @@ def main():
         while len(ports) < 4:
             ports.add(free_port())
         source, source_controller, target, target_controller = sorted(ports)
-        credentials = work / 'credentials'
-        credentials.mkdir()
         password = 'test"password\\with-escape'
-        (credentials / 'password').write_text(password)
-        escaped_password = password.replace('\\', '\\\\').replace('"', '\\"')
         for node, port, controller in [(1, source, source_controller), (2, target, target_controller)]:
             props = work / ('broker-%d.properties' % node)
             values = {
@@ -62,10 +58,11 @@ def main():
                 'num.network.threads': 2, 'num.io.threads': 2,
             }
             if args.sasl:
-                # Java properties parsing consumes one level of backslash escaping.
-                jaas = 'org.apache.kafka.common.security.plain.PlainLoginModule required username="kafkauser" password="%s" user_kafkauser="%s";' % (escaped_password, escaped_password)
+                jaas = ('org.apache.kafka.common.security.plain.PlainLoginModule required '
+                        'username="kafkauser" password="${env:KAFKA_TEST_PASSWORD}" '
+                        'user_kafkauser="${env:KAFKA_TEST_PASSWORD}";')
                 values.update({'sasl.enabled.mechanisms': 'PLAIN', 'sasl.mechanism.inter.broker.protocol': 'PLAIN',
-                               'listener.name.client.plain.sasl.jaas.config': jaas.replace('\\', '\\\\')})
+                               'listener.name.client.plain.sasl.jaas.config': jaas})
             props.write_text('\n'.join('%s=%s' % item for item in values.items()) + '\n')
             cluster = base64.urlsafe_b64encode(uuid.uuid4().bytes).decode().rstrip('=')
             subprocess.run([args.java, '-Xmx128m', '-cp', libs, 'kafka.tools.StorageTool', 'format',
@@ -88,8 +85,9 @@ def main():
         environment = dict(os.environ, TASK_KAFKA_PROTOCOL='SASL_PLAINTEXT' if args.sasl else 'PLAINTEXT',
                            TASK_KAFKA_USER='kafkauser', TASK_KAFKA_MECHANISM='PLAIN', TASK_KAFKA_REPLICAS='1',
                            TASK_KAFKA_LEDGER_RESTORED='true',
-                           KAFKA_BACKUP_DISPOSABLE_TEST='yes')
-        command = [args.java, '-Xmx256m', '-Djava.io.tmpdir=' + str(work), '-Dopenbkn.kafka.credentials=' + str(credentials),
+                           KAFKA_BACKUP_DISPOSABLE_TEST='yes',
+                           KAFKA_TEST_PASSWORD=password)
+        command = [args.java, '-Xmx256m', '-Djava.io.tmpdir=' + str(work),
                    '-cp', '%s:%s:%s' % (jars / 'kafka-backup.jar', jars / 'kafka-backup-tests.jar', libs),
                    'KafkaBackupSmoke', '127.0.0.1:%d' % source, '127.0.0.1:%d' % target, str(work / 'smoke')]
         subprocess.run(command, env=environment, check=True, timeout=240)
