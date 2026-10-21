@@ -292,9 +292,41 @@ class KafkaTests(unittest.TestCase):
 
     def test_default_scope_and_include_flag(self):
         args = backup.parser().parse_args(['backup', 'run'])
-        self.assertNotIn('kafka', backup.configured_components(args))
+        self.assertEqual(list(backup.PAYLOADS), backup.configured_components(args))
         args.include_kafka = True
         self.assertIn('kafka', backup.configured_components(args))
+
+
+class IntegrationCredentialTests(unittest.TestCase):
+    @unittest.skipUnless(__import__('os').__dict__.get('memfd_create'), 'Linux memfd required')
+    def test_java_style_secret_path_is_readable_by_inherited_process_twice(self):
+        import os
+        import subprocess
+        import sys
+        import kafka_backup_integration as integration
+        password = 'test"password\\with-escape'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with contextlib.ExitStack() as stack:
+                directory, descriptor = integration.memory_credentials(root, password, stack)
+                secret = directory / 'password'
+                self.assertTrue(secret.is_symlink())
+                self.assertEqual(secret.read_text(), password)
+                self.assertEqual(os.fstat(descriptor).st_mode & 0o777, 0o600)
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+                result = subprocess.run([sys.executable, '-c',
+                    'import pathlib,sys; p=pathlib.Path(sys.argv[1]); print(p.read_bytes().hex()); print(p.read_bytes().hex())',
+                    str(secret)], pass_fds=(descriptor,), capture_output=True, text=True, check=True)
+                self.assertEqual(result.stdout.splitlines(), [password.encode().hex()] * 2)
+                self.assertFalse(any(p.is_file() and not p.is_symlink() for p in root.rglob('*')))
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+
+    def test_jaas_escapes_quote_and_backslash_for_environment_provider(self):
+        import kafka_backup_integration as integration
+        escaped = integration.sasl_jaas('a"b\\c')
+        self.assertIn('password="a\\"b\\\\c"', escaped)
+        self.assertIn('user_kafkauser="a\\"b\\\\c"', escaped)
 
 
 if __name__ == '__main__':

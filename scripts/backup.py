@@ -18,6 +18,8 @@ import time
 import uuid
 from urllib.parse import quote
 
+from k8s_backup import K8sBackup, add_arguments as add_k8s_arguments, validate_archive as validate_k8s_archive, validate_document as validate_k8s_document, validate_metadata as validate_k8s_metadata
+
 from redis_backup import RedisBackup, validate_manifest
 from minio_backup import MinioBackup, validate_metadata, archive_inventory
 from kafka_backup import KafkaBackup, add_arguments as add_kafka_arguments, archive_inventory as kafka_inventory
@@ -34,14 +36,24 @@ class BackupError(Exception):
 SYSTEM_DATABASES = {'information_schema', 'performance_schema', 'mysql', 'sys'}
 DATABASE_NAME_PATTERN = r'[A-Za-z0-9_-]+'
 PAYLOADS = {'mariadb': 'mariadb.sql', 'opensearch': 'repository.tar',
-            'redis': 'redis.rdb', 'minio': 'minio.tar', 'kafka': 'kafka.tar'}
+            'redis': 'redis.rdb', 'minio': 'minio.tar', 'kafka': 'kafka.tar', 'k8s': 'k8s.tar'}
+
+
+def requested_components(args):
+    selected = getattr(args, 'selected_components', None)
+    if selected is not None:
+        if len(set(selected)) != len(selected):
+            raise BackupError('--components 不能重复指定同一组件')
+        return [name for name in PAYLOADS if name in selected]
+    return None if args.component == 'all' else [args.component]
 
 
 def configured_components(args):
-    if args.component != 'all':
-        return [args.component]
-    return (['mariadb', 'opensearch'] + ([] if args.skip_redis else ['redis'])
-            + ([] if args.skip_minio else ['minio']) + (['kafka'] if args.include_kafka else []))
+    selected = requested_components(args)
+    if selected is not None:
+        return selected
+    return [name for name in PAYLOADS
+            if not (name == 'redis' and args.skip_redis or name == 'minio' and args.skip_minio)]
 
 
 def manifest_components(manifest):
@@ -56,15 +68,15 @@ def manifest_components(manifest):
                 or any(not isinstance(n, str) or n not in PAYLOADS for n in names)
                 or len(set(names)) != len(names)):
             raise BackupError('备份包组件清单无效')
-        if any((name in manifest) != (name in names) for name in ('redis', 'minio', 'kafka')):
+        if any((name in manifest) != (name in names) for name in ('redis', 'minio', 'kafka', 'k8s')):
             raise BackupError('备份包组件清单与元数据不匹配')
         return names
     if (version == 1 and 'redis' in manifest or version == 2 and 'redis' not in manifest):
         raise BackupError('备份包版本与 Redis 元数据不匹配')
     if version < 3 and 'minio' in manifest:
         raise BackupError('旧格式备份包不能声明 MinIO')
-    if 'kafka' in manifest:
-        raise BackupError('旧格式备份包不能声明 Kafka')
+    if 'kafka' in manifest or 'k8s' in manifest:
+        raise BackupError('旧格式备份包不能声明 Kafka/K8s')
     return ['mariadb', 'opensearch'] + (['redis'] if 'redis' in manifest else []) + (['minio'] if version == 3 else [])
 
 
@@ -129,30 +141,41 @@ def safe_members(archive):
         yield member
 
 
-def unpack(package, destination, components=None):
+def unpack(package, destination, components=None, *, for_restore=False):
     """Check the envelope, then extract/hash only the requested component payloads."""
     with tarfile.open(package, 'r:gz') as archive:
         members = list(safe_members(archive))
         names = {m.name for m in members}
-        if 'manifest.json' not in names or names - {'manifest.json'} - set(PAYLOADS.values()) or any(not m.isfile() for m in members):
+        if 'manifest.json' not in names or names - {'manifest.json', 'k8s.json'} - set(PAYLOADS.values()) or any(not m.isfile() for m in members):
             raise BackupError('备份包文件列表不符合支持的格式')
         with archive.extractfile('manifest.json') as source:
             manifest = json.load(source)
         available = manifest_components(manifest)
-        selected = available if components is None else components
+        selected = ([c for c in available if c != 'k8s'] if for_restore else available) if components is None else components
+        if not selected and for_restore:
+            raise BackupError('备份包仅含 K8s 配置留档，没有可自动恢复的数据')
         if not selected or set(selected) - set(available):
             raise BackupError('备份包不包含请求的组件: ' + ', '.join(set(selected) - set(available)))
-        expected_files = {PAYLOADS[c] for c in available}
+        payloads = dict(PAYLOADS)
+        if 'k8s.json' in names and 'k8s.tar' not in names:
+            payloads['k8s'] = 'k8s.json'  # Early configuration-only packages.
+        expected_files = {payloads[c] for c in available}
         if names != expected_files | {'manifest.json'}:
             raise BackupError('备份包格式与文件列表不匹配')
         if not isinstance(manifest.get('sha256'), dict) or set(manifest['sha256']) != expected_files:
             raise BackupError('备份包缺少校验清单')
-        selected_files = {PAYLOADS[c] for c in selected}
+        selected_files = {payloads[c] for c in selected}
         destination.mkdir(parents=True, exist_ok=True)
         archive.extractall(destination, members=[m for m in members if m.name in selected_files | {'manifest.json'}])
     for name in selected_files:
         if digest(destination / name) != manifest['sha256'][name]:
             raise BackupError('备份包校验失败: ' + name)
+    if 'k8s' in selected:
+        if payloads['k8s'] == 'k8s.json':
+            validate_k8s_document(json.loads((destination / 'k8s.json').read_text()), BackupError)
+        else:
+            validate_k8s_archive(destination / 'k8s.tar', BackupError)
+        validate_k8s_metadata(manifest.get('k8s'), BackupError)
     if 'redis' in selected:
         validate_manifest(manifest.get('redis'), BackupError)
         with open(destination / 'redis.rdb', 'rb') as rdb:
@@ -196,6 +219,7 @@ class Cluster:
         self.redis = None
         self.minio = None
         self.kafka = None
+        self.k8s = None
         self.targets = {}
         for service in ('mariadb', 'opensearch'):
             if service not in self.components:
@@ -281,6 +305,10 @@ class Cluster:
         if 'kafka' in self.components:
             self.kafka = KafkaBackup(self.args, run, BackupError, log)
             self.kafka.check()
+
+        if 'k8s' in self.components:
+            self.k8s = K8sBackup(self.args, run, BackupError, log)
+            self.k8s.check()
 
     def check_mariadb(self):
         self.mariadb_version = self.sql('SELECT VERSION();').decode().strip()
@@ -384,6 +412,8 @@ class Cluster:
                 manifest['minio'] = self.minio.backup(stage / 'minio.tar')
             if 'kafka' in self.components:
                 manifest['kafka'] = self.kafka.backup(stage / 'kafka.tar')
+            if 'k8s' in self.components:
+                manifest['k8s'] = self.k8s.backup(stage / 'k8s.tar')
             payloads = [PAYLOADS[c] for c in self.components]
             manifest['sha256'] = {name: digest(stage / name) for name in payloads}
             (stage / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
@@ -464,6 +494,8 @@ class Cluster:
                 'indices': self.api('GET', self.repository + '/' + snapshot)['snapshots'][0]['indices']}
 
     def restore_preflight(self, manifest):
+        if "k8s" in self.components:
+            raise BackupError("K8s 仅配置留档，不支持自动恢复")
         if set(self.components) - set(manifest_components(manifest)):
             raise BackupError('备份包不包含请求的恢复组件')
         # Kafka capability/conflict checks must pass before any component is overwritten.
@@ -575,7 +607,10 @@ def parser():
     result.add_argument('module', choices=['backup', 'restore'])
     result.add_argument('action', choices=['check', 'run'])
     result.add_argument('archive', nargs='?', help='恢复用的 .tar.gz 备份包')
-    result.add_argument('--component', choices=['all', *PAYLOADS], default='all', help='仅检查/备份/恢复指定组件，默认全部')
+    selection = result.add_mutually_exclusive_group()
+    selection.add_argument('--component', choices=['all', *PAYLOADS], default='all', help='兼容单组件入口')
+    selection.add_argument('--components', dest='selected_components', nargs='+', action='extend',
+                           choices=list(PAYLOADS), help='选择一个或多个组件；备份默认全部，恢复默认包内全部')
     result.add_argument('--output-dir', default='/var/backups/openbkn')
     result.add_argument('--repository', default='offsite-backup', help='专用仓库；备份成功后删除其中所有旧快照')
     result.add_argument('--repository-path', default='/usr/share/opensearch/snapshots')
@@ -600,6 +635,7 @@ def parser():
     result.add_argument('--redis-user', default='root')
     result.add_argument('--redis-config-command', default='CONFIG_NEW', help='Redis 重命名后的 CONFIG 命令，原生命令可填 CONFIG')
     add_kafka_arguments(result)
+    add_k8s_arguments(result)
     for service, selector in [('mariadb', 'app=mariadb'), ('opensearch', 'app.kubernetes.io/instance=opensearch')]:
         result.add_argument('--' + service + '-namespace', default=os.environ.get(service.upper() + '_NAMESPACE', 'resource'))
         result.add_argument('--' + service + '-selector', default=selector)
@@ -609,7 +645,9 @@ def parser():
 
 
 def validate_options(args):
-    if args.include_kafka and (args.module != 'backup' or args.component != 'all'):
+    if args.k8s_secrets and (args.module != 'backup' or 'k8s' not in args.components):
+        raise BackupError('--k8s-secrets 仅用于包含 K8s 配置留档的备份')
+    if args.include_kafka and (args.module != 'backup' or requested_components(args) is not None):
         raise BackupError('--include-kafka 仅用于完整备份；单独操作请用 kafka backup/restore')
     if args.kafka_topics and ('kafka' not in args.components or args.module != 'backup'):
         raise BackupError('--kafka-topics 仅用于 Kafka 备份，恢复范围由包决定')
@@ -632,8 +670,13 @@ def validate_options(args):
 
 def main(argv=None):
     args = parser().parse_args(argv)
-    if (args.skip_redis or args.skip_minio) and (args.module == 'restore' or args.component != 'all'):
-        raise BackupError('--skip-redis/--skip-minio 仅用于完整备份；单组件请通过组件名称选择')
+    selected = requested_components(args)
+    if args.module == 'restore' and selected and 'k8s' in selected:
+        raise BackupError('K8s 仅配置留档，不支持自动恢复；请解包 k8s.tar 后按 RESTORE.zh.md 人工恢复')
+    if args.include_kafka and (args.module != 'backup' or selected is not None):
+        raise BackupError('--include-kafka 已由默认全组件备份包含，不能用于恢复或显式组件选择')
+    if (args.skip_redis or args.skip_minio) and (args.module == 'restore' or requested_components(args) is not None):
+        raise BackupError('--skip-redis/--skip-minio 仅用于默认范围备份，不能与显式组件选择同时使用')
     if args.module == 'backup':
         if args.archive:
             raise BackupError('backup 不接受备份包参数')
@@ -670,9 +713,10 @@ def main(argv=None):
             raise BackupError('restore 必须指定备份包')
         with tempfile.TemporaryDirectory(prefix='openbkn-restore-') as tmp:
             stage = Path(tmp)
-            selected = None if args.component == 'all' else [args.component]
-            manifest = unpack(args.archive, stage, selected)
-            args.components = manifest_components(manifest) if selected is None else selected
+            manifest = unpack(args.archive, stage, selected, for_restore=True)
+            if 'k8s' in manifest_components(manifest):
+                log('K8s 配置留档不自动恢复；需要时解包 k8s.tar 按 RESTORE.zh.md 人工恢复')
+            args.components = [c for c in manifest_components(manifest) if c != 'k8s'] if selected is None else selected
             validate_options(args)
             if 'kafka' in args.components:
                 validate_kafka_restore(manifest['kafka'], BackupError)

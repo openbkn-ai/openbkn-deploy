@@ -351,6 +351,7 @@ class BackupTests(unittest.TestCase):
                 instance.api('PUT', '/_snapshot/offsite-backup', {})
 
     def test_discovery_and_check_against_kubectl_contract(self):
+        self.args.components = ["mariadb", "opensearch"]
         def pod(service):
             return {'metadata': {'name': service + '-0'},
                     'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}]},

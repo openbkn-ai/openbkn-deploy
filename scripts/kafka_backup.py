@@ -38,7 +38,7 @@ def require_restored_ledger(metadata, restored, error):
 
 def add_arguments(parser):
     import os
-    parser.add_argument('--include-kafka', action='store_true', help='完整备份额外包含 Kafka（默认保持原有四组件）')
+    parser.add_argument('--include-kafka', action='store_true', help='兼容旧命令；默认备份已包含 Kafka，无需指定')
     parser.add_argument('--kafka-namespace', default=os.environ.get('KAFKA_NAMESPACE', 'resource'))
     parser.add_argument('--kafka-bootstrap', help='默认按 Broker 所属 Helm release/namespace 推导 Service 地址')
     parser.add_argument('--kafka-selector', default='app.kubernetes.io/name=kafka,app.kubernetes.io/component=broker')
