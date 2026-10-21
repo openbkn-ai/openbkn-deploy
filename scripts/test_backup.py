@@ -278,6 +278,40 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(command[-3:], ['openbkn', 'safe', 'bkn_trace'])
             self.assertIn('MYSQL_PWD', command[2])
 
+    def test_hyphenated_database_discovery_backup_and_restore(self):
+        self.cluster.databases = ['ecommerce-ops', 'ecommerce_ops']
+        with mock.patch.object(self.cluster, 'sql', wraps=self.cluster.sql) as sql:
+            _, stage, manifest = self.package()
+            self.assertEqual(manifest['databases'], ['ecommerce-ops', 'ecommerce_ops'])
+            self.args.writers_stopped = True
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.cluster.restore(stage, manifest)
+            queries = [call.args[0] for call in sql.call_args_list if call.args]
+            self.assertTrue(any("TABLE_SCHEMA IN ('ecommerce-ops','ecommerce_ops')" in query for query in queries))
+            self.assertIn('USE `ecommerce-ops`; SHOW TABLES;', queries)
+
+        instance = object.__new__(backup.Cluster)
+        instance.args = self.args
+        with mock.patch.object(instance, 'exec', return_value=b''), mock.patch.object(instance, 'sql') as sql:
+            sql.side_effect = [b'11.4.7-MariaDB\n', b'mysql\necommerce-ops\necommerce_ops\n']
+            instance.check_mariadb()
+        self.assertEqual(instance.databases, ['ecommerce-ops', 'ecommerce_ops'])
+
+    def test_database_names_cannot_inject_dump_options(self):
+        instance = object.__new__(backup.Cluster)
+        with mock.patch.object(instance, 'exec', return_value=b'') as execute:
+            instance.sql(databases=['ecommerce-ops', '--all-databases'])
+        command = execute.call_args.args[1]
+        self.assertIn('--databases -- "$@"', command[2])
+        self.assertEqual(command[-2:], ['ecommerce-ops', '--all-databases'])
+
+    def test_database_validation_still_rejects_sql_metacharacters(self):
+        for name in ("db' OR 1=1 --", 'db`', 'db\\name', 'db;DROP DATABASE mysql'):
+            with self.subTest(name=name):
+                self.cluster.databases = [name]
+                with self.assertRaisesRegex(backup.BackupError, '数据库清单'):
+                    self.package()
+
     def test_partial_opensearch_restore_does_not_import_sql(self):
         _, stage, manifest = self.package()
         self.args.writers_stopped = True

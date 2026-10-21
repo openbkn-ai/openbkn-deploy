@@ -1,0 +1,35 @@
+name: Kafka backup regressions
+on:
+  pull_request:
+    paths: ['scripts/*kafka*backup*.py', 'scripts/kafka_worker.py', 'tools/kafka-backup/**', '.github/workflows/ci-kafka-backup.yml']
+  push:
+    branches: [main]
+    paths: ['scripts/*kafka*backup*.py', 'scripts/kafka_worker.py', 'tools/kafka-backup/**', '.github/workflows/ci-kafka-backup.yml']
+permissions:
+  contents: read
+jobs:
+  isolated-kafka:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Validate shipped artifacts and offline regressions
+        run: make ci
+      - name: Obtain stock Kafka runtime libraries
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/kafka-backup-runtime
+          docker create --name kafka-backup-libs apache/kafka:3.9.0
+          docker cp kafka-backup-libs:/opt/kafka/libs /tmp/kafka-backup-runtime/libs
+          docker rm kafka-backup-libs
+      - name: Compile sources using Java 17
+        run: python3 tools/kafka-backup/build.py --classpath '/tmp/kafka-backup-runtime/libs/*'
+      - name: Online export and separate-cluster restore
+        run: python3 scripts/kafka_backup_integration.py --kafka-home /tmp/kafka-backup-runtime --sasl
