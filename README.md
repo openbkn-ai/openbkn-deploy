@@ -687,3 +687,27 @@ Set `observability.admissionBudget` in the persistent `--config` YAML used for i
 Fill all four deployment/SLO thresholds (`opensearchCapacityThreshold`, `opensearchHeapThreshold`, `collectorQueueThreshold`, `storagePoolThreshold`) with finite numbers in `(0, 1]`. They deliberately have no default. Leaving them empty keeps budget-dependent configuration reads and enable requests unavailable, with explicit diagnostic fields; it does not disable existing capture or stop unrelated APIs. The metrics endpoint must provide both `otelcol_exporter_queue_size` and a positive `otelcol_exporter_queue_capacity`.
 
 Keep these values in the config used on every upgrade. A separate one-time Helm override or `kubectl set env` does not establish that persistent configuration source. Add the block explicitly to existing configurations before requesting Trace/Evidence enable. If applying config changes without changing Chart versions, use `--force-upgrade` so the installer does not skip the release.
+
+### Sandbox REST gateway
+
+Sandbox OSDK uses an explicit `controlPlane.env.BKN_BASE_URL` before any installer
+discovery. Existing explicit Helm values are preserved; current values files and
+`--set` arguments override them. Without an origin, the installer discovers a
+single ingress-nginx controller Service and uses its HTTP Service port, not its
+NodePort. Its selector/target port configure a separate executor gateway egress
+rule. No REST address is derived from the MCP URL and no executor needs cluster
+discovery permissions. Missing or ambiguous controllers stop before rollout.
+For a custom origin, configure `networkPolicy.gateway` or `additionalEgress` as
+needed; discovery is not required when the explicit origin is valid.
+
+This requires the matching Foundry sandbox Chart with `controlPlane.gateway`
+support. Existing pooled executors need a controlled refresh with workspace
+preservation after configuration rollout. The installer does not restart them
+merely by changing a ConfigMap.
+
+Regression checks against the matching Foundry checkout:
+
+```bash
+BKN_FOUNDRY_SOURCE=/path/to/bkn-foundry bash scripts/services/openbkn_sandbox_gateway_test.sh
+python3 -m unittest discover -s scripts/lib -p test_sandbox_gateway.py
+```
