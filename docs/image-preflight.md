@@ -22,10 +22,15 @@ is required. `Never` supports preloaded offline images and fails when absent.
 
 `OPENBKN_IMAGE_PREFLIGHT_TIMEOUT` bounds each probe's scheduling/pull wait (default
 240 seconds). Authentication, scheduling, insufficient spare resources, a new
-service account absent from the current release can fail preflight. Pod affinity
-and anti-affinity are explicitly unsupported and fail closed: a probe with different
-labels cannot promise identical scheduling semantics. The installer preserves the old release rather than weakening
-constraints. This checks existing Recreate Deployment nodes, not future autoscaling
+service account absent from the current release can fail preflight. Nonempty
+`requiredDuringSchedulingIgnoredDuringExecution` pod affinity or anti-affinity
+terms remain unsupported and fail closed: a probe with different labels cannot
+promise identical hard scheduling semantics. Preferred-only pod affinity and
+anti-affinity terms are deep-copied unchanged, including the default Vega soft
+anti-affinity. They affect scoring rather than the eligible-node set; the probe
+still requires its one current target node through node affinity. Existing node
+selectors, required node-affinity terms and tolerations remain enforced. The
+installer preserves the old release rather than weakening hard constraints. This checks existing Recreate Deployment nodes, not future autoscaling
 nodes or StatefulSet rollouts. A later rollout can be scheduled on another eligible
 node; this check does not prove that node has the image cached. Multi-node rollout
 coverage needs separate acceptance before claiming outage prevention across all

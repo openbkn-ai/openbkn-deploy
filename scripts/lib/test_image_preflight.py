@@ -58,11 +58,54 @@ class PreflightTest(unittest.TestCase):
         self.assertEqual(security['capabilities'], {'drop': ['ALL']})
         self.assertFalse(security['allowPrivilegeEscalation'])
 
-    def test_pod_affinity_fails_closed_instead_of_changing_label_semantics(self):
+    def test_required_pod_affinity_and_anti_affinity_still_fail_closed(self):
+        for kind in ('podAffinity', 'podAntiAffinity'):
+            with self.subTest(kind=kind):
+                template = copy.deepcopy(TEMPLATE)
+                template['spec']['affinity'] = {kind: {
+                    'requiredDuringSchedulingIgnoredDuringExecution': [{}],
+                    'preferredDuringSchedulingIgnoredDuringExecution': [{'weight': 100}],
+                }}
+                with self.assertRaisesRegex(m.PreflightError, 'affinity'):
+                    m.probe_spec(template, 'node1', 'probe', 'ns')
+
+    def test_preferred_pod_constraints_are_deep_copied_and_node_pin_is_retained(self):
         template = copy.deepcopy(TEMPLATE)
-        template['spec']['affinity'] = {'podAntiAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': [{}]}}
-        with self.assertRaisesRegex(m.PreflightError, 'affinity'):
-            m.probe_spec(template, 'node1', 'probe', 'ns')
+        preferred = [{'weight': 100, 'podAffinityTerm': {
+            'topologyKey': 'kubernetes.io/hostname',
+            'labelSelector': {'matchLabels': {'module': 'vega-backend'}},
+        }}]
+        template['spec']['affinity'] = {
+            kind: {'requiredDuringSchedulingIgnoredDuringExecution': [],
+                   'preferredDuringSchedulingIgnoredDuringExecution': copy.deepcopy(preferred)}
+            for kind in ('podAffinity', 'podAntiAffinity')
+        }
+        template['spec']['affinity']['nodeAffinity'] = {
+            'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [
+                {'matchExpressions': [{'key': 'zone', 'operator': 'In', 'values': ['a']}]},
+                {'matchExpressions': [{'key': 'zone', 'operator': 'In', 'values': ['b']}]},
+            ]}}
+        before = copy.deepcopy(template)
+        probe = m.probe_spec(template, 'node1', 'probe', 'ns')['spec']
+        self.assertEqual(template, before)
+        for kind in ('podAffinity', 'podAntiAffinity'):
+            self.assertEqual(probe['affinity'][kind], template['spec']['affinity'][kind])
+            probe['affinity'][kind]['preferredDuringSchedulingIgnoredDuringExecution'][0]['weight'] = 1
+            self.assertEqual(template['spec']['affinity'][kind]['preferredDuringSchedulingIgnoredDuringExecution'][0]['weight'], 100)
+        for original, pinned in zip(before['spec']['affinity']['nodeAffinity']['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms'],
+                                    probe['affinity']['nodeAffinity']['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms']):
+            self.assertEqual(pinned['matchExpressions'], original['matchExpressions'])
+            self.assertEqual(pinned['matchFields'], [{'key': 'metadata.name', 'operator': 'In', 'values': ['node1']}])
+        self.assertEqual(probe['nodeSelector'], before['spec']['nodeSelector'])
+        self.assertEqual(probe['tolerations'], before['spec']['tolerations'])
+
+    def test_default_vega_rendered_soft_anti_affinity_is_supported(self):
+        # Minimal shape extracted from the real Vega default Helm render. The
+        # fixture is self-contained; CI never depends on another checkout.
+        template = json.loads((Path(__file__).parent / 'fixtures' / 'vega_preferred_anti_affinity.json').read_text())
+        probe = m.probe_spec(template, 'node1', 'probe', 'ns')['spec']
+        self.assertEqual(probe['affinity']['podAntiAffinity'], template['spec']['affinity']['podAntiAffinity'])
+        self.assertEqual(probe['affinity']['nodeAffinity']['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms'][0]['matchFields'][0]['values'], ['node1'])
 
     def test_dry_run_normalizes_existing_output_and_dry_run_flags(self):
         self.assertEqual(m.dry_run_args(['upgrade', '--install', 'core', 'chart', '-o', 'yaml', '--dry-run=client', '--output=json']), ['upgrade', '--install', 'core', 'chart', '--dry-run=server', '--output=json'])

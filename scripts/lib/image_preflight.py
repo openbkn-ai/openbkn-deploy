@@ -50,8 +50,12 @@ def run(args, *, body=None):
 
 def probe_spec(template, node, name, namespace):
     original = template['spec']
-    if any(original.get('affinity', {}).get(key) for key in ('podAffinity', 'podAntiAffinity')):
-        raise PreflightError('pod affinity cannot be safely reproduced by a pull-only probe')
+    if any((original.get('affinity', {}).get(key) or {}).get(
+            'requiredDuringSchedulingIgnoredDuringExecution')
+           for key in ('podAffinity', 'podAntiAffinity')):
+        raise PreflightError('required pod affinity cannot be safely reproduced by a pull-only probe')
+    # Preferred pod terms only score eligible nodes. Preserve them below; the
+    # required node-name constraint pins this probe to one current target node.
     spec = {key: copy.deepcopy(original[key]) for key in (
         'nodeSelector', 'affinity', 'tolerations', 'schedulerName', 'runtimeClassName',
         'imagePullSecrets', 'serviceAccountName', 'securityContext',

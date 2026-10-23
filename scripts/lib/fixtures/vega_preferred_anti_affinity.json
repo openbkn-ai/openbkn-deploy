@@ -1,0 +1,33 @@
+{
+  "spec": {
+    "affinity": {
+      "podAntiAffinity": {
+        "preferredDuringSchedulingIgnoredDuringExecution": [
+          {
+            "weight": 100,
+            "podAffinityTerm": {
+              "topologyKey": "kubernetes.io/hostname",
+              "labelSelector": {
+                "matchExpressions": [
+                  {
+                    "key": "module",
+                    "operator": "In",
+                    "values": [
+                      "vega-backend"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "containers": [
+      {
+        "name": "vega-backend",
+        "image": "ghcr.io/openbkn-ai/vega-backend:__VERSION__"
+      }
+    ]
+  }
+}
