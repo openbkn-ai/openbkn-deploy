@@ -6,6 +6,7 @@ Probe pods execute no application code and mount no workload data or credentials
 import argparse
 import copy
 import json
+import re
 import subprocess
 import sys
 import time
@@ -16,6 +17,24 @@ import yaml
 
 class PreflightError(RuntimeError):
     pass
+
+
+def probe_pull_policy(container):
+    policy = container.get('imagePullPolicy')
+    if policy == 'Never':
+        return 'Never'
+    if policy == 'Always':
+        return 'Always'
+    if policy not in (None, '', 'IfNotPresent'):
+        raise PreflightError('unsupported image pull policy')
+    # An immutable cached image already satisfies the target workload's pull
+    # policy. Forcing Always would unnecessarily join kubelet's serial pull
+    # queue and can block a prewarmed core upgrade behind a stalled sample.
+    if re.search(r'@sha256:[0-9a-f]{64}$', container['image']):
+        return 'IfNotPresent'
+    # Mutable tags must still resolve remotely; a stale tag cache cannot prove
+    # that the replacement image is available. Explicit Never remains above.
+    return 'Always'
 
 
 def run(args, *, body=None):
@@ -56,7 +75,7 @@ def probe_spec(template, node, name, namespace):
         if 'runAsUser' not in security and 'runAsUser' not in spec.get('securityContext', {}):
             security['runAsUser'] = 65532
         probes.append({'name': 'pull-' + str(i), 'image': container['image'],
-                       'imagePullPolicy': 'Always', 'command': ['/'], 'securityContext': security,
+                       'imagePullPolicy': probe_pull_policy(container), 'command': ['/'], 'securityContext': security,
                        'resources': {'requests': {'cpu': '1m', 'memory': '1Mi'}, 'limits': {'cpu': '10m', 'memory': '16Mi'}}})
     spec.update({'restartPolicy': 'Never', 'automountServiceAccountToken': False,
                  'terminationGracePeriodSeconds': 0, 'containers': probes})
@@ -121,7 +140,7 @@ def preflight(namespace, release, helm_args, timeout=240, execute=run, clock=tim
                 probe = probe_spec(target['spec']['template'], node, name, namespace)
                 # '/' is a directory in every container root filesystem, so
                 # exec fails without starting the image's application.
-                print('Pre-pull on ' + node + ': ' + ', '.join(c['image'] for c in probe['spec']['containers']), flush=True)
+                print('Pre-pull on ' + node + ': ' + ', '.join(c['image'] + ' (' + c['imagePullPolicy'] + ')' for c in probe['spec']['containers']), flush=True)
                 created.append(name)
                 kubectl('create', '-f', '-', body=json.dumps(probe))
                 deadline = clock() + timeout

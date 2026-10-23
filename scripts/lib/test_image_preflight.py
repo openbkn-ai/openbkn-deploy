@@ -12,6 +12,30 @@ TEMPLATE = {'spec': {'containers': [{'name': 'app', 'image': 'swr.example/core@s
 DEPLOYMENT = {'kind': 'Deployment', 'metadata': {'name': 'core'}, 'spec': {'strategy': {'type': 'Recreate'}, 'selector': {'matchLabels': {'app': 'core'}}, 'template': TEMPLATE}}
 
 class PreflightTest(unittest.TestCase):
+    def test_immutable_cached_probe_does_not_join_the_serial_pull_queue(self):
+        for policy in (None, 'IfNotPresent', 'Never', 'Always'):
+            with self.subTest(policy=policy):
+                template = copy.deepcopy(TEMPLATE)
+                container = template['spec']['containers'][0]
+                container['image'] = 'swr.example/core@sha256:' + 'a' * 64
+                if policy is not None:
+                    container['imagePullPolicy'] = policy
+                probe = m.probe_spec(template, 'node1', 'probe', 'ns')
+                self.assertEqual(probe['spec']['containers'][0]['imagePullPolicy'],
+                                 policy if policy in ('Never', 'Always') else 'IfNotPresent')
+
+    def test_mutable_tags_still_resolve_remotely_unless_operator_requires_never(self):
+        for policy in (None, 'IfNotPresent', 'Always', 'Never'):
+            with self.subTest(policy=policy):
+                template = copy.deepcopy(TEMPLATE)
+                container = template['spec']['containers'][0]
+                container['image'] = 'swr.example/core:release'
+                if policy is not None:
+                    container['imagePullPolicy'] = policy
+                probe = m.probe_spec(template, 'node1', 'probe', 'ns')
+                self.assertEqual(probe['spec']['containers'][0]['imagePullPolicy'],
+                                 'Never' if policy == 'Never' else 'Always')
+
     def test_probe_copies_constraints_without_credentials_or_application_code(self):
         probe = m.probe_spec(TEMPLATE, 'node1', 'probe1', 'ns')['spec']
         self.assertEqual(probe['imagePullSecrets'], [{'name': 'registry'}])

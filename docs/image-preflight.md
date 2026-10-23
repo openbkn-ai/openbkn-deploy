@@ -11,6 +11,15 @@ environment variables or service-account token. Their command is `/`, a director
 so the application entrypoint cannot execute. Every container must have an image ID.
 Probes are deleted on success or failure. Application readiness remains Helm's job.
 
+Probes preserve explicit `Always` and `Never` pull policies. For a complete
+`@sha256:` digest, an omitted or `IfNotPresent` policy uses `IfNotPresent`, so an
+already cached immutable core image does not join a serial kubelet pull queue
+behind a stalled sample image. Mutable tags still use `Always` unless the
+operator explicitly selects `Never`. A cache hit proves local image availability;
+it does not validate current registry access or credentials. Validate uncached
+private pulls separately, or use explicit `Always` when fresh registry validation
+is required. `Never` supports preloaded offline images and fails when absent.
+
 `OPENBKN_IMAGE_PREFLIGHT_TIMEOUT` bounds each probe's scheduling/pull wait (default
 240 seconds). Authentication, scheduling, insufficient spare resources, a new
 service account absent from the current release can fail preflight. Pod affinity
