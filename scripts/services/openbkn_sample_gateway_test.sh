@@ -20,12 +20,12 @@ for old in 'https://untrusted-public.example' 'http://bkn-backend-svc.openbkn.sv
     fi
 done
 HELM_VALUES="{\"baseURL\":\"${expected}\"}"
-_openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0
+if _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0; then exit 1; fi
 CORE_SET_VALUES=('baseURL=http://operator-custom.example')
 _openbkn_release_extra_sets bkn-sample-studio openbkn
 [[ " ${CORE_RELEASE_EXTRA_SET_STRINGS[*]} " == *' baseURL=http://operator-custom.example '* ]]
 HELM_VALUES='{"baseURL":"http://operator-custom.example"}'
-_openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0
+if _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0; then exit 1; fi
 HELM_VALUES='{"baseURL":"http://ingress-nginx-controller.ingress-nginx.svc.cluster.local"}'
 if _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0; then exit 1; fi
 # Valid combined --set forms must compare with the effective scalar URL.
@@ -34,20 +34,20 @@ for combined in 'baseURL=http://operator-custom.example,replicaCount=1' 'replica
     _openbkn_release_extra_sets bkn-sample-studio openbkn
     [[ " ${CORE_RELEASE_EXTRA_SET_STRINGS[*]} " == *' baseURL=http://operator-custom.example '* ]]
     HELM_VALUES='{"baseURL":"http://operator-custom.example"}'
-    _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0
+    if _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0; then exit 1; fi
 done
 for scalar in 'http://operator-custom.example/path}' 'http://operator-custom.example/path{' 'http://operator-custom.example/?q={abc' 'http://operator-custom.example/?q={abc}'; do
     CORE_SET_VALUES=("baseURL=${scalar},replicaCount=1")
     _openbkn_release_extra_sets bkn-sample-studio openbkn
     [[ " ${CORE_RELEASE_EXTRA_SET_STRINGS[*]} " == *" baseURL=${scalar} "* ]]
     HELM_VALUES="{\"baseURL\":\"${scalar}\"}"
-    _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0
+    if _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0; then exit 1; fi
 done
 CORE_SET_VALUES=('baseURL=http://operator-custom.example/path\,part,replicaCount=1')
 _openbkn_release_extra_sets bkn-sample-studio openbkn
 [[ " ${CORE_RELEASE_EXTRA_SET_STRINGS[*]} " == *' baseURL=http://operator-custom.example/path\,part '* ]]
 HELM_VALUES='{"baseURL":"http://operator-custom.example/path,part"}'
-_openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0
+if _openbkn_should_skip_upgrade bkn-sample-studio openbkn bkn-sample-studio 0.2.0; then exit 1; fi
 CORE_SET_VALUES=('baseURL=http://old.example' 'replicaCount=1,baseURL=http://operator-custom.example')
 [[ "$(_openbkn_sample_gateway_base_url)" == 'http://operator-custom.example' ]]
 CORE_SET_VALUES=()

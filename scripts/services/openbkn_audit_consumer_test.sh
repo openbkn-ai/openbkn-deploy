@@ -9,6 +9,8 @@ command -v helm >/dev/null || { echo 'Helm 3 with client-only template rendering
 run_case() (
     source "${ROOT}/scripts/services/openbkn.sh"
     SCRIPT_DIR="${ROOT}"
+    # Cluster image pulls have separate preflight tests; keep Audit tests client-only.
+    _openbkn_preflight_images() { :; }
     CASE_DIR="$(mktemp -d)"
     trap '_openbkn_audit_cleanup; rm -rf "${CASE_DIR}"' EXIT
     CONFIG_YAML_PATH="${CASE_DIR}/config.yaml"
