@@ -896,6 +896,14 @@ _openbkn_prepare_audit_upgrade() {
     _OPENBKN_AUDIT_READY=true
 }
 
+_openbkn_preflight_images() {
+    local release_name="$1" namespace="$2"
+    shift 2
+    python3 "${SCRIPT_DIR}/scripts/lib/image_preflight.py" \
+        --namespace "${namespace}" --release "${release_name}" \
+        --timeout "${OPENBKN_IMAGE_PREFLIGHT_TIMEOUT:-240}" -- "$@"
+}
+
 _openbkn_helm_upgrade_release() {
     local release_name="$1" namespace="$2"
     shift 2
@@ -922,6 +930,11 @@ _openbkn_helm_upgrade_release() {
         [[ "${_OPENBKN_AUDIT_SKIP:-false}" != true ]] || return 0
         helm_args=("${_OPENBKN_AUDIT_ARGS[@]}")
     fi
+
+    # Pull on the existing Recreate nodes before any release mutation. A failed
+    # pull leaves the old Deployment running; no credentials/rendered Secrets
+    # are written to the Helm log by this preflight.
+    _openbkn_preflight_images "${release_name}" "${namespace}" "${helm_args[@]}" || return 1
 
     # Here rather than at either call site: both the repository and the local
     # --charts-dir paths reach helm through this function, and a cleanup wired
@@ -1678,17 +1691,11 @@ _openbkn_should_skip_upgrade() {
         return 1
     fi
     if [[ "${release_name}" == "bkn-sample-studio" ]]; then
-        local installed_gateway expected_gateway
-        expected_gateway="$(_openbkn_sample_gateway_base_url)"
-        if ! installed_gateway="$(set -o pipefail; helm get values "${release_name}" -n "${namespace}" --all -o json |
-            python3 -c 'import json,sys; print(json.load(sys.stdin).get("baseURL", "") or "")' 2>/dev/null)"; then
-            log_warn "Cannot verify the installed sample gateway; reconciling instead of skipping."
-            return 1
-        fi
-        if [[ "${installed_gateway}" != "${expected_gateway}" ]]; then
-            log_info "Reconcile bkn-sample-studio: installed API gateway differs."
-            return 1
-        fi
+        # Registry/executor settings are delivery-critical even when the Chart
+        # version is unchanged. Reapply the current explicit values and Chart
+        # defaults instead of trusting a gateway-only skip comparison.
+        log_info "Reconcile bkn-sample-studio image source and gateway configuration."
+        return 1
     fi
     if [[ "${release_name}" == "bkn-safe" ]]; then
         _openbkn_safe_audit_profile_matches "${namespace}"
