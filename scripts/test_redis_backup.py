@@ -297,7 +297,7 @@ class RedisArchiveTests(unittest.TestCase):
 
     def test_v4_archive_round_trip_includes_redis_checksum_and_restore(self):
         _, stage, manifest = self.package()
-        self.assertEqual(manifest['format'], 4)
+        self.assertEqual(manifest['format'], 5)
         self.assertEqual(manifest['redis'], METADATA)
         self.assertEqual(manifest['sha256']['redis.rdb'], backup.digest(stage / 'redis.rdb'))
         self.cluster.args.writers_stopped = True

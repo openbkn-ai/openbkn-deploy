@@ -101,6 +101,9 @@ OPENSEARCH_SINGLE_NODE=true
 OPENSEARCH_SYSCTL_INIT_ENABLED=false
 OPENSEARCH_SYSCTL_VM_MAX_MAP_COUNT=262144
 AUTO_GENERATE_CONFIG=false
+# This suite isolates memory reconciliation; snapshot auto-configuration has
+# separate installer regression coverage in test_opensearch_snapshot_backup.py.
+OPENSEARCH_SNAPSHOT_ENABLED=false
 OPENSEARCH_MEMORY_REQUEST=4Gi
 OPENSEARCH_JAVA_OPTS='-Xms2g -Xmx2g -XX:MaxDirectMemorySize=512m'
 bkn_helm_release_has_resource_limits() { return 0; }

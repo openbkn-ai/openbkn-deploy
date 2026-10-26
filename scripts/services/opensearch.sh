@@ -201,22 +201,22 @@ _opensearch_upgrade_legacy_image() {
     fi
 }
 
-# Explicit opt-in for existing releases: read and merge their effective values.
+# Explicit configuration remains available independently of install/upgrade.
 enable_opensearch_snapshots() {
     if [[ "$#" -ne 0 ]]; then
         log_error "Usage: OPENSEARCH_SNAPSHOT_HOST_PATH=/mnt/openbkn-snapshots deploy.sh opensearch enable-snapshots"
         return 2
     fi
+    _opensearch_configure_snapshots
+}
+
+# --if-missing performs an idempotent check for the existing-release install path.
+_opensearch_configure_snapshots() {
     if ! is_helm_installed "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}"; then
         log_error "OpenSearch is not installed; run deploy.sh opensearch install."
         return 1
     fi
     _opensearch_resolve_image_defaults
-    local chart_ref="${OPENSEARCH_CHART_TGZ}"
-    if [[ ! -f "${chart_ref}" ]]; then
-        log_error "Snapshot setup requires the matching local chart: ${chart_ref}"
-        return 1
-    fi
     local values_file input_file
     values_file="$(mktemp)"; input_file="$(mktemp)"
     if ! helm get values "${OPENSEARCH_RELEASE_NAME}" -n "${OPENSEARCH_NAMESPACE}" --all -o json > "${input_file}"; then
@@ -224,12 +224,23 @@ enable_opensearch_snapshots() {
         return 1
     fi
     if ! python3 "${SCRIPT_DIR}/scripts/lib/opensearch_snapshot.py" \
-        --host-path "${OPENSEARCH_SNAPSHOT_HOST_PATH}" --init-image "${OPENSEARCH_INIT_IMAGE}" \
+        --host-path "${OPENSEARCH_SNAPSHOT_HOST_PATH}" --init-image "${OPENSEARCH_INIT_IMAGE}" "$@" \
         < "${input_file}" > "${values_file}"; then
         rm -f "${input_file}" "${values_file}"
         return 1
     fi
-    log_warn "Enabling snapshot storage ${OPENSEARCH_SNAPSHOT_HOST_PATH}; OpenSearch may restart."
+    if ! python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])) else 1)' "${values_file}"; then
+        log_info "OpenSearch snapshot configuration is already complete; retaining existing storage."
+        rm -f "${input_file}" "${values_file}"
+        return 0
+    fi
+    local chart_ref="${OPENSEARCH_CHART_TGZ}"
+    if [[ ! -f "${chart_ref}" ]]; then
+        log_error "Snapshot setup requires the matching local chart: ${chart_ref}"
+        rm -f "${input_file}" "${values_file}"
+        return 1
+    fi
+    log_warn "Adding missing OpenSearch snapshot configuration; OpenSearch may restart."
     local ec=0
     helm upgrade "${OPENSEARCH_RELEASE_NAME}" "${chart_ref}" -n "${OPENSEARCH_NAMESPACE}" \
         --reuse-values -f "${values_file}" --wait --timeout=900s || ec=$?
@@ -261,8 +272,11 @@ install_opensearch() {
         else
             limit_status=$?
             if [[ "${limit_status}" == "1" ]]; then
-                log_info "OpenSearch is already installed without resource limits. Skipping upgrade."
+                log_info "OpenSearch is already installed without resource limits. Checking snapshot configuration."
                 log_info "Existing OpenSearch memory settings retained. To adjust them, run: deploy.sh opensearch set-memory <1Gi|2Gi|4Gi|8Gi|16Gi>"
+                if [[ "${OPENSEARCH_SNAPSHOT_ENABLED}" == "true" ]]; then
+                    _opensearch_configure_snapshots --if-missing || return 1
+                fi
                 return 0
             else
                 log_error "Could not inspect OpenSearch Helm manifest for resource limits; skipping upgrade."
@@ -426,18 +440,33 @@ EOF
         helm_args+=(--set resources.requests.memory="${OPENSEARCH_MEMORY_REQUEST}")
     fi
     local snapshot_values=""
-    if [[ "${fresh_install}" == "true" && "${OPENSEARCH_SNAPSHOT_ENABLED}" == "true" ]]; then
+    if [[ "${OPENSEARCH_SNAPSHOT_ENABLED}" == "true" ]]; then
         snapshot_values="$(mktemp)"
-        if ! python3 -c 'import json,sys; print(json.dumps({"config":{"opensearch.yml":open(sys.argv[1]).read()}}))' "${tmp_os_yml}" \
+        local snapshot_input
+        if [[ "${fresh_install}" == "true" ]]; then
+            snapshot_input="$(python3 -c 'import json,sys; print(json.dumps({"config":{"opensearch.yml":open(sys.argv[1]).read()}}))' "${tmp_os_yml}")"
+        else
+            # Snapshot overlays contain existing init-container arrays. Sanitize
+            # them too so the later overlay cannot reintroduce resource limits.
+            if ! snapshot_input="$(printf '%s' "${existing_values}" | python3 "${HELM_JSON_HELPER}" sanitize-values)"; then
+                rm -f "${tmp_os_yml}" "${snapshot_values}"
+                return 1
+            fi
+        fi
+        if ! printf '%s' "${snapshot_input}" \
             | python3 "${SCRIPT_DIR}/scripts/lib/opensearch_snapshot.py" \
-                --host-path "${OPENSEARCH_SNAPSHOT_HOST_PATH}" --init-image "${OPENSEARCH_INIT_IMAGE}" > "${snapshot_values}"; then
+                --host-path "${OPENSEARCH_SNAPSHOT_HOST_PATH}" --init-image "${OPENSEARCH_INIT_IMAGE}" \
+                --if-missing > "${snapshot_values}"; then
             rm -f "${tmp_os_yml}" "${snapshot_values}"
             return 1
         fi
         # --set-file has precedence over values files: use the merged config too.
-        python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["config"]["opensearch.yml"],end="")' "${snapshot_values}" > "${tmp_os_yml}"
+        if ! python3 -c 'import json,sys; text=json.load(open(sys.argv[1])).get("config",{}).get("opensearch.yml"); text is None or open(sys.argv[2],"w").write(text)' "${snapshot_values}" "${tmp_os_yml}"; then
+            rm -f "${tmp_os_yml}" "${snapshot_values}"
+            return 1
+        fi
         helm_args+=(-f "${snapshot_values}")
-        log_info "Snapshot storage enabled: ${OPENSEARCH_SNAPSHOT_HOST_PATH} -> /usr/share/opensearch/snapshots (node-local)."
+        log_info "Snapshot storage configuration checked; missing settings will be added."
     fi
     bkn_helm_uninstall_if_not_deployed "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}"
 

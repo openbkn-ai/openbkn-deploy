@@ -11,6 +11,28 @@ import time
 import uuid
 
 
+def mc_error_detail(source):
+    """Read only structured mc errors, never log downloaded object contents."""
+    source.seek(0, 2)
+    if source.tell() > 64 * 1024:
+        return ''
+    source.seek(0)
+    try:
+        row = json.loads(source.read())
+    except (ValueError, UnicodeError):
+        return ''
+    if not isinstance(row, dict) or row.get('status') != 'error':
+        return ''
+    error = row.get('error')
+    if not isinstance(error, dict):
+        return ''
+    cause = error.get('cause', {})
+    details = cause.get('error', {}) if isinstance(cause, dict) else {}
+    code = details.get('Code', '') if isinstance(details, dict) else ''
+    messages = [code, error.get('message'), cause.get('message') if isinstance(cause, dict) else None]
+    return '; '.join(' '.join(item.split())[:500] for item in messages if isinstance(item, str) and item)
+
+
 def validate_metadata(metadata, error):
     if (not isinstance(metadata, dict) or metadata.get('mode') != 'current-objects'
             or not isinstance(metadata.get('buckets'), list)):
@@ -177,13 +199,31 @@ mc --config-dir "$1/config" alias set local "$2" "$user" "$password" >/dev/null
         with self.workspace() as work, tarfile.open(path, 'w:') as archive:
             for bucket in self.buckets:
                 self.log('MinIO 在线导出 bucket: ' + bucket)
-                listing = self.listing(work, bucket)
+                try:
+                    listing = self.listing(work, bucket)
+                except self.error as exc:
+                    raise self.error('MinIO 列举对象失败，bucket=' + bucket + ': ' + str(exc)) from exc
+                self.log('MinIO ' + bucket + ': 列举到 %d 个对象，总大小 %d bytes'
+                         % (len(listing), sum(listing.values())))
+                if not listing:
+                    self.log('MinIO ' + bucket + ': 当前无可导出对象，备份中保留空 bucket')
                 last_log = time.monotonic()
                 for number, (key, size) in enumerate(listing.items(), 1):
                     # One local disk spool avoids buffering objects in memory; the Pod
                     # needs neither tar nor enough space for a second object copy.
                     with tempfile.TemporaryFile(dir=path.parent) as downloaded:
-                        self.mc(work, 'cat', 'local/' + bucket + '/' + key, target=downloaded)
+                        try:
+                            self.mc(work, 'cat', 'local/' + bucket + '/' + key, target=downloaded)
+                        except self.error as exc:
+                            received = downloaded.tell()
+                            detail = mc_error_detail(downloaded)
+                            message = ('MinIO 对象导出失败 %d/%d，bucket=%s，key=%s，预期大小=%d bytes，'
+                                       '已接收=%d bytes: %s' % (number, len(listing), bucket, key, size, received, exc))
+                            if detail:
+                                message += '; mc: ' + detail
+                            if 'NoSuchKey' in detail:
+                                message += '；对象在列举后已不存在，可能被业务或生命周期规则删除。请停写后重试'
+                            raise self.error(message) from exc
                         if downloaded.tell() != size:
                             raise self.error('MinIO 对象大小发生变化（可能有并发修改），请重试: ' + bucket + '/' + key)
                         downloaded.seek(0)
@@ -195,6 +235,7 @@ mc --config-dir "$1/config" alias set local "$2" "$user" "$password" >/dev/null
                     if time.monotonic() - last_log >= 20:
                         self.log('MinIO ' + bucket + ': 已导出 %d/%d 个对象' % (number, len(listing)))
                         last_log = time.monotonic()
+                self.log('MinIO ' + bucket + ': 导出完成 %d/%d 个对象' % (len(listing), len(listing)))
             index = json.dumps(records, ensure_ascii=False).encode()
             member = tarfile.TarInfo('objects.json')
             member.size, member.mode = len(index), 0o600

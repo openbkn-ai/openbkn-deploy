@@ -38,12 +38,15 @@ contains "${kafka}" 'broker.resourcesPreset=none'
 contains "${kafka}" 'controller.resources.limits=null'
 contains "${kafka}" 'broker.resources.limits=null'
 
-# Existing releases are upgraded only after inspecting their persisted manifest.
+# Inspect persisted limits; OpenSearch may also need snapshot configuration.
 contains "${common}" 'bkn_helm_release_has_resource_limits()'
 for service in "${mariadb}" "${redis}" "${kafka}" "${opensearch}"; do
     contains "${service}" 'bkn_helm_release_has_resource_limits'
-    contains "${service}" 'Skipping upgrade.'
+    if [[ "${service}" != "${opensearch}" ]]; then
+        contains "${service}" 'Skipping upgrade.'
+    fi
 done
+contains "${opensearch}" 'Checking snapshot configuration.'
 
 # Inspect real YAML through kubectl's client-side dry run. A ConfigMap setting
 # named `limits` and `limits: null` must not trigger an upgrade.

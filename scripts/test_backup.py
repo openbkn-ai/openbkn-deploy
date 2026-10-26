@@ -119,14 +119,52 @@ class BackupTests(unittest.TestCase):
         manifest = backup.unpack(package, stage)
         return package, stage, manifest
 
+    def test_real_component_locks_are_released_when_backup_raises(self):
+        cluster = backup.Cluster.__new__(backup.Cluster)
+        cluster.components = ['mariadb', 'opensearch']
+        cluster.exec = mock.Mock()
+        with self.assertRaisesRegex(backup.BackupError, 'object read failed'):
+            with cluster.lock():
+                raise backup.BackupError('object read failed')
+        self.assertEqual(cluster.exec.call_args_list, [
+            mock.call('mariadb', ['mkdir', '/tmp/openbkn-data-backup.lock'], timeout=60),
+            mock.call('opensearch', ['mkdir', '/tmp/openbkn-data-backup.lock'], timeout=60),
+            mock.call('opensearch', ['rm', '-rf', '--', '/tmp/openbkn-data-backup.lock'], timeout=60),
+            mock.call('mariadb', ['rm', '-rf', '--', '/tmp/openbkn-data-backup.lock'], timeout=60)])
+
+    def test_failed_lock_acquisition_never_removes_existing_lock(self):
+        cluster = backup.Cluster.__new__(backup.Cluster)
+        cluster.components = ['mariadb', 'opensearch']
+        def execute(service, command, **kwargs):
+            if service == 'opensearch':
+                raise backup.BackupError('File exists')
+        cluster.exec = mock.Mock(side_effect=execute)
+        with self.assertRaisesRegex(backup.BackupError, 'File exists'):
+            with cluster.lock():
+                self.fail('must not enter backup')
+        self.assertEqual(cluster.exec.call_args_list[-1],
+                         mock.call('mariadb', ['rm', '-rf', '--', '/tmp/openbkn-data-backup.lock'], timeout=60))
+        self.assertFalse(any(call.args[0] == 'opensearch' and call.args[1][0] == 'rm'
+                             for call in cluster.exec.call_args_list))
+
+    def test_lock_cleanup_failure_logs_component_and_actual_error(self):
+        execute = mock.Mock(side_effect=backup.BackupError('API connection refused'))
+        with mock.patch.object(backup, 'log') as log:
+            backup.Cluster.release_lock(execute, '/tmp/openbkn-data-backup.lock', 'mariadb')
+        self.assertIn('mariadb', log.call_args.args[0])
+        self.assertIn('API connection refused', log.call_args.args[0])
+
     def test_backup_portable_archive_and_snapshot_prune_order(self):
         package, stage, manifest = self.package()
         self.assertTrue(package.stat().st_size)
         self.assertEqual(manifest['databases'], self.cluster.databases)
         self.assertEqual(manifest['indices'], ['business'])
-        self.assertEqual(self.cluster.events[:5], ['dump', 'register', 'create-snapshot', 'delete:old', 'export-repository'])
+        self.assertEqual(self.cluster.events[:7], ['dump'] * 3 + ['register', 'create-snapshot', 'delete:old', 'export-repository'])
+        self.assertIn('delete:' + manifest['snapshot'], self.cluster.events)
+        self.assertLess(self.cluster.events.index('export-repository'),
+                        self.cluster.events.index('delete:' + manifest['snapshot']))
         self.assertEqual(len(list(self.root.glob('*.partial'))), 0)
-        self.assertEqual(backup.digest(stage / 'mariadb.sql'), manifest['sha256']['mariadb.sql'])
+        self.assertEqual(backup.digest(stage / 'mariadb.tar'), manifest['sha256']['mariadb.tar'])
 
     def test_failed_snapshot_never_prunes_or_publishes(self):
         self.cluster.failed = True
@@ -134,6 +172,20 @@ class BackupTests(unittest.TestCase):
             self.cluster.backup(self.root)
         self.assertNotIn('delete:old', self.cluster.events)
         self.assertFalse(list(self.root.glob('*.tar.gz')))
+
+    def test_cleanup_failure_keeps_verified_archive_and_reports_warning(self):
+        original = self.cluster.api
+        def fail_cleanup(method, path, body=None, **kwargs):
+            if method == 'DELETE' and self.cluster.new and path.endswith('/' + self.cluster.new['snapshot']):
+                raise backup.BackupError('snapshot cleanup unavailable')
+            return original(method, path, body, **kwargs)
+        with mock.patch.object(self.cluster, 'api', side_effect=fail_cleanup):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.cluster.backup(self.root)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['result'], 'success')
+        self.assertIn('cleanup_warning', result)
+        self.assertTrue(Path(result['archive']).is_file())
 
     def test_dump_failure_never_creates_snapshot(self):
         with mock.patch.object(self.cluster, 'sql', side_effect=backup.BackupError('dump failed')):
@@ -153,7 +205,7 @@ class BackupTests(unittest.TestCase):
         self.cluster.events.clear()
         with contextlib.redirect_stdout(io.StringIO()):
             self.cluster.restore(stage, manifest)
-        self.assertEqual(self.cluster.events, ['upload-repository', 'register-readonly', 'restore-snapshot', 'import'])
+        self.assertEqual(self.cluster.events, ['upload-repository', 'register-readonly', 'restore-snapshot'] + ['import'] * 3)
 
     def test_restore_refuses_existing_data_before_writes(self):
         _, stage, manifest = self.package()
@@ -190,6 +242,56 @@ class BackupTests(unittest.TestCase):
         with self.assertRaisesRegex(backup.BackupError, '非空'):
             self.cluster.restore(stage, manifest)
         self.assertEqual(self.cluster.events, [])
+
+    def test_force_replace_repository_saves_original_then_unregisters(self):
+        _, stage, manifest = self.package()
+        self.args.writers_stopped = self.args.overwrite = self.args.replace_repository = True
+        self.args.output_dir = str(self.root / 'rollbacks')
+        self.cluster.directory = b'non-empty\n'
+        self.cluster.repositories = {'offsite-backup': {'type': 'fs', 'settings': {
+            'location': self.args.repository_path, 'readonly': 'true'}}}
+        self.cluster.events.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.cluster.restore(stage, manifest)
+        self.assertEqual(len(list((self.root / 'rollbacks').glob('*.tar'))), 1)
+        self.assertLess(self.cluster.events.index('delete:offsite-backup'),
+                        self.cluster.events.index('upload-repository'))
+        self.assertIn('restore-snapshot', self.cluster.events)
+
+    def test_force_replace_rejects_foreign_repository(self):
+        _, stage, manifest = self.package()
+        self.args.writers_stopped = self.args.overwrite = self.args.replace_repository = True
+        self.cluster.repositories = {'other-repo': {'type': 'fs', 'settings': {
+            'location': self.args.repository_path}}}
+        self.cluster.events.clear()
+        with self.assertRaisesRegex(backup.BackupError, '其他仓库'):
+            self.cluster.restore(stage, manifest)
+        self.assertEqual(self.cluster.events, [])
+
+    def test_force_replace_preserves_original_when_rollback_copy_fails(self):
+        _, stage, manifest = self.package()
+        self.args.writers_stopped = self.args.overwrite = self.args.replace_repository = True
+        self.args.output_dir = str(self.root / 'rollbacks')
+        self.cluster.directory = b'non-empty\n'
+        self.cluster.repositories = {'offsite-backup': {'type': 'fs', 'settings': {
+            'location': self.args.repository_path}}}
+        self.cluster.events.clear()
+        original = self.cluster.exec
+        def fail_tar(service, command, **kwargs):
+            if command[:2] == ['tar', '-C']:
+                raise backup.BackupError('repository copy failed')
+            return original(service, command, **kwargs)
+        with mock.patch.object(self.cluster, 'exec', side_effect=fail_tar):
+            with self.assertRaisesRegex(backup.BackupError, 'repository copy failed'):
+                self.cluster.restore(stage, manifest)
+        self.assertNotIn('delete:offsite-backup', self.cluster.events)
+        self.assertNotIn('upload-repository', self.cluster.events)
+
+    def test_replace_repository_requires_explicit_overwrite(self):
+        args = backup.parser().parse_args(['restore', 'check', 'archive.tar.gz', '--replace-repository'])
+        args.components = ['opensearch']
+        with self.assertRaisesRegex(backup.BackupError, '--overwrite'):
+            backup.validate_options(args)
 
     def test_restore_directory_check_works_without_find_command(self):
         _, stage, manifest = self.package()
@@ -230,7 +332,7 @@ class BackupTests(unittest.TestCase):
                 if member.name == 'manifest.json':
                     manifest = json.loads(data)
                     if bad_checksum:
-                        manifest['sha256']['mariadb.sql'] = 'bad'
+                        manifest['sha256']['mariadb.tar'] = 'bad'
                     if bad_index:
                         manifest['indices'] = ['*']
                     data = json.dumps(manifest).encode()
@@ -292,6 +394,8 @@ class BackupTests(unittest.TestCase):
 
         instance = object.__new__(backup.Cluster)
         instance.args = self.args
+        instance.args.module = 'backup'
+        instance.args.databases = ['ecommerce-ops', 'ecommerce_ops']
         with mock.patch.object(instance, 'exec', return_value=b''), mock.patch.object(instance, 'sql') as sql:
             sql.side_effect = [b'11.4.7-MariaDB\n', b'mysql\necommerce-ops\necommerce_ops\n']
             instance.check_mariadb()
@@ -370,12 +474,12 @@ class BackupTests(unittest.TestCase):
             if query == b'SELECT VERSION();':
                 return b'11.4.7-MariaDB\n'
             if query == b'SHOW DATABASES;':
-                return b'mysql\ninformation_schema\nperformance_schema\nsys\nopenbkn\nsafe\nbkn_trace\n'
+                return b'mysql\ninformation_schema\nperformance_schema\nsys\nopenbkn\nsafe\nbkn_trace\nbkn_audit\ndeploy\n'
             return b''
         with mock.patch.object(backup, 'run', side_effect=kubectl):
             cluster = backup.Cluster(self.args)
             cluster.check()
-        self.assertEqual(cluster.databases, ['openbkn', 'safe', 'bkn_trace'])
+        self.assertEqual(cluster.databases, list(backup.DEFAULT_DATABASES))
         self.assertEqual(cluster.targets['mariadb'], ('resource', 'mariadb-0', 'mariadb'))
 
     def test_discovery_refuses_multiple_pods(self):
@@ -384,6 +488,57 @@ class BackupTests(unittest.TestCase):
         with mock.patch.object(backup, 'run', return_value=json.dumps({'items': [pod, pod]}).encode()):
             with self.assertRaisesRegex(backup.BackupError, '唯一就绪'):
                 backup.Cluster(self.args)
+
+    def test_deleted_repository_mount_is_rejected_before_upload_or_index_changes(self):
+        package, stage, manifest = self.package()
+        self.args.writers_stopped = True
+        mountinfo = (b'5354 5264 253:0 /mnt/openbkn-snapshots//deleted '
+                     b'/usr/share/opensearch/snapshots rw,relatime - ext4 /dev/root rw\n')
+        original_exec = self.cluster.exec
+
+        def execute(service, command, **kwargs):
+            if command[0] == 'sh' and command[3] == 'check-repository-directory':
+                return mountinfo
+            return original_exec(service, command, **kwargs)
+
+        self.cluster.events.clear()
+        with mock.patch.object(self.cluster, 'exec', side_effect=execute):
+            with self.assertRaisesRegex(backup.BackupError, '失效挂载'):
+                self.cluster.restore_opensearch(stage, manifest, ['business'])
+        self.assertNotIn('upload-repository', self.cluster.events)
+        self.assertNotIn('delete:business', self.cluster.events)
+        self.assertNotIn('restore-snapshot', self.cluster.events)
+
+    def test_repository_mount_check_decodes_paths_and_ignores_other_deleted_mounts(self):
+        instance = object.__new__(backup.Cluster)
+        instance.args = self.args
+        self.args.repository_path = '/repo with space'
+        prefix = b'1 2 253:0 '
+        for root, mountpoint, rejected in (
+            (b'/mnt/snapshots', b'/repo\\040with\\040space', False),
+            (b'/mnt/snapshots//deleted', b'/unrelated', False),
+            (b'/mnt/snapshots//deleted', b'/repo\\040with\\040space', True),
+        ):
+            with self.subTest(root=root, mountpoint=mountpoint):
+                raw = prefix + root + b' ' + mountpoint + b' rw - ext4 /dev/root rw\n'
+                with mock.patch.object(instance, 'exec', return_value=raw):
+                    if rejected:
+                        with self.assertRaisesRegex(backup.BackupError, '失效挂载'):
+                            instance.check_opensearch_repository_directory()
+                    else:
+                        instance.check_opensearch_repository_directory()
+
+    def test_repository_directory_check_fails_if_path_is_missing(self):
+        instance = object.__new__(backup.Cluster)
+        instance.args = self.args
+        self.args.repository_path = str(self.root / 'missing')
+
+        def execute(service, command, **kwargs):
+            return backup.run(command, **kwargs)
+
+        with mock.patch.object(instance, 'exec', side_effect=execute):
+            with self.assertRaises(backup.BackupError):
+                instance.check_opensearch_repository_directory()
 
     def test_run_handles_large_output_and_failure(self):
         with tempfile.TemporaryFile() as output:

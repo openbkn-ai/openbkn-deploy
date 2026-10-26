@@ -170,7 +170,9 @@ bkn_helm_upgrade_without_resource_limits() {
         return 1
     fi
 
-    if helm "$@" -f "${values_file}"; then
+    # Sanitized values are the base; caller overlays (for example newly added
+    # snapshot volumes) must follow them so old arrays do not replace updates.
+    if helm "$1" -f "${values_file}" "${@:2}"; then
         helm_status=0
     else
         helm_status=$?

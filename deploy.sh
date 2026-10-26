@@ -71,6 +71,7 @@ usage() {
     echo "  openbkn download             Download/update OpenBKN charts into .tmp/charts"
     echo "  openbkn uninstall            Uninstall OpenBKN services"
     echo "  openbkn status               Show OpenBKN services status"
+    echo "  openbkn stop|start           Stop/restore business Deployments (keep data services running)"
     echo "                                Use --set to pass custom values to all charts"
     echo "  infra install                Install Kubernetes and platform data services"
     echo ""
@@ -849,6 +850,11 @@ main() {
             status)
                 parse_openbkn_args "status" "$@"
                 show_install_status
+                ;;
+            stop|start)
+                parse_openbkn_args "${action}" "$@"
+                python3 "${SCRIPT_DIR}/scripts/openbkn_workloads.py" "${action}" \
+                    --namespace "$(_openbkn_resolve_target_namespace)"
                 ;;
             publish-status)
                 parse_openbkn_args "status" "$@"

@@ -5,7 +5,7 @@ test:
 
 lint:
 	bash -n deploy.sh scripts/services/opensearch.sh
-	python3 -c "import ast; from pathlib import Path; [ast.parse(p.read_text()) for p in list(Path('scripts').glob('*backup*.py')) + [Path('scripts/kafka_worker.py'), Path('scripts/lib/opensearch_snapshot.py')]]"
+	python3 -c "import ast; from pathlib import Path; [ast.parse(p.read_text()) for p in list(Path('scripts').glob('*backup*.py')) + [Path('scripts/kafka_worker.py'), Path('scripts/openbkn_workloads.py'), Path('scripts/lib/opensearch_snapshot.py')]]"
 
 ci: lint test
 

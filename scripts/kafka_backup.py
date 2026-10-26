@@ -6,7 +6,7 @@ from pathlib import Path
 import time
 import uuid
 
-from kafka_worker import inventory, KafkaBackupError, restore_blockers, ledger_restore_topics, LEDGER_GROUPS
+from kafka_worker import inventory, KafkaBackupError, restore_blockers, ledger_restore_topics, LEDGER_GROUPS, IGNORED_TOPICS
 
 
 def archive_inventory(path, expected, error):
@@ -31,9 +31,9 @@ def validate_restore_metadata(metadata, error):
 def require_restored_ledger(metadata, restored, error):
     topics = ledger_restore_topics(metadata)
     if topics and not restored:
-        raise error('恢复已消费的审计/Evidence 保留记录前，请确认原 MariaDB 账本已保留或同批恢复，'
+        raise error('恢复审计/Evidence 保留记录前，请确认原 MariaDB 账本已保留或同批恢复，'
                     '并保持备份中的消费组 ID；完成后添加 --kafka-ledger-restored 确认。'
-                    '这些消息不会重新消费以重建账本: ' + ', '.join(topics))
+                    '消费组将从备份提交位置继续，已消费记录不会从头重放: ' + ', '.join(topics))
 
 
 def add_arguments(parser):
@@ -51,10 +51,10 @@ def add_arguments(parser):
     parser.add_argument('--kafka-password-key', default='client-passwords')
     parser.add_argument('--kafka-ca-secret', help='含 ca.crt 的 Secret，供 TLS 连接使用')
     parser.add_argument('--kafka-mechanism', choices=['PLAIN', 'SCRAM-SHA-256', 'SCRAM-SHA-512'], default='PLAIN')
-    parser.add_argument('--kafka-topics', nargs='+', help='仅备份：默认枚举所有非内部 Topic；暂不支持 compact Topic')
+    parser.add_argument('--kafka-topics', nargs='+', help='仅备份：默认枚举非内部 Topic，始终排除 connect-configs/connect-offsets/connect-status；其他 compact Topic 不支持')
     parser.add_argument('--kafka-replicas', type=int, default=1, help='恢复时新建 Topic 的副本数')
     parser.add_argument('--kafka-ledger-restored', action='store_true',
-                        help='确认原审计/Evidence 账本已保留或同批恢复，并沿用原消费组（不重放已消费消息）')
+                        help='确认停写后同批备份的审计/Evidence 账本已保留或恢复，并沿用原消费组位置')
     parser.add_argument('--kafka-work-size', default='10Gi', help='临时工具 Pod 磁盘上限，需容纳导出或导入数据')
 
 
@@ -68,7 +68,7 @@ class KafkaBackup:
                         timeout=kwargs.pop('timeout', self.args.timeout), **kwargs)
 
     @contextlib.contextmanager
-    def helper(self):
+    def helper(self, *, overwrite=False):
         artifact = self.artifact()
         broker, container = self.discover()
         name = 'openbkn-kafka-backup-' + uuid.uuid4().hex[:12]
@@ -79,6 +79,7 @@ class KafkaBackup:
             'TASK_KAFKA_MECHANISM': self.args.kafka_mechanism,
             'TASK_KAFKA_REPLICAS': self.args.kafka_replicas,
             'TASK_KAFKA_LEDGER_RESTORED': str(self.args.kafka_ledger_restored).lower(),
+            'TASK_KAFKA_OVERWRITE': str(overwrite).lower(),
         }.items()]
         sources = []
         if self.args.kafka_protocol.startswith('SASL'):
@@ -233,6 +234,7 @@ class KafkaBackup:
                 self.metadata = json.loads(execute('health'))
             else:
                 self.metadata = json.loads(execute('check', data=json.dumps({'topics': self.args.kafka_topics}).encode()))
+                self.log_ignored(self.metadata)
                 blocked = blocked_restore_topics(self.metadata, counts_known=False)
                 if blocked:
                     self.log('注意：以下 Topic 的当前范围存在恢复限制，导出后还将核对 offset 连续性: ' + ', '.join(blocked))
@@ -242,6 +244,7 @@ class KafkaBackup:
         self.log('在线导出 Kafka 已保留的已提交消息；不修改业务消费组')
         with self.lock(), self.helper() as execute:
             metadata = json.loads(execute('export', '/work/export', data=json.dumps({'topics': self.args.kafka_topics}).encode()))
+            self.log_ignored(metadata)
             files = ['metadata.json'] + [p['file'] for t in metadata['topics'] for p in t['partitions']]
             # Validate names before passing them to tar, without shell interpolation.
             from kafka_worker import validate_metadata
@@ -253,11 +256,12 @@ class KafkaBackup:
         return archive_inventory(path, metadata, self.error)
 
     def preflight(self, metadata, overwrite=False):
-        # --overwrite must never turn Kafka restore into append or topic deletion.
         validate_restore_metadata(metadata, self.error)
         self.restore_note(metadata)
-        with self.helper() as execute:
+        with self.helper(overwrite=overwrite) as execute:
             result = json.loads(execute('restore-check', data=json.dumps(metadata).encode()))
+            if result.get('replace_topics'):
+                self.log('覆盖恢复将删除并重建以下 Topic（本次检查不修改）: ' + ', '.join(result['replace_topics']))
             changes = result.get('config_changes', {})
             if changes:
                 self.log('恢复时将按备份对齐 Topic 配置（本次检查不修改）: ' + json.dumps(changes, ensure_ascii=False))
@@ -269,7 +273,7 @@ class KafkaBackup:
         require_restored_ledger(metadata, self.args.kafka_ledger_restored, self.error)
         self.restore_note(metadata)
         self.log('恢复 Kafka 消息及映射后的消费位置；Kafka 保持运行，目标业务生产者/消费者必须停止')
-        with self.lock(), self.helper() as execute:
+        with self.lock(), self.helper(overwrite=overwrite) as execute:
             with open(path, 'rb') as source:
                 self.kube('exec', '-i', self.active_pod, '-c', 'backup', '--', 'sh', '-c',
                           'umask 077; mkdir /work/import; exec tar -xf - -C /work/import --no-same-owner --no-same-permissions', source=source)
@@ -277,8 +281,15 @@ class KafkaBackup:
         self.log('Kafka 恢复完成并回读校验: ' + json.dumps(result, ensure_ascii=False))
 
     def restore_note(self, metadata):
+        self.log_ignored(metadata)
         topics = ledger_restore_topics(metadata)
         if topics:
             groups = [LEDGER_GROUPS[name] for name in topics]
-            self.log('恢复已消费的保留记录，保持原 offset 且不重放；请确认原 MariaDB 账本已保留或同批恢复，并沿用消费组: '
+            self.log('恢复审计/Evidence 记录，保持原 offset 并恢复备份提交位置；请确认停写后同批备份的 MariaDB 账本已保留或恢复，并沿用消费组: '
                      + ', '.join(groups))
+
+    def log_ignored(self, metadata):
+        ignored = (set(metadata.get('ignored_topics', [])) & IGNORED_TOPICS
+                   | {topic['name'] for topic in metadata['topics'] if topic['name'] in IGNORED_TOPICS})
+        if ignored:
+            self.log('跳过 Kafka Connect Topic（不备份、不恢复、不覆盖）: ' + ', '.join(sorted(ignored)))

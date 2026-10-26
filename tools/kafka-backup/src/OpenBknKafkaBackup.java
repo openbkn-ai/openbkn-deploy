@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 public final class OpenBknKafkaBackup implements AutoCloseable {
     static final int MAX_LINE = 24 * 1024 * 1024;
     static final String MODE = "retained-committed-records-v1";
+    static final Set<String> IGNORED_TOPICS = Set.of("connect-configs", "connect-offsets", "connect-status");
     static final Map<String,String> LEDGER_GROUPS = Map.of("openbkn.audit.v1", "bkn-trace-audit-ledger-v1",
         "openbkn.evidence.v1", "bkn-trace-evidence-ledger-v1");
     static final List<String> CONFIGS = List.of("cleanup.policy", "retention.ms", "retention.bytes",
@@ -168,6 +169,19 @@ public final class OpenBknKafkaBackup implements AutoCloseable {
         return result;
     }
     static Set<String> names(JsonNode meta) { Set<String> names = new TreeSet<>(); for (JsonNode t : meta.path("topics")) names.add(t.path("name").asText()); return names; }
+    static ObjectNode restorableMetadata(JsonNode original) {
+        ObjectNode meta = original.deepCopy(); ArrayNode topics = arr(); Set<String> kept = new HashSet<>();
+        for (JsonNode topic : original.path("topics")) if (!IGNORED_TOPICS.contains(topic.path("name").asText())) {
+            topics.add(topic); kept.add(topic.path("name").asText());
+        }
+        ObjectNode groups = obj();
+        original.path("groups").fields().forEachRemaining(group -> {
+            ArrayNode positions = arr(); for (JsonNode position : group.getValue())
+                if (kept.contains(position.path("topic").asText())) positions.add(position);
+            if (!positions.isEmpty()) groups.set(group.getKey(), positions);
+        });
+        meta.set("topics", topics); meta.set("groups", groups); return meta;
+    }
     static TopicPartition tp(JsonNode topic, JsonNode part) { return new TopicPartition(topic.path("name").asText(), part.path("id").asInt()); }
     void idle(JsonNode meta) throws Exception {
         Set<String> names = names(meta);
@@ -208,8 +222,10 @@ public final class OpenBknKafkaBackup implements AutoCloseable {
         Set<String> selected = new TreeSet<>();
         if (request.hasNonNull("topics")) { for (JsonNode name : request.path("topics")) require(selected.add(topicName(name.asText())), "Topic 重复"); }
         else for (String name : all) if (!name.startsWith("__")) selected.add(topicName(name));
-        require(!selected.isEmpty() && all.containsAll(selected), "没有业务 Topic 或指定 Topic 不存在");
+        require(all.containsAll(selected), "指定 Topic 不存在");
+        Set<String> ignored = new TreeSet<>(selected); ignored.retainAll(IGNORED_TOPICS); selected.removeAll(IGNORED_TOPICS);
         ObjectNode meta = obj().put("mode", MODE).put("source_cluster_id", clusterId()).put("created_at", System.currentTimeMillis() / 1000.0);
+        meta.set("ignored_topics", JSON.valueToTree(ignored));
         meta.set("groups", groups(selected)); ArrayNode topics = meta.putArray("topics");
         for (String name : selected) {
             TopicDescription desc = description(name); ObjectNode cfg = config(name);
@@ -226,11 +242,12 @@ public final class OpenBknKafkaBackup implements AutoCloseable {
         validatePositions(meta); return meta;
     }
     static void validatePositions(JsonNode meta) {
-        require(meta.path("mode").asText().equals(MODE) && meta.path("topics").isArray() && !meta.path("topics").isEmpty() && meta.path("groups").isObject(), "Kafka 清单无效");
+        require(meta.path("mode").asText().equals(MODE) && meta.path("topics").isArray() && meta.path("groups").isObject(), "Kafka 清单无效");
         Map<TopicPartition,JsonNode> parts = new HashMap<>(); Set<String> names = new HashSet<>();
         for (JsonNode topic : meta.path("topics")) {
             require(names.add(topicName(topic.path("name").asText())), "Topic 重复");
-            require(topic.path("config").path("cleanup.policy").asText().equals("delete"), "不支持 compact Topic");
+            require(IGNORED_TOPICS.contains(topic.path("name").asText())
+                || topic.path("config").path("cleanup.policy").asText().equals("delete"), "不支持 compact Topic");
             int index = 0;
             for (JsonNode part : topic.path("partitions")) {
                 require(part.path("id").asInt(-1) == index++ && part.path("low").asLong(-1) >= 0 && part.path("high").asLong(-1) >= part.path("low").asLong(), "分区范围无效");
@@ -270,7 +287,15 @@ public final class OpenBknKafkaBackup implements AutoCloseable {
         Files.write(root.resolve("metadata.json"), line(meta)); return meta;
     }
     ObjectNode preflight(JsonNode meta) throws Exception {
+        return preflight(meta, env("TASK_KAFKA_OVERWRITE", "false").equals("true"));
+    }
+    ObjectNode preflight(JsonNode meta, boolean overwrite) throws Exception {
         validatePositions(meta);
+        meta = restorableMetadata(meta);
+        if (meta.path("topics").isEmpty()) {
+            ObjectNode result = obj().put("target_cluster_id", clusterId()); result.set("topics", arr());
+            result.set("replace_topics", arr()); result.set("config_changes", obj()); return result;
+        }
         validateLedgerRecovery(meta);
         idle(meta); ObjectNode existingGroups = groups(names(meta));
         for (Iterator<Map.Entry<String,JsonNode>> it = existingGroups.fields(); it.hasNext();) {
@@ -281,7 +306,7 @@ public final class OpenBknKafkaBackup implements AutoCloseable {
                 require(found, "目标存在备份之外的消费位置: " + group.getKey());
             }
         }
-        ObjectNode changes = obj();
+        ObjectNode changes = obj(); List<String> replacements = new ArrayList<>();
         Set<String> existing = admin.listTopics().names().get(35, TimeUnit.SECONDS);
         int replicas = Integer.parseInt(env("TASK_KAFKA_REPLICAS", "1"));
         require(replicas > 0 && replicas <= admin.describeCluster().nodes().get(35, TimeUnit.SECONDS).size(), "目标 Broker 数量或副本数不足");
@@ -290,7 +315,8 @@ public final class OpenBknKafkaBackup implements AutoCloseable {
             int minIsr = Integer.parseInt(topic.path("config").path("min.insync.replicas").asText()); require(minIsr <= replicas, "目标副本数不足");
             if (!existing.contains(name)) continue;
             TopicDescription live = description(name);
-            require(live.partitions().size() == topic.path("partitions").size(), "目标 Topic 分区数量不同: " + name);
+            boolean replace = live.partitions().size() != topic.path("partitions").size();
+            require(!replace || overwrite, "目标 Topic 分区数量不同: " + name);
             ObjectNode current = config(name), differences = obj();
             for (String key : CONFIGS) if (!current.path(key).equals(topic.path("config").path(key))) {
                 differences.set(key, obj().set("target", current.path(key)));
@@ -298,11 +324,15 @@ public final class OpenBknKafkaBackup implements AutoCloseable {
             }
             if (!differences.isEmpty()) changes.set(name, differences);
             for (TopicPartitionInfo part : live.partitions()) {
-                require(part.replicas().size() >= minIsr, "目标分区副本数不足");
-                require(offset(name, part.partition(), false, false) == 0 && offset(name, part.partition(), true, false) == 0, "目标 Topic 非全新空分区，禁止追加/覆盖: " + name);
+                require(part.replicas().size() >= minIsr || overwrite, "目标分区副本数不足");
+                if (part.replicas().size() < minIsr || offset(name, part.partition(), false, false) != 0
+                    || offset(name, part.partition(), true, false) != 0) replace = true;
             }
+            require(!replace || overwrite, "目标 Topic 非全新空分区；覆盖恢复需要 --overwrite（将删除并重建）: " + name);
+            if (replace) replacements.add(name);
         }
-        ObjectNode result = obj().put("target_cluster_id", clusterId()); result.set("topics", JSON.valueToTree(names(meta))); result.set("config_changes", changes); return result;
+        ObjectNode result = obj().put("target_cluster_id", clusterId()); result.set("topics", JSON.valueToTree(names(meta)));
+        result.set("config_changes", changes); result.set("replace_topics", JSON.valueToTree(replacements)); return result;
     }
     static List<String> ledgerRecoveryTopics(JsonNode meta) {
         List<String> result = new ArrayList<>();
@@ -322,11 +352,9 @@ public final class OpenBknKafkaBackup implements AutoCloseable {
                 if (high == 0) continue;
                 boolean committed = false;
                 for (JsonNode position : meta.path("groups").path(group)) if (position.path("topic").asText().equals(name)
-                    && position.path("partition").asInt() == part.path("id").asInt() && position.path("offset").asLong() == high) committed = true;
-                require(committed, "消费组 " + group + " 未提交到分区末尾，需要可信历史重放: " + name);
-                for (JsonNode positions : meta.path("groups")) for (JsonNode position : positions) if (position.path("topic").asText().equals(name)
-                    && position.path("partition").asInt() == part.path("id").asInt())
-                    require(position.path("offset").asLong() == high, "存在消费积压，需要可信历史重放: " + name);
+                    && position.path("partition").asInt() == part.path("id").asInt()
+                    && position.path("offset").asLong() >= 0 && position.path("offset").asLong() <= high) committed = true;
+                require(committed, "消费组 " + group + " 缺少有效的分区提交位置，不能确定恢复起点: " + name);
             }
         }
     }
@@ -358,16 +386,36 @@ public final class OpenBknKafkaBackup implements AutoCloseable {
         return meta;
     }
     ObjectNode restore(Path root) throws Exception {
-        JsonNode meta = verifyFiles(root); preflight(meta);
+        return restore(root, env("TASK_KAFKA_OVERWRITE", "false").equals("true"));
+    }
+    ObjectNode restore(Path root, boolean overwrite) throws Exception {
+        JsonNode meta = restorableMetadata(verifyFiles(root)); ObjectNode plan = preflight(meta, overwrite);
+        if (meta.path("topics").isEmpty()) {
+            ObjectNode result = obj().put("result", "success").put("records", 0);
+            result.set("groups", arr()); result.set("replaced_topics", arr()); return result;
+        }
         require(ledgerRecoveryTopics(meta).isEmpty() || env("TASK_KAFKA_LEDGER_RESTORED", "false").equals("true"),
-            "恢复已消费的审计/Evidence 记录前需先恢复同批 MariaDB 账本，并传入 --kafka-ledger-restored 确认");
+            "恢复审计/Evidence 记录前需先恢复同批 MariaDB 账本，并传入 --kafka-ledger-restored 确认");
+        List<String> replacements = new ArrayList<>(); plan.path("replace_topics").forEach(name -> replacements.add(name.asText()));
+        if (!replacements.isEmpty()) {
+            idle(meta);
+            System.err.println("覆盖恢复：删除并重建 Topic " + replacements);
+            admin.deleteTopics(replacements).all().get(65, TimeUnit.SECONDS);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+            while (true) {
+                Set<String> live = admin.listTopics().names().get(35, TimeUnit.SECONDS);
+                if (Collections.disjoint(live, replacements)) break;
+                require(System.nanoTime() < deadline, "等待 Topic 删除完成超时，业务必须保持停止");
+                Thread.sleep(500);
+            }
+        }
         Set<String> existing = admin.listTopics().names().get(35, TimeUnit.SECONDS);
         for (JsonNode topic : meta.path("topics")) if (!existing.contains(topic.path("name").asText())) {
             Map<String,String> cfg = new HashMap<>(); topic.path("config").fields().forEachRemaining(entry -> cfg.put(entry.getKey(), entry.getValue().asText()));
             admin.createTopics(List.of(new NewTopic(topic.path("name").asText(), topic.path("partitions").size(), Short.parseShort(env("TASK_KAFKA_REPLICAS", "1"))).configs(cfg))).all().get(35, TimeUnit.SECONDS);
         }
         // Preflight is read-only. Apply only the selected backup keys after all safety checks.
-        preflight(meta);
+        preflight(meta, false);
         Map<ConfigResource,Collection<AlterConfigOp>> updates = new LinkedHashMap<>();
         for (JsonNode topic : meta.path("topics")) {
             String name = topic.path("name").asText(); ObjectNode current = config(name);
@@ -379,7 +427,7 @@ public final class OpenBknKafkaBackup implements AutoCloseable {
         if (!updates.isEmpty()) admin.incrementalAlterConfigs(updates).all().get(35, TimeUnit.SECONDS);
         for (JsonNode topic : meta.path("topics")) require(config(topic.path("name").asText()).equals(topic.path("config")),
             "目标 Topic 配置未能对齐备份: " + topic.path("name").asText());
-        preflight(meta); Map<String,Map<TopicPartition,OffsetAndMetadata>> mapped = new LinkedHashMap<>();
+        preflight(meta, false); Map<String,Map<TopicPartition,OffsetAndMetadata>> mapped = new LinkedHashMap<>();
         meta.path("groups").fieldNames().forEachRemaining(g -> mapped.put(g, new HashMap<>())); Map<TopicPartition,Long> ends = new HashMap<>(); long total = 0;
         Properties cfg = new Properties(); cfg.putAll(props); cfg.put("enable.idempotence", "true"); cfg.put("acks", "all");
         cfg.put("buffer.memory", "16777216"); cfg.put("max.request.size", "16777216"); cfg.put("delivery.timeout.ms", "60000");
@@ -416,7 +464,8 @@ public final class OpenBknKafkaBackup implements AutoCloseable {
             Map<TopicPartition,OffsetAndMetadata> actual = admin.listConsumerGroupOffsets(group.getKey()).partitionsToOffsetAndMetadata().get(35, TimeUnit.SECONDS);
             for (Map.Entry<TopicPartition,OffsetAndMetadata> item : group.getValue().entrySet()) require(actual.containsKey(item.getKey()) && actual.get(item.getKey()).offset() == item.getValue().offset(), "消费组进度回读不符: " + group.getKey());
         }
-        ObjectNode result = obj().put("result", "success").put("records", total); result.set("groups", JSON.valueToTree(mapped.keySet())); return result;
+        ObjectNode result = obj().put("result", "success").put("records", total); result.set("groups", JSON.valueToTree(mapped.keySet()));
+        result.set("replaced_topics", JSON.valueToTree(replacements)); return result;
     }
     public static void main(String[] args) {
         // kubectl exec inherits the image's locale, which can be US-ASCII on Java 17.

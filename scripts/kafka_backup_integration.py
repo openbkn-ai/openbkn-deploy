@@ -125,7 +125,7 @@ def main():
         # Independently validate Java exports using the portable host archive reader.
         import tarfile
         from kafka_worker import inventory
-        for name in ('payload', 'ledger-payload'):
+        for name in ('payload', 'ledger-payload', 'connect-only', 'connect-legacy'):
             payload = work / 'smoke' / name
             package = work / (name + '.tar')
             with tarfile.open(package, 'w:') as archive:
