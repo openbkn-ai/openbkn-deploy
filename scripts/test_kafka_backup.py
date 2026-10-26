@@ -303,16 +303,22 @@ class KafkaTests(unittest.TestCase):
                     self.assertEqual(worker.restore_blockers(meta), {})
                     self.assertEqual(meta['groups'][group][0]['offset'], offset)
 
-    def test_ledger_missing_or_out_of_range_position_stays_blocked(self):
-        for offset in (None, -1, 118):
+    def test_ledger_missing_position_is_preserved_as_missing(self):
+        meta = self.ledger_meta()
+        meta['groups'] = {}
+        self.assertEqual(worker.restore_blockers(meta), {})
+        kafka_backup.validate_restore_metadata(meta, backup.BackupError)
+        self.service.preflight(meta)
+        self.assertTrue(any('缺失的不创建' in call.args[0]
+                            for call in self.service.log.call_args_list))
+
+    def test_ledger_out_of_range_position_stays_blocked(self):
+        for offset in (-1, 118):
             with self.subTest(offset=offset):
                 meta = self.ledger_meta()
-                if offset is None:
-                    meta['groups'] = {}
-                else:
-                    meta['groups']['bkn-trace-audit-ledger-v1'][0]['offset'] = offset
-                with self.assertRaisesRegex(backup.BackupError, '有效的分区提交位置'):
-                    kafka_backup.validate_restore_metadata(meta, backup.BackupError)
+                meta['groups']['bkn-trace-audit-ledger-v1'][0]['offset'] = offset
+                with self.assertRaisesRegex(worker.KafkaBackupError, '消费位置不在备份范围内'):
+                    worker.validate_metadata(meta)
 
     def test_coordinate_reuse_is_blocked_even_with_all_groups_at_end(self):
         for low, count in [(1, 116), (0, 116)]:

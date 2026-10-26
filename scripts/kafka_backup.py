@@ -285,7 +285,8 @@ class KafkaBackup:
         topics = ledger_restore_topics(metadata)
         if topics:
             groups = [LEDGER_GROUPS[name] for name in topics]
-            self.log('恢复审计/Evidence 记录，保持原 offset 并恢复备份提交位置；请确认停写后同批备份的 MariaDB 账本已保留或恢复，并沿用消费组: '
+            self.log('恢复审计/Evidence 记录，保持原 offset；仅恢复备份中已有的消费组提交位置，缺失的不创建。'
+                     '请确认停写后同批备份的 MariaDB 账本已保留或恢复；相关消费组: '
                      + ', '.join(groups))
 
     def log_ignored(self, metadata):
