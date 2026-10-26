@@ -154,6 +154,8 @@ sudo bash ./onboard.sh -y     # non-interactive (uses defaults)
 sudo bash ./onboard.sh --help # all flags (--config=models.yaml, --enable-bkn-search, …)
 ```
 
+> After service installation, deploy automatically registers the bundled MinIO bucket `bkn-oss` as the default OSS storage (`minio-default`). This step needs Kubernetes access, not a platform admin login, and preserves an existing enabled default. Initialization failures produce warnings and a retry command without failing the platform installation. Onboard retries the same initialization. Override with `OSS_DEFAULT_BUCKET` / `OSS_DEFAULT_STORAGE_NAME`; set `ONBOARD_SKIP_OSS_STORAGE=true` to skip it in both flows. Kubernetes readiness waits default to 120s each (`OSS_STORAGE_READY_TIMEOUT`).
+
 > **Why `sudo`?** `onboard.sh` reads `$HOME/.openbkn-ai/config.yaml` (written by `sudo deploy.sh` into `/root/.openbkn-ai/`) and writes the `bkn` auth token to `$HOME/.bkn`. Running it without `sudo` falls back to the in-repo template `conf/config.yaml` and may resolve a different access URL. **macOS dev path** (`bash ./dev/mac.sh onboard`) does **not** need `sudo`. The script also prints this hint at startup; silence with `ONBOARD_SUDO_HINT_DISABLED=1`.
 
 > Full preflight / onboard flow and Mermaid diagrams: see [help/en/install.md — Post-install: `onboard.sh`](../help/en/install.md#post-install-onboardsh).

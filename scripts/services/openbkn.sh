@@ -2232,6 +2232,11 @@ _install_openbkn_impl() {
         return 1
     fi
 
+    # Best-effort initialization after installation: failures warn without changing
+    # the platform install result. Also runs when chart upgrades were skipped.
+    source "${SCRIPT_DIR}/scripts/lib/oss_storage.sh"
+    oss_provision_default_storage "${namespace}"
+
     local _host _port _scheme
     _host="$(_read_access_address_field "host" 2>/dev/null || true)"
     _port="$(_read_access_address_field "port" 2>/dev/null || true)"

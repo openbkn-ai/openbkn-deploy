@@ -151,6 +151,8 @@ sudo bash ./onboard.sh -y     # 非交互模式（按默认）
 sudo bash ./onboard.sh --help # 全部参数（--config=models.yaml、--enable-bkn-search 等）
 ```
 
+> 服务安装完成后，deploy 会自动将内置 MinIO 的 `bkn-oss` 桶注册为默认对象存储（`minio-default`）。此步骤需要 Kubernetes 权限，不需要平台 admin 登录，已有启用的默认存储时会跳过。初始化失败只输出警告和重试命令，不影响平台安装结果；onboard 也会重试同一初始化。可通过 `OSS_DEFAULT_BUCKET` / `OSS_DEFAULT_STORAGE_NAME` 自定义，设置 `ONBOARD_SKIP_OSS_STORAGE=true` 可在两个流程中跳过。每次 Kubernetes 就绪等待默认 120 秒，可通过 `OSS_STORAGE_READY_TIMEOUT` 修改。
+
 > **为什么要 `sudo`？** `onboard.sh` 会读 `$HOME/.openbkn-ai/config.yaml`（由 `sudo deploy.sh` 写到 `/root/.openbkn-ai/` 下）并把 `bkn` 认证 token 写到 `$HOME/.bkn`。不加 `sudo` 会回退到仓库内模板 `conf/config.yaml`，可能解析出和安装时不一致的 access URL。**macOS 开发路径**（`bash ./dev/mac.sh onboard`）**不需要** `sudo`。脚本启动时也会打印这条提示；可用 `ONBOARD_SUDO_HINT_DISABLED=1` 关闭。
 
 > 完整的 preflight / onboard 流程与 Mermaid 流程图见 [help/zh/install.md — Post-install：`onboard.sh`](../help/zh/install.md#post-installonboardsh安装后引导)。
