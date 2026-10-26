@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 import backup
-from minio_backup import MinioBackup, archive_inventory, object_key, validate_metadata
+from minio_backup import MinioBackup, archive_inventory, object_key, validate_metadata, mc_error_detail
 from test_backup import FakeCluster
 
 
@@ -114,6 +114,49 @@ class MinioTests(unittest.TestCase):
         with self.assertRaisesRegex(backup.BackupError, '并发修改'):
             self.minio.backup(self.root / 'minio.tar')
 
+    def test_sandbox_workspace_is_exported_and_each_bucket_reports_count(self):
+        self.minio.objects['sandbox-workspace'] = {'workspace/file': b'sandbox content'}
+        self.minio.buckets = sorted(self.minio.objects)
+        self.minio.log = mock.Mock()
+        path = self.root / 'all-buckets.tar'
+        metadata = self.minio.backup(path)
+        self.assertEqual(archive_inventory(path, metadata, backup.BackupError)[
+            ('sandbox-workspace', 'workspace/file')], len(b'sandbox content'))
+        messages = [call.args[0] for call in self.minio.log.call_args_list]
+        self.assertIn('MinIO sandbox-workspace: 导出完成 1/1 个对象', messages)
+        self.assertIn('MinIO empty-bucket: 导出完成 0/0 个对象', messages)
+
+    def test_download_failure_reports_object_and_mc_stdout_error(self):
+        original = self.minio.mc
+        def missing_object(work, *args, **kwargs):
+            if args[0] == 'cat':
+                kwargs['target'].write(json.dumps({'status': 'error', 'error': {
+                    'message': 'Unable to read object', 'cause': {'message': 'The specified key does not exist.',
+                    'error': {'Code': 'NoSuchKey'}}}}).encode())
+                raise backup.BackupError('command terminated with exit code 1')
+            return original(work, *args, **kwargs)
+        with mock.patch.object(self.minio, 'mc', side_effect=missing_object):
+            with self.assertRaisesRegex(backup.BackupError, 'bucket=bucket-a.*key=dir/file.txt.*NoSuchKey'):
+                self.minio.backup(self.root / 'failed.tar')
+
+    def test_partial_object_contents_are_not_printed_on_download_failure(self):
+        original = self.minio.mc
+        def interrupted(work, *args, **kwargs):
+            if args[0] == 'cat':
+                kwargs['target'].write(b'private object contents')
+                raise backup.BackupError('connection reset')
+            return original(work, *args, **kwargs)
+        with mock.patch.object(self.minio, 'mc', side_effect=interrupted):
+            with self.assertRaises(backup.BackupError) as caught:
+                self.minio.backup(self.root / 'failed.tar')
+        self.assertIn('key=dir/file.txt', str(caught.exception))
+        self.assertIn('connection reset', str(caught.exception))
+        self.assertNotIn('private object contents', str(caught.exception))
+
+    def test_error_detail_ignores_non_error_object_json(self):
+        self.assertEqual(mc_error_detail(io.BytesIO(b'{"private":"object data"}')), '')
+        self.assertEqual(mc_error_detail(io.BytesIO(b'x' * (64 * 1024 + 1))), '')
+
     def test_unrepresentable_keys_rejected_before_export(self):
         for key in ('a//b', 'a/../b', '/absolute', './a', 'a\\b', '.'):
             with self.subTest(key=key), self.assertRaises(backup.BackupError):
@@ -201,7 +244,7 @@ class MinioTests(unittest.TestCase):
                 stage = root / 'unpack'
                 stage.mkdir()
                 manifest = backup.unpack(next(root.glob('*.tar.gz')), stage)
-                self.assertEqual(manifest['format'], 4)
+                self.assertEqual(manifest['format'], 5)
                 self.assertEqual('redis' in manifest, with_redis)
                 self.assertIn('minio.tar', manifest['sha256'])
                 cluster.args.writers_stopped = True

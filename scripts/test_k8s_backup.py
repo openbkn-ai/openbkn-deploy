@@ -98,7 +98,7 @@ class K8sTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 backup.unpack(package, Path(directory), for_restore=True)
                 self.assertFalse((Path(directory) / 'k8s.tar').exists())
-                self.assertTrue((Path(directory) / 'mariadb.sql').exists())
+                self.assertTrue((Path(directory) / 'mariadb.tar').exists())
             target = fixture.cluster(['mariadb'])
             def create(args):
                 target.args, target.components = args, args.components

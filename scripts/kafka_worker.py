@@ -12,6 +12,7 @@ class KafkaBackupError(Exception):
 
 
 MODE = 'retained-committed-records-v1'
+IGNORED_TOPICS = {'connect-configs', 'connect-offsets', 'connect-status'}
 CONFIG_KEYS = ('cleanup.policy', 'retention.ms', 'retention.bytes', 'segment.ms',
                'segment.bytes', 'max.message.bytes', 'message.timestamp.type',
                'min.insync.replicas')
@@ -26,7 +27,7 @@ def ledger_restore_topics(metadata):
 
 
 def restore_blockers(metadata, *, counts_known=True):
-    """No business replay: preserve coordinates and resume the ledger group at EOF."""
+    """Preserve ledger coordinates and resume groups at their saved positions."""
     blockers = {}
     for topic in metadata['topics']:
         name = topic['name']
@@ -41,12 +42,9 @@ def restore_blockers(metadata, *, counts_known=True):
                 break
             if part['high'] == 0:
                 continue
-            if positions.get((name, part['id'])) != part['high']:
-                blockers[name] = '消费组 %s 未提交到分区末尾，需要可信历史重放' % expected_group
-                break
-            if any(item['offset'] != part['high'] for offsets in metadata['groups'].values()
-                   for item in offsets if item['topic'] == name and item['partition'] == part['id']):
-                blockers[name] = '存在尚未消费到分区末尾的消费组，需要可信历史重放'
+            position = positions.get((name, part['id']))
+            if position is None or not 0 <= position <= part['high']:
+                blockers[name] = '消费组 %s 缺少有效的分区提交位置，不能确定恢复起点' % expected_group
                 break
     return blockers
 
@@ -112,7 +110,7 @@ def rows(source):
 
 def validate_metadata(meta):
     if (not isinstance(meta, dict) or meta.get('mode') != MODE
-            or not isinstance(meta.get('topics'), list) or not meta['topics']
+            or not isinstance(meta.get('topics'), list)
             or not isinstance(meta.get('groups'), dict)):
         raise KafkaBackupError('Kafka 清单格式无效')
     names, files, bounds = set(), set(), {}
@@ -124,7 +122,7 @@ def validate_metadata(meta):
         names.add(name)
         cfg = topic['config']
         if (set(cfg) != set(CONFIG_KEYS) or any(not isinstance(v, str) for v in cfg.values())
-                or cfg['cleanup.policy'] != 'delete'
+                or (name not in IGNORED_TOPICS and cfg['cleanup.policy'] != 'delete')
                 or cfg['message.timestamp.type'] not in ('CreateTime', 'LogAppendTime')):
             raise KafkaBackupError('当前仅支持 cleanup.policy=delete Topic')
         parts = topic['partitions']

@@ -111,6 +111,39 @@ class KafkaTests(unittest.TestCase):
         with self.assertRaisesRegex(worker.KafkaBackupError, 'cleanup.policy'):
             worker.validate_metadata(meta)
 
+    def test_legacy_connect_compact_payload_is_validated_and_reported_as_ignored(self):
+        for name in worker.IGNORED_TOPICS:
+            with self.subTest(topic=name):
+                meta = copy.deepcopy(self.meta)
+                meta['topics'][0]['name'] = name
+                meta['topics'][0]['config']['cleanup.policy'] = 'compact'
+                meta['topics'][0]['partitions'][0]['file'] = name + '-0.ndjson'
+                meta['groups']['consumer-a'][0]['topic'] = name
+                path = self.root / (name + '.tar')
+                with tarfile.open(self.path) as source, tarfile.open(path, 'w:') as target:
+                    for entry in source:
+                        data = source.extractfile(entry).read()
+                        if entry.name == 'metadata.json':
+                            data = worker.json_bytes(meta)
+                        else:
+                            entry.name = name + '-0.ndjson'
+                        entry.size = len(data)
+                        target.addfile(entry, io.BytesIO(data))
+                self.assertEqual(worker.inventory(path), meta)
+                self.service.restore_note(meta)
+                self.assertIn(name, self.service.log.call_args.args[0])
+
+    def test_empty_business_topic_inventory_is_valid(self):
+        meta = copy.deepcopy(self.meta)
+        meta.update(topics=[], groups={}, ignored_topics=sorted(worker.IGNORED_TOPICS))
+        path = self.root / 'empty.tar'
+        raw = worker.json_bytes(meta)
+        with tarfile.open(path, 'w:') as archive:
+            member = tarfile.TarInfo('metadata.json')
+            member.size = len(raw)
+            archive.addfile(member, io.BytesIO(raw))
+        self.assertEqual(worker.inventory(path), meta)
+
     def test_malformed_archive_rejected_before_kubernetes_access(self):
         bad = self.root / 'bad.tar'
         with tarfile.open(self.path) as source, tarfile.open(bad, 'w:') as target:
@@ -173,6 +206,17 @@ class KafkaTests(unittest.TestCase):
         self.service.restore(self.path, self.meta)
         java_calls = [a for a, k in self.kube.calls if 'OpenBknKafkaBackup' in a]
         self.assertEqual(java_calls[-1][-2:], ['restore', '/work/import'])
+
+    def test_overwrite_is_passed_to_restore_check_and_run_only_when_requested(self):
+        self.service.preflight(self.meta, overwrite=True)
+        self.service.restore(self.path, self.meta, overwrite=True)
+        for pod in self.kube.pods:
+            env = {item['name']: item['value'] for item in pod['spec']['containers'][0]['env']}
+            self.assertEqual(env['TASK_KAFKA_OVERWRITE'], 'true')
+        self.kube.pods.clear()
+        self.service.preflight(self.meta)
+        env = {item['name']: item['value'] for item in self.kube.pods[0]['spec']['containers'][0]['env']}
+        self.assertEqual(env['TASK_KAFKA_OVERWRITE'], 'false')
 
     def test_historical_replay_error_is_local_clear_and_cannot_be_overwritten(self):
         for name in worker.LEDGER_GROUPS:
@@ -248,17 +292,26 @@ class KafkaTests(unittest.TestCase):
             kafka_backup.require_restored_ledger(meta, False, backup.BackupError)
         kafka_backup.require_restored_ledger(meta, True, backup.BackupError)
 
-    def test_ledger_backlog_missing_group_or_secondary_group_backlog_stays_blocked(self):
-        for case in ('backlog', 'missing', 'other'):
-            with self.subTest(case=case):
+    def test_ledger_backlog_restores_saved_positions_including_secondary_groups(self):
+        for name, group in worker.LEDGER_GROUPS.items():
+            for offset in (0, 80, 116, 117):
+                with self.subTest(topic=name, offset=offset):
+                    meta = self.ledger_meta(name)
+                    meta['groups'][group][0]['offset'] = offset
+                    meta['groups']['other'] = [dict(topic=name, partition=0, offset=40)]
+                    kafka_backup.validate_restore_metadata(meta, backup.BackupError)
+                    self.assertEqual(worker.restore_blockers(meta), {})
+                    self.assertEqual(meta['groups'][group][0]['offset'], offset)
+
+    def test_ledger_missing_or_out_of_range_position_stays_blocked(self):
+        for offset in (None, -1, 118):
+            with self.subTest(offset=offset):
                 meta = self.ledger_meta()
-                if case == 'backlog':
-                    meta['groups']['bkn-trace-audit-ledger-v1'][0]['offset'] = 116
-                elif case == 'missing':
+                if offset is None:
                     meta['groups'] = {}
                 else:
-                    meta['groups']['other'] = [dict(topic='openbkn.audit.v1', partition=0, offset=116)]
-                with self.assertRaisesRegex(backup.BackupError, '可信历史重放'):
+                    meta['groups']['bkn-trace-audit-ledger-v1'][0]['offset'] = offset
+                with self.assertRaisesRegex(backup.BackupError, '有效的分区提交位置'):
                     kafka_backup.validate_restore_metadata(meta, backup.BackupError)
 
     def test_coordinate_reuse_is_blocked_even_with_all_groups_at_end(self):

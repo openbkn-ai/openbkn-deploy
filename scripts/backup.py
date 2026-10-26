@@ -34,6 +34,7 @@ class BackupError(Exception):
 
 
 SYSTEM_DATABASES = {'information_schema', 'performance_schema', 'mysql', 'sys'}
+DEFAULT_DATABASES = ('bkn_audit', 'bkn_trace', 'deploy', 'openbkn', 'safe')
 DATABASE_NAME_PATTERN = r'[A-Za-z0-9_-]+'
 PAYLOADS = {'mariadb': 'mariadb.sql', 'opensearch': 'repository.tar',
             'redis': 'redis.rdb', 'minio': 'minio.tar', 'kafka': 'kafka.tar', 'k8s': 'k8s.tar'}
@@ -60,9 +61,9 @@ def manifest_components(manifest):
     if not isinstance(manifest, dict):
         raise BackupError('备份包清单必须是 JSON 对象')
     version = manifest.get('format')
-    if type(version) is not int or version not in (1, 2, 3, 4):
+    if type(version) is not int or version not in (1, 2, 3, 4, 5):
         raise BackupError('不支持的备份包版本')
-    if version == 4:
+    if version >= 4:
         names = manifest.get('components')
         if (not isinstance(names, list) or not names
                 or any(not isinstance(n, str) or n not in PAYLOADS for n in names)
@@ -82,6 +83,58 @@ def manifest_components(manifest):
 
 def log(message):
     print(time.strftime('%Y-%m-%d %H:%M:%S ') + message, file=sys.stderr, flush=True)
+
+
+def interactive_restore(args):
+    return (args.module == 'restore' and args.action == 'run' and not args.non_interactive
+            and sys.stdin.isatty() and sys.stderr.isatty())
+
+
+def confirm_restore(question):
+    while True:
+        print(question + ' [y/n] ', end='', file=sys.stderr, flush=True)
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            raise BackupError('未收到确认，恢复已取消')
+        if answer in ('y', 'yes'):
+            return True
+        if answer in ('n', 'no'):
+            return False
+        print('请明确输入 y/yes 或 n/no，空行和其他输入不作选择。', file=sys.stderr, flush=True)
+
+
+def prepare_restore_options(args, manifest):
+    if not interactive_restore(args):
+        return
+    log('恢复组件: ' + ', '.join(args.components))
+    if 'kafka' in args.components and ledger_restore_topics(manifest['kafka']) and not args.kafka_ledger_restored:
+        if not confirm_restore('是否确认 MariaDB 审计/Evidence 账本已保留或同批恢复，且备份时生产者、消费者均已停止？'):
+            raise BackupError('未确认 Kafka 与原账本匹配，恢复已取消')
+        args.kafka_ledger_restored = True
+    if not args.overwrite:
+        impacts = {'mariadb': '替换所选业务库', 'opensearch': '删除同名索引后恢复',
+                   'redis': '替换全部 Redis DB', 'minio': '覆盖同名对象，保留目标多出的对象',
+                   'kafka': '删除重建备份内需要替换的 Topic'}
+        args.overwrite = confirm_restore('目标已有数据时，是否允许覆盖？' + '；'.join(impacts[c] for c in args.components if c in impacts))
+        if not args.overwrite:
+            raise BackupError('未允许覆盖，恢复已取消；未停止业务或修改目标数据')
+    if 'opensearch' in args.components and not args.replace_repository:
+        args.replace_repository = confirm_restore('是否允许替换目标快照仓库？先将原仓库留存到 '
+            + args.output_dir + '，再注销同名仓库并清空快照目录内容（保留挂载目录）')
+
+
+def prepare_restore_stop(args):
+    if args.writers_stopped or not interactive_restore(args):
+        return
+    if not confirm_restore('恢复前必须停止相关业务写入和 Kafka 消费。是否停止 '
+            + args.business_namespace + ' 命名空间的业务 Deployment 并等待 Pod 删除？'
+            ' MinIO 等数据服务保持运行；独立任务和外部写入方需另行停止。'):
+        raise BackupError('恢复已取消；可手动执行 openbkn stop，确认停写后添加 --writers-stopped')
+    run([sys.executable, str(Path(__file__).with_name('openbkn_workloads.py')), 'stop',
+         '--namespace', args.business_namespace], timeout=args.timeout)
+    args.writers_stopped = True
+    log('业务 Deployment 的 Pod 已退出；恢复失败时保持停止，核验成功后执行 openbkn start')
 
 
 def run(argv, *, data=None, source=None, target=None, timeout=3600):
@@ -146,7 +199,7 @@ def unpack(package, destination, components=None, *, for_restore=False):
     with tarfile.open(package, 'r:gz') as archive:
         members = list(safe_members(archive))
         names = {m.name for m in members}
-        if 'manifest.json' not in names or names - {'manifest.json', 'k8s.json'} - set(PAYLOADS.values()) or any(not m.isfile() for m in members):
+        if 'manifest.json' not in names or names - {'manifest.json', 'k8s.json'} - (set(PAYLOADS.values()) | {'mariadb.tar'}) or any(not m.isfile() for m in members):
             raise BackupError('备份包文件列表不符合支持的格式')
         with archive.extractfile('manifest.json') as source:
             manifest = json.load(source)
@@ -157,6 +210,8 @@ def unpack(package, destination, components=None, *, for_restore=False):
         if not selected or set(selected) - set(available):
             raise BackupError('备份包不包含请求的组件: ' + ', '.join(set(selected) - set(available)))
         payloads = dict(PAYLOADS)
+        if manifest['format'] >= 5:
+            payloads['mariadb'] = 'mariadb.tar'
         if 'k8s.json' in names and 'k8s.tar' not in names:
             payloads['k8s'] = 'k8s.json'  # Early configuration-only packages.
         expected_files = {payloads[c] for c in available}
@@ -199,17 +254,46 @@ def unpack(package, destination, components=None, *, for_restore=False):
             raise BackupError('Kafka 备份包缺少组件元数据')
         kafka_inventory(destination / 'kafka.tar', manifest.get('kafka'), BackupError)
     if 'mariadb' in selected:
-        databases = manifest.get('databases', [])
-        if not isinstance(databases, list) or not databases or any(not isinstance(db, str) or not re.fullmatch(DATABASE_NAME_PATTERN, db) for db in databases):
-            raise BackupError('数据库清单无效')
-        if set(databases) & SYSTEM_DATABASES:
-            raise BackupError('备份包不能包含系统库')
+        databases = validate_databases(manifest.get('databases'))
+        if manifest['format'] >= 5:
+            with tarfile.open(destination / 'mariadb.tar', 'r:') as archive:
+                members = list(safe_members(archive))
+                if (any(not m.isfile() or not m.size for m in members)
+                        or {m.name for m in members} != {db + '.sql' for db in databases}):
+                    raise BackupError('MariaDB 分库文件与数据库清单不匹配')
+                folder = destination / 'mariadb'
+                folder.mkdir(exist_ok=True)
+                archive.extractall(folder, members=members)
+
     for component in ('mariadb', 'opensearch'):
         if component in selected:
             version = manifest.get(component + '_version')
             if not isinstance(version, str) or not re.match(r'^\d+\.\d+\.', version):
                 raise BackupError('备份包缺少有效版本: ' + component + '_version')
     return manifest
+
+
+def validate_databases(databases):
+    if (not isinstance(databases, list) or not databases
+            or any(not isinstance(db, str) or not re.fullmatch(DATABASE_NAME_PATTERN, db) for db in databases)
+            or len(set(databases)) != len(databases)):
+        raise BackupError('数据库清单无效，库名仅支持字母、数字、下划线和横线，且不能重复')
+    if set(databases) & SYSTEM_DATABASES:
+        raise BackupError('不能备份或恢复系统库')
+    return databases
+
+
+def restore_databases(args, manifest):
+    databases = validate_databases(manifest.get('databases'))
+    selected = getattr(args, 'databases', None)
+    if selected is None:
+        return databases
+    validate_databases(selected)
+    if set(selected) - set(databases):
+        raise BackupError('备份包不包含指定数据库: ' + ', '.join(sorted(set(selected) - set(databases))))
+    if manifest['format'] < 5 and selected != databases:
+        raise BackupError('旧版合并 SQL 备份包不支持按库选择恢复，请恢复包内全部库')
+    return selected
 
 
 class Cluster:
@@ -314,17 +398,15 @@ class Cluster:
         self.mariadb_version = self.sql('SELECT VERSION();').decode().strip()
         self.exec('mariadb', ['sh', '-c', 'command -v mariadb-dump >/dev/null'], timeout=60)
         all_databases = self.sql('SHOW DATABASES;').decode().splitlines()
-        self.databases = self.args.databases or [db for db in all_databases if db not in
-                         SYSTEM_DATABASES]
-        if not self.databases and self.args.module == 'backup':
-            raise BackupError('没有发现业务库；请确认目标 MariaDB 已初始化业务数据库')
-        unsupported = [db for db in self.databases if not re.fullmatch(DATABASE_NAME_PATTERN, db)]
-        if unsupported:
-            raise BackupError('库名目前仅支持字母、数字、下划线和横线；不支持: ' + ', '.join(unsupported))
-        if set(self.databases) - set(all_databases):
-            raise BackupError('指定的业务库不存在')
-        if set(self.databases) & SYSTEM_DATABASES:
-            raise BackupError('一期只备份业务库，不能指定系统库')
+        if self.args.module == 'restore':
+            # Restore scope comes from the archive, not the target's existing databases.
+            self.databases = []
+            return
+        self.databases = list(self.args.databases or DEFAULT_DATABASES)
+        validate_databases(self.databases)
+        missing = set(self.databases) - set(all_databases)
+        if missing:
+            raise BackupError('指定的业务库不存在: ' + ', '.join(sorted(missing)))
 
     def check_opensearch(self):
         info = self.api('GET', '/')
@@ -337,6 +419,7 @@ class Cluster:
             allowed = [allowed]
         if self.args.repository_path not in allowed:
             raise BackupError('path.repo 未包含 ' + self.args.repository_path + '；请按 BACKUP.zh.md 完成一次性配置并重启')
+        self.check_opensearch_repository_directory()
         self.exec('opensearch', ['sh', '-c', 'command -v tar >/dev/null; test -d "$1" && test -r "$1" && test -w "$1"',
                                   'check', self.args.repository_path], timeout=60)
         # Require a persistent mount: a writable container layer is not a portable repository.
@@ -349,6 +432,19 @@ class Cluster:
                    for m in mounts):
             raise BackupError('快照目录必须有可写持久卷挂载；请按 BACKUP.zh.md 配置')
 
+    def check_opensearch_repository_directory(self):
+        raw = self.exec('opensearch', ['sh', '-c',
+            'test -d "$1" && test -r "$1" && test -w "$1" && cat /proc/self/mountinfo',
+            'check-repository-directory', self.args.repository_path], timeout=60)
+        for line in raw.decode().splitlines():
+            fields = line.split()
+            if len(fields) < 5:
+                continue
+            decode = lambda value: re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), value)
+            root, mountpoint = decode(fields[3]), decode(fields[4])
+            if mountpoint == self.args.repository_path and root.endswith('//deleted'):
+                raise BackupError('快照目录为失效挂载；重建宿主机目录并重启 OpenSearch Pod 后重试')
+
     @contextlib.contextmanager
     def lock(self):
         # Full and component commands use the same per-Pod lock. Redis already
@@ -360,15 +456,15 @@ class Cluster:
                 execute = self.minio.execute if component == 'minio' else lambda command, component=component, **kw: self.exec(component, command, **kw)
                 path = '/tmp/openbkn-data-backup.lock'
                 execute(['mkdir', path], timeout=60)
-                stack.callback(self.release_lock, execute, path)
+                stack.callback(self.release_lock, execute, path, component)
             yield
 
     @staticmethod
-    def release_lock(execute, path):
+    def release_lock(execute, path, component="unknown"):
         try:
-            execute(['rm', '-d', '--', path], timeout=60)
-        except Exception:
-            log('组件锁清理失败；确认没有任务后再清理 Pod 内目录: ' + path)
+            execute(['rm', '-rf', '--', path], timeout=60)
+        except Exception as exc:
+            log(component + ' 组件锁清理失败: ' + str(exc) + '；确认没有任务后再清理 Pod 内目录: ' + path)
 
     def register(self, readonly=False):
         existing = self.api('GET', '/_snapshot')
@@ -397,10 +493,10 @@ class Cluster:
             stage = Path(tmp)
             stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M%S') + '-' + uuid.uuid4().hex[:8]
             name = 'openbkn-' + (self.components[0] + '-' if len(self.components) == 1 else '') + stamp
-            manifest = {'format': 4, 'components': self.components,
+            manifest = {'format': 5 if 'mariadb' in self.components else 4, 'components': self.components,
                         'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
             if 'mariadb' in self.components:
-                self.backup_mariadb(stage / 'mariadb.sql')
+                self.backup_mariadb(stage / 'mariadb.tar')
                 manifest.update(databases=self.databases, mariadb_version=self.mariadb_version)
             if 'opensearch' in self.components:
                 manifest.update(self.backup_opensearch(stage / 'repository.tar', name))
@@ -414,7 +510,7 @@ class Cluster:
                 manifest['kafka'] = self.kafka.backup(stage / 'kafka.tar')
             if 'k8s' in self.components:
                 manifest['k8s'] = self.k8s.backup(stage / 'k8s.tar')
-            payloads = [PAYLOADS[c] for c in self.components]
+            payloads = ['mariadb.tar' if c == 'mariadb' else PAYLOADS[c] for c in self.components]
             manifest['sha256'] = {name: digest(stage / name) for name in payloads}
             (stage / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
             log('压缩备份包并校验')
@@ -431,8 +527,19 @@ class Cluster:
                 os.replace(partial, package)
             finally:
                 partial.unlink(missing_ok=True)
+            cleanup_warning = None
+            if 'snapshot' in manifest:
+                try:
+                    self.idle()
+                    if not self.api('DELETE', self.repository + '/' + manifest['snapshot'], timeout=self.args.timeout).get('acknowledged'):
+                        raise BackupError('快照删除未确认')
+                except Exception as exc:
+                    cleanup_warning = str(exc)
+                    log('备份包已完成，但快照清理失败: ' + cleanup_warning)
             log('备份完成: ' + str(package))
             result = {'result': 'success', 'archive': str(package), 'components': self.components, 'format': manifest['format']}
+            if cleanup_warning:
+                result['cleanup_warning'] = cleanup_warning
             if 'kafka' in manifest:
                 blocked = kafka_restore_blocked_topics(manifest['kafka'])
                 if blocked:
@@ -446,16 +553,28 @@ class Cluster:
             print(json.dumps(result))
 
     def backup_mariadb(self, path):
+        validate_databases(self.databases)
         log('导出 MariaDB 业务库: ' + ', '.join(self.databases))
         db_list = ','.join("'%s'" % db for db in self.databases)
         engines = self.sql('SELECT TABLE_SCHEMA,TABLE_NAME,ENGINE FROM information_schema.TABLES '
                            'WHERE TABLE_SCHEMA IN (' + db_list + ") AND TABLE_TYPE='BASE TABLE' AND ENGINE <> 'InnoDB';")
         if engines.strip():
             raise BackupError('业务库存在非 InnoDB 表，无法保证在线事务一致性；一期暂不支持')
-        with open(path, 'wb') as target:
-            self.sql(databases=self.databases, target=target)
-        if not path.stat().st_size:
-            raise BackupError('MariaDB 导出文件为空')
+        with tempfile.TemporaryDirectory(prefix='mariadb-', dir=path.parent) as tmp, tarfile.open(path, 'w:') as archive:
+            for number, database in enumerate(self.databases, 1):
+                started = time.monotonic()
+                log('MariaDB 导出 %d/%d: %s' % (number, len(self.databases), database))
+                sql_file = Path(tmp) / (database + '.sql')
+                try:
+                    with open(sql_file, 'wb') as target:
+                        self.sql(databases=[database], target=target)
+                    if not sql_file.stat().st_size:
+                        raise BackupError('导出文件为空')
+                    archive.add(sql_file, arcname=database + '.sql')
+                except (BackupError, OSError) as exc:
+                    raise BackupError('MariaDB 导出失败，数据库 ' + database + ': ' + str(exc)) from exc
+                sql_file.unlink()
+                log('MariaDB 导出完成: %s，耗时 %ds' % (database, time.monotonic() - started))
 
     def backup_opensearch(self, path, snapshot):
         log('注册并校验快照仓库，创建 OpenSearch 快照')
@@ -518,7 +637,7 @@ class Cluster:
     def preflight_mariadb(self, manifest):
         if self.mariadb_version.split('.')[0] != manifest['mariadb_version'].split('.')[0]:
             raise BackupError('一期要求 MariaDB 主版本一致')
-        databases = manifest['databases']
+        databases = restore_databases(self.args, manifest)
         db_list = ','.join("'%s'" % db for db in databases)
         tables = self.sql('SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.TABLES '
                           'WHERE TABLE_SCHEMA IN (' + db_list + ');').decode().strip()
@@ -539,10 +658,16 @@ class Cluster:
             'for item in "$1"/* "$1"/.[!.]* "$1"/..?*; do '
             '[ ! -e "$item" ] || { printf "non-empty\\n"; exit 0; }; done',
             'check-repository', self.args.repository_path], timeout=60)
-        if content.strip():
+        if content.strip() and not self.args.replace_repository:
             raise BackupError('恢复目标快照目录非空；请使用空的持久化快照目录，禁止混入已有仓库')
         repositories = self.api('GET', '/_snapshot')
-        if any(r.get('settings', {}).get('location') == self.args.repository_path for r in repositories.values()):
+        for name, repository in repositories.items():
+            location = repository.get('settings', {}).get('location')
+            if location == self.args.repository_path and name != self.args.repository:
+                raise BackupError('恢复目录被其他仓库引用: ' + name)
+            if name == self.args.repository and (location != self.args.repository_path or repository.get('type') != 'fs'):
+                raise BackupError('同名仓库指向其他存储，不能替换')
+        if not self.args.replace_repository and any(r.get('settings', {}).get('location') == self.args.repository_path for r in repositories.values()):
             raise BackupError('恢复目录仍被仓库注册引用；先用 DELETE /_snapshot/<仓库名> 注销（不会删除文件）')
         self.idle()
         return conflicts
@@ -558,11 +683,28 @@ class Cluster:
             if 'opensearch' in self.components:
                 self.restore_opensearch(stage, manifest, conflicts)
             if 'mariadb' in self.components:
-                log('恢复 MariaDB 业务库（替换备份清单内的库）')
-                with open(stage / 'mariadb.sql', 'rb') as source:
-                    self.sql(source=source)
-                for database in manifest['databases']:
-                    self.sql('USE `' + database + '`; SHOW TABLES;')
+                databases = restore_databases(self.args, manifest)
+                if manifest['format'] < 5:
+                    log('恢复 MariaDB 旧版合并 SQL（包内全部库）')
+                    with open(stage / 'mariadb.sql', 'rb') as source:
+                        self.sql(source=source)
+                    for database in databases:
+                        self.sql('USE `' + database + '`; SHOW TABLES;')
+                else:
+                    completed = []
+                    for number, database in enumerate(databases, 1):
+                        started = time.monotonic()
+                        log('MariaDB 恢复 %d/%d: %s' % (number, len(databases), database))
+                        try:
+                            with open(stage / 'mariadb' / (database + '.sql'), 'rb') as source:
+                                self.sql(source=source)
+                            self.sql('USE `' + database + '`; SHOW TABLES;')
+                        except (BackupError, OSError) as exc:
+                            raise BackupError('MariaDB 恢复失败，数据库 %s（可能已部分写入）；已完成: %s；未执行: %s。原因: %s'
+                                              % (database, ', '.join(completed) or '无',
+                                                 ', '.join(databases[number:]) or '无', exc)) from exc
+                        completed.append(database)
+                        log('MariaDB 恢复完成: %s，耗时 %ds' % (database, time.monotonic() - started))
             if 'redis' in self.components:
                 log('恢复 Redis 全部 DB（停止 Redis、转换 AOF 并验证重启）')
                 self.redis.restore(stage / 'redis.rdb', manifest['redis'], self.args.overwrite)
@@ -575,12 +717,39 @@ class Cluster:
             result = {'result': 'success', 'components': self.components,
                       'redis_restored': 'redis' in self.components, 'minio_restored': 'minio' in self.components}
             if 'mariadb' in self.components:
-                result['databases'] = manifest['databases']
+                result['databases'] = restore_databases(self.args, manifest)
             if 'opensearch' in self.components:
                 result['snapshot'] = manifest['snapshot']
             print(json.dumps(result))
 
     def restore_opensearch(self, stage, manifest, conflicts):
+        self.check_opensearch_repository_directory()
+        self.idle()
+        if self.args.replace_repository:
+            self.preflight_opensearch(manifest)
+            destination = Path(self.args.output_dir)
+            destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+            package = destination / ('openbkn-repository-before-restore-' + uuid.uuid4().hex + '.tar')
+            partial = package.with_suffix('.partial')
+            try:
+                with open(partial, 'wb') as target:
+                    self.exec('opensearch', ['tar', '-C', self.args.repository_path, '-cf', '-', '.'], target=target)
+                    target.flush()
+                    os.fsync(target.fileno())
+                with tarfile.open(partial, 'r:') as archive:
+                    list(safe_members(archive))
+                os.replace(partial, package)
+            finally:
+                partial.unlink(missing_ok=True)
+            log('原快照仓库已留存: ' + str(package))
+            repositories = self.api('GET', '/_snapshot')
+            if self.args.repository in repositories:
+                if not self.api('DELETE', self.repository).get('acknowledged'):
+                    raise BackupError('原仓库注销未确认')
+            self.exec('opensearch', ['sh', '-c',
+                'set -eu; for item in "$1"/* "$1"/.[!.]* "$1"/..?*; do '
+                '[ ! -e "$item" ] && [ ! -L "$item" ] || rm -rf -- "$item"; done',
+                'clear-repository', self.args.repository_path])
         log('将完整快照仓库复制到目标 Pod 持久卷')
         with open(stage / 'repository.tar', 'rb') as source:
             self.exec('opensearch', ['tar', '--no-same-owner', '-C', self.args.repository_path, '-xf', '-'], source=source)
@@ -614,9 +783,12 @@ def parser():
     result.add_argument('--output-dir', default='/var/backups/openbkn')
     result.add_argument('--repository', default='offsite-backup', help='专用仓库；备份成功后删除其中所有旧快照')
     result.add_argument('--repository-path', default='/usr/share/opensearch/snapshots')
-    result.add_argument('--databases', nargs='+', help='默认自动发现所有非系统库')
+    result.add_argument('--databases', nargs='+', help='备份默认 bkn_audit bkn_trace deploy openbkn safe；恢复可选择新包内的数据库')
     result.add_argument('--timeout', type=int, default=3600)
     result.add_argument('--poll-interval', type=int, default=10)
+    result.add_argument('--non-interactive', action='store_true', help='禁用恢复交互确认')
+    result.add_argument('--business-namespace', default=os.environ.get('CORE_NAMESPACE', 'openbkn'))
+    result.add_argument('--replace-repository', action='store_true', help='覆盖恢复时留存并替换目标快照仓库')
     result.add_argument('--overwrite', action='store_true', help='允许替换目标业务库、同名索引、Redis 全部 DB，覆盖 MinIO 同名对象（保留多余对象）')
     result.add_argument('--writers-stopped', action='store_true', help='确认业务服务已停止写入；恢复 Kafka 时消费者也必须停止（恢复必需）')
     result.add_argument('--skip-minio', action='store_true', help='仅备份时使用：不包含 MinIO')
@@ -645,6 +817,8 @@ def parser():
 
 
 def validate_options(args):
+    if args.replace_repository and (args.module != 'restore' or 'opensearch' not in args.components or not args.overwrite):
+        raise BackupError('--replace-repository 仅用于 OpenSearch 恢复，且需要 --overwrite')
     if args.k8s_secrets and (args.module != 'backup' or 'k8s' not in args.components):
         raise BackupError('--k8s-secrets 仅用于包含 K8s 配置留档的备份')
     if args.include_kafka and (args.module != 'backup' or requested_components(args) is not None):
@@ -662,8 +836,10 @@ def validate_options(args):
             raise BackupError('仓库路径必须是专用绝对路径')
     if args.timeout < 1 or not 1 <= args.poll_interval <= 30:
         raise BackupError('timeout 必须为正数，poll-interval 必须在 1 到 30 秒之间')
-    if args.databases and ('mariadb' not in args.components or args.module == 'restore'):
-        raise BackupError('--databases 仅用于 MariaDB 备份，恢复库范围由备份包决定')
+    if args.databases:
+        if 'mariadb' not in args.components:
+            raise BackupError('--databases 仅用于 MariaDB 备份或恢复')
+        validate_databases(args.databases)
     if args.minio_buckets and ('minio' not in args.components or args.module == 'restore'):
         raise BackupError('--minio-buckets 仅用于 MinIO 备份，恢复范围由备份包决定')
 
@@ -718,6 +894,9 @@ def main(argv=None):
                 log('K8s 配置留档不自动恢复；需要时解包 k8s.tar 按 RESTORE.zh.md 人工恢复')
             args.components = [c for c in manifest_components(manifest) if c != 'k8s'] if selected is None else selected
             validate_options(args)
+            if 'mariadb' in args.components:
+                restore_databases(args, manifest)
+            prepare_restore_options(args, manifest)
             if 'kafka' in args.components:
                 validate_kafka_restore(manifest['kafka'], BackupError)
                 if args.action == 'run':
@@ -727,6 +906,8 @@ def main(argv=None):
             if args.action == 'check':
                 cluster.restore_preflight(manifest)
                 result = {'result': 'ready', 'components': args.components, 'note': '校验完成，尚未恢复'}
+                if 'mariadb' in args.components:
+                    result['databases'] = restore_databases(args, manifest)
                 if 'kafka' in args.components and ledger_restore_topics(manifest['kafka']):
                     result['kafka_ledger_restore_required'] = ledger_restore_topics(manifest['kafka'])
                     result['required_run_options'] = ['--writers-stopped', '--kafka-ledger-restored']
@@ -734,6 +915,7 @@ def main(argv=None):
                     result['snapshot'] = manifest['snapshot']
                 print(json.dumps(result, ensure_ascii=False))
             else:
+                prepare_restore_stop(args)
                 cluster.restore(stage, manifest)
 
 

@@ -17,6 +17,16 @@ bash deploy.sh restore check <备份包> --components mariadb opensearch
 bash deploy.sh restore run <备份包> --components mariadb opensearch --writers-stopped --overwrite
 ```
 
+需要停业务取得跨组件一致的备份时，可执行：
+
+```bash
+bash deploy.sh openbkn stop
+bash deploy.sh backup run --output-dir /var/backups/openbkn
+bash deploy.sh openbkn start
+```
+
+`openbkn stop` 将 OpenBKN 命名空间中的业务 Deployment 副本数设为 0，并等待这些 Deployment 的 Pod 全部删除后才返回；超时会报出尚未退出的 Pod。`openbkn start` 将副本数设为 1；MinIO、PostgreSQL 等数据服务保持运行。命令依赖当前环境业务服务固定为 1 副本的约定，不保存原副本数。独立 Job、CronJob 和外部写入方不属于 Deployment 缩容范围，仍需另行停写。
+
 组件名称空格分隔，不能重复；不支持的名称、与单组件入口混用、与 `--skip-redis/--skip-minio` 或 `--include-kafka` 混用均报错。恢复选择的组件必须存在于包内，否则在连接集群前拒绝。执行顺序由工具固定，不受参数排列顺序影响；Kafka 消费组、空分区及账本确认等保护保持生效。
 
 支持 `mariadb`、`opensearch`、`redis`、`minio`、`kafka` 五个数据组件，以及仅支持备份的 `k8s`。单组件命令只发现、连接和检查选中的存储；不要求其他存储存在或正常运行。命令格式：
@@ -38,17 +48,17 @@ bash deploy.sh minio restore run /var/backups/openbkn/openbkn-<时间>-<后缀>.
   --writers-stopped --overwrite
 ```
 
-此时不检查 MariaDB/OpenSearch/Redis，也不需要注销或清空 OpenSearch 快照仓库。`restore check` 不写入业务数据，`restore run` 仍需 `--writers-stopped` 确认相关业务写入已停止；工具不会自动停止业务服务。MariaDB 覆盖包内业务库，OpenSearch 替换同名索引，Redis 替换全部 DB，MinIO 覆盖同名对象并保留目标多出的对象。各组件的恢复限制仍适用，例如单独恢复 OpenSearch 仍要求空的、未注册的快照目录。
+此时不检查 MariaDB/OpenSearch/Redis，也不需要注销或清空 OpenSearch 快照仓库。`restore check` 不写入业务数据，`restore run` 仍需 `--writers-stopped` 确认相关业务写入已停止；可用 `openbkn stop/start` 管理业务 Deployment。MariaDB 覆盖包内业务库，OpenSearch 替换同名索引，Redis 替换全部 DB，MinIO 覆盖同名对象并保留目标多出的对象。单独恢复 OpenSearch 默认仍要求空的、未注册的快照目录；明确指定 `--replace-repository --overwrite` 可自动替换目标原仓库。
 
 单组件恢复先校验包的整体文件列表及路径安全，再只解包、校验选中组件的文件、清单和版本；不检查其他组件的 payload 校验和或内容。gzip 文件必须能正常读取；若压缩文件本身损坏，即使只恢复某组件也可能无法解包。包中不存在指定组件时，在连接 Kubernetes 前报错。
 
 **默认范围变更：**`bash deploy.sh backup check|run` 现在包含五个数据组件（含 Kafka）及 K8s 配置留档，任何选中组件检查失败都会中止，不会静默跳过。原 `--include-kafka` 保留为兼容参数，已无需指定；`bash deploy.sh restore check|run <包>` 恢复该包声明的数据组件，自动跳过 K8s 配置留档；仅含 K8s 的包会提示没有可自动恢复的数据。`--skip-redis`、`--skip-minio` 仅供完整备份排除组件；恢复或显式选择组件时不接受这些开关。Python 入口也支持 `python3 scripts/backup.py restore run <包> --component minio ...`。
 
-新备份统一写入 `format: 4`，使用 `components` 明确声明内容；v1/v2/v3 包仍支持完整或单组件恢复。旧脚本不能恢复 v4 包，目标机需要同步新版脚本。单组件文件名为 `openbkn-<组件>-<时间>-<后缀>.tar.gz`，包内只有清单和相应数据文件：
+包含 MariaDB 的新备份写入 `format: 5`，每库独立 SQL 装入 `mariadb.tar`；不含 MariaDB 的包保持 `format: 4`。使用 `components` 明确声明内容；v1/v2/v3/v4 包仍支持恢复。旧脚本不能恢复 v5 包，目标机需要同步新版脚本。单组件文件名为 `openbkn-<组件>-<时间>-<后缀>.tar.gz`，包内只有清单和相应数据文件：
 
 | 组件 | 数据文件 | 清单元数据 |
 | --- | --- | --- |
-| MariaDB | `mariadb.sql` | `databases`、`mariadb_version` |
+| MariaDB | `mariadb.tar`（内含 `<数据库名>.sql`；旧包为 `mariadb.sql`） | `databases`、`mariadb_version` |
 | OpenSearch | `repository.tar` | `snapshot`、`indices`、`opensearch_version` |
 | Redis | `redis.rdb` | `redis` |
 | MinIO | `minio.tar` | `minio` |
@@ -121,23 +131,25 @@ K8s 备份仅对 Kubernetes 和 Helm 执行只读命令，不创建工具 Pod，
 
 ## 一次性配置 OpenSearch 快照目录
 
-新版 `bash deploy.sh opensearch install` 在**新安装**时默认配置快照目录和 `path.repo`。init 容器复用部署的 BusyBox 镜像，通过 `DirectoryOrCreate` 在 Pod 所在节点创建目录，并按 OpenSearch Helm values 中的 UID/GID 设置权限（默认 1000:1000、目录权限 700）。无需在执行部署命令的机器上手动建目录。
+新版 `bash deploy.sh opensearch install` 在新安装和检查已有环境时默认补齐快照目录和 `path.repo`；完整部署调用同一安装流程。init 容器复用部署的 BusyBox 镜像，通过 `DirectoryOrCreate` 在 Pod 所在节点创建目录，并按 OpenSearch Helm values 中的 UID/GID 设置权限（默认 1000:1000、目录权限 700）。无需在执行部署命令的机器上手动建目录。旧环境首次补齐配置可能重启 OpenSearch，应安排维护窗口；配置已完整时不会为快照再次升级或重启。
 
 ```bash
-# 新安装，默认宿主机目录 /mnt/openbkn-snapshots
+# 新安装或为旧环境补齐配置，默认宿主机目录 /mnt/openbkn-snapshots
 bash deploy.sh opensearch install
 
 # 新安装时指定专用目录
 OPENSEARCH_SNAPSHOT_HOST_PATH=/backup/opensearch bash deploy.sh opensearch install
 
-# 新安装时不启用快照目录
+# 不自动补齐快照配置（已有快照配置会保留）
 OPENSEARCH_SNAPSHOT_ENABLED=false bash deploy.sh opensearch install
 
 # 已有环境显式启用；会触发滚动更新，应安排维护窗口
 bash deploy.sh opensearch enable-snapshots
 ```
 
-`enable-snapshots` 读取现有 Helm values，保留安全设置、自定义配置及其他挂载，只合并快照相关配置。它要求匹配的本地 Chart；再次运行沿用同一目录，不清理快照文件。已有 `snapshot-repo` 指向其他存储、容器挂载冲突或无法安全合并自定义 `path.repo` 时会拒绝，需人工合并；不会自动迁移快照目录。现有环境运行 `install` 保持原升级策略，不会隐式启用快照。
+已有环境运行 `install` 时读取现有 Helm values，保留安全设置、自定义配置及其他挂载。已挂载到快照路径的可写持久卷会沿用，包括自定义宿主机路径、PVC 或 NFS；只有缺少存储挂载时才按新安装方式补齐。不会自动迁移快照目录，也不清理快照文件；挂载冲突、只读或非持久卷、无法安全合并的自定义 `path.repo` 会报错，需人工处理。资源限制清理与快照补齐会合并为一次 Helm 更新。
+
+`enable-snapshots` 仍可用于显式合并快照配置；已有 `snapshot-repo` 指向其他存储时拒绝切换。已有环境补齐配置要求匹配的本地 Chart。
 
 宿主机目录仍是节点本地存储，不等于异地备份。独立存储须预先挂载到该节点的目录并确认 `findmnt -T <目录>`；多节点环境须使用共享仓库。init 容器需要以 root 设置该目录权限，禁止 root init 容器的环境需按下面步骤手动准备目录和挂载。
 
@@ -184,7 +196,7 @@ bash ./deploy.sh backup check
 bash ./deploy.sh backup run --output-dir /var/backups/openbkn
 ```
 
-默认发现所有非系统数据库，如 `openbkn`、`safe`、`bkn_trace`；库名支持字母、数字、下划线及横线（例如 `ecommerce-ops`），检查、导出和恢复使用同一校验规则。也可明确指定：
+默认只备份五个业务库：`bkn_audit`、`bkn_trace`、`deploy`、`openbkn`、`safe`，不会自动加入其他非系统数据库。默认库缺失时检查报错，不会静默跳过。可通过 `--databases` 显式调整范围；库名支持字母、数字、下划线及横线，不允许指定系统库或重复库名：
 
 ```bash
 bash ./deploy.sh backup run --output-dir /var/backups/openbkn \
@@ -195,7 +207,7 @@ bash ./deploy.sh backup run --output-dir /var/backups/openbkn \
 
 备份按顺序执行：
 
-1. 使用一次 `mariadb-dump --single-transaction --quick --routines --events --triggers --hex-blob --add-drop-database --databases ...` 导出选中业务库，包含结构、数据、触发器、过程和事件。系统库、数据库账号及授权不导出。
+1. 对每个选中库分别执行 `mariadb-dump --single-transaction --quick --routines --events --triggers --hex-blob --add-drop-database --databases <库名>`，生成 `<库名>.sql` 并装入 `mariadb.tar`。包含结构、数据、触发器、过程和事件。系统库、数据库账号及授权不导出。每个库显示进度和耗时，失败后不发布备份包。
 2. 注册专用 `offsite-backup` 文件系统仓库，并执行 `_verify`。
 3. 使用 Snapshot API 创建快照，`indices: "*"`、`include_global_state: false`、`ignore_unavailable: false`、`partial: false`，轮询直到 `SUCCESS`。
 4. 通过 Snapshot DELETE API 删除这个专用仓库内的所有旧快照。新快照失败时不会删除旧快照；不能与其他用途共用此仓库。
@@ -207,25 +219,47 @@ bash ./deploy.sh backup run --output-dir /var/backups/openbkn \
 ```text
 openbkn-20261019010000-xxxxxxxx.tar.gz
 ├── manifest.json       # 版本、业务库、索引、快照名、文件校验和
-├── mariadb.sql         # 所有选中业务库的单次逻辑导出
+├── mariadb.tar         # bkn_audit.sql、bkn_trace.sql、deploy.sql、openbkn.sql、safe.sql
 ├── repository.tar      # 完整 OpenSearch 快照仓库
 ├── redis.rdb           # Redis 全部 DB 的 RDB 快照（可选）
 └── minio.tar           # 各 bucket 的当前对象，附对象映射清单，保留空 bucket
 ```
 
-快照仓库只保留本次新快照；固定输出目录的历史 `.tar.gz` 包会保留，方便拿走及处理失败时回退，需自行管理保留期限。不要手动删除快照仓库内的单个文件。快照删除后，已有导出的压缩包仍可独立恢复。
+备份包校验并生成后，工具通过 Snapshot API 删除本次快照，释放快照占用；仓库可能留下少量元数据。删除失败时仍报告备份包成功，并在结果中返回 `cleanup_warning`，应根据提示处理本机残留快照。固定输出目录的历史 `.tar.gz` 包会保留，需自行管理保留期限。不要手动删除快照仓库内的单个文件。快照删除后，压缩包仍可独立恢复。备份过程的空间峰值不会因事后清理而降低。
 
-MariaDB 在线导出不需要停数据库。备份时避免 DDL；需要 MariaDB、OpenSearch 和 Redis 之间业务一致时，先停止业务写入并等待异步任务完成，再备份。三套存储依次备份，不是跨系统的同一时间点事务。
+MariaDB 在线导出不需要停数据库，但每个库使用独立事务快照，在线备份不保证跨库一致性。需要一致性时，先执行 `bash deploy.sh openbkn stop` 并另行停止外部写入、定时任务，再备份，完成后手动启动业务。备份时避免 DDL；需要 MariaDB、OpenSearch 和 Redis 之间业务一致时，先停止业务写入并等待异步任务完成，再备份。三套存储依次备份，不是跨系统的同一时间点事务。
 
 输出盘需容纳 SQL、未压缩仓库、压缩包和校验解包的临时副本，建议预留未压缩备份体积（含 Redis RDB）约 3 倍再加压缩包的空间。压缩包包含业务数据，按敏感文件保管；默认文件权限 0600，不加密。SHA-256 用于检查损坏，不用于验证来源，恢复时只能使用可信备份。
 
+### MariaDB 按库恢复和重试
+
+新包恢复时按清单顺序逐库导入并检查可访问性。失败即停止，日志显示失败库（可能已部分写入）、已完成和未执行的库，不自动回滚。可以从同一包选择库恢复或重试：
+
+```bash
+bash deploy.sh mariadb restore check <备份包> --databases safe --overwrite
+bash deploy.sh mariadb restore run <备份包> \
+  --databases safe --writers-stopped --overwrite
+```
+
+不传 `--databases` 时恢复包内全部库，不根据目标已有库推断范围。包内没有的库、系统库或重复库名会被拒绝；未选择的库不覆盖。分库串行导入不保证速度提升，主要用于定位失败和单库重试。
+
+旧版 v1～v4 的 `mariadb.sql` 继续整体导入，不能从合并 SQL 安全选择子集；需要按库选择时请重新生成 v5 备份。恢复前同步新版脚本。校验包时仍需临时空间容纳 `mariadb.tar` 及解出的 SQL，建议使用空间充足的 `TMPDIR`。
+
 ## 在新环境恢复
+
+终端中可以直接运行 `bash deploy.sh restore run <备份包>` 进入交互恢复。缺少确认参数时，依次询问 Kafka 账本是否匹配、是否允许覆盖目标数据，以及是否允许留存并替换 OpenSearch 原快照仓库。未提供 `--writers-stopped` 时，会询问是否停止业务 Deployment；明确输入 `y` 后才执行停止，并等待业务 Pod 全部删除，再进入恢复。MinIO、PostgreSQL 等数据服务继续运行。缺省答案为否；拒绝必要确认或停止失败会终止恢复。
+
+交互停业务默认使用 `openbkn` 命名空间，可通过 `--business-namespace <命名空间>` 指定。该操作不处理独立 Job/CronJob 和外部写入方，确认前需另行停写。恢复完成或失败后都不会自动启动业务，核验成功后执行 `openbkn start`。
+
+`restore check` 始终只检查，不交互停业务。脚本或无终端执行时不提示，仍要求通过参数提供全部必要确认；可用 `--non-interactive` 显式禁用终端交互。已有带齐参数的命令继续适用。
 
 先搭好 OpenBKN，并保持 MariaDB/OpenSearch/Redis/MinIO 运行，以便工具完成检查；恢复过程中会自动停止和重启 Redis。源端与目标端的应用版本、租户标识及业务加密密钥等配置应匹配；这些配置不会自动随数据恢复。
 
-停止所有会读写待恢复存储的业务服务及定时任务（含会写库的初始化/迁移任务），确认不会被控制器自动拉起；工具不会自动缩容业务服务。MariaDB、OpenSearch 与 MinIO 本身无需停止。保留新环境的数据副本后再考虑覆盖恢复。
+停止所有会读写待恢复存储的业务服务及定时任务（含会写库的初始化/迁移任务），确认不会被控制器自动拉起。可先执行 `bash deploy.sh openbkn stop` 缩容业务 Deployment；此命令不会停数据服务，也不会处理独立 Job/CronJob 或外部写入方。MariaDB、OpenSearch 与 MinIO 本身保持运行。保留新环境的数据副本后再考虑覆盖恢复。
 
-目标端也要完成上面的快照路径配置。恢复要求目标快照目录**为空且尚未被任何快照仓库注册引用**，防止混合不同仓库。如果新环境已经有快照仓库，先保存整个仓库，再注销相关仓库（注销本身不删文件），由操作人员将原目录移到其他位置保存，再创建同权限的空目录。不要直接删除现有仓库文件。
+目标端也要完成上面的快照路径配置。默认恢复要求目标快照目录**为空且尚未被任何快照仓库注册引用**，防止混合不同仓库。明确要替换时，在 `restore check/run` 中同时传入 `--overwrite --replace-repository`：check 只验证，run 先把目标原仓库打包到 `--output-dir`（默认 `/var/backups/openbkn`），再注销同名仓库、清空挂载目录内容并导入备份包。其他仓库若指向同一目录仍会拒绝。原仓库留存包为 `openbkn-repository-before-restore-*.tar`，需自行管理；确保输出盘有足够空间。不要删除或移走宿主机的挂载目录本身：正在运行的 Pod 会继续引用旧目录，导致解包出现 `Cannot open/mkdir: No such file or directory`。
+
+如果宿主机快照目录已被删除或移走，重新建同名目录不会修复现有 Pod 的挂载。应在 Pod 所在节点重建原目录并按进程 UID/GID 设置权限，然后重启 OpenSearch 工作负载以重新挂载（单节点期间服务会中断），等待就绪后再执行 `restore check`。工具会识别 Linux 挂载信息中的 `//deleted` 并提前报错；不会自动创建宿主机目录或重启服务。
 
 复制单个备份包到目标机器：
 
@@ -250,6 +284,16 @@ bash ./deploy.sh restore run /var/backups/openbkn/openbkn-<时间>-<后缀>.tar.
   --writers-stopped --overwrite
 ```
 
+目标快照目录已被本工具仓库注册或不为空，且确定要覆盖时：
+
+```bash
+bash ./deploy.sh openbkn stop
+bash ./deploy.sh restore check <备份包> --overwrite --replace-repository
+bash ./deploy.sh restore run <备份包> --writers-stopped --overwrite --replace-repository
+# 恢复并核验成功后
+bash ./deploy.sh openbkn start
+```
+
 `--overwrite` 对 v2 包还会替换 Redis **全部 DB**，不是按 key 合并；会删除快照内同名的目标索引，并由 SQL 中的 DROP/CREATE DATABASE 替换清单内的业务库。其他数据库和不重名索引不删除。快照别名与目标已有索引/别名也可能冲突，需在新环境预先检查和处理。务必在正确 kubeconfig/context 下执行。
 
 恢复过程先完整校验本地包的格式、文件路径、校验和、版本和目标冲突，再将完整仓库复制到空的挂载目录，注册只读仓库并核对快照。随后通过 Restore API 恢复索引，导入 SQL，检查各库可访问及 OpenSearch 至少达到 yellow。含 Redis 的包随后恢复 Redis，流程见下文；含 MinIO 的包最后恢复对象。单节点因副本未分配出现 yellow 是允许的。校验不等同于业务验收，工具不会自动启动业务服务。
@@ -258,7 +302,7 @@ bash ./deploy.sh restore run /var/backups/openbkn/openbkn-<时间>-<后缀>.tar.
 
 恢复是多步写入，没有跨 MariaDB/OpenSearch/Redis 的自动回滚。失败或中断时应保持业务停止，查看错误；SQL 导入中断可能已部分生效。需要重试时先保存现场，将目标快照仓库注销并整理为空目录，再使用同一可信备份包重新执行覆盖恢复。也可在重新部署的空环境中恢复。只有包内所有存储均恢复成功且业务核验通过后才恢复服务。
 
-恢复后的快照仓库保持只读，数据文件保留。下一次正常备份会把同一专用仓库注册为可写，并在新快照成功后删除旧快照。
+恢复后的快照仓库保持只读，数据文件保留。下一次正常备份会把同一专用仓库注册为可写，并在新快照成功后删除旧快照；备份包落盘后也会删除本次快照。
 
 ## 参数与故障排查
 
@@ -326,7 +370,7 @@ python3 scripts/redis_backup_integration.py --execute \
 
 ## MinIO 在线备份与恢复
 
-含 MinIO 的新备份使用 `format: 4`，在 `components` 中声明 `minio`，包含 `minio.tar`、该文件的 SHA-256 和 `minio.mode/buckets` 清单。v1/v2/v3 旧包仍可恢复；v1/v2 不含 MinIO。完整备份可用 `--skip-minio` 排除 MinIO；单组件备份使用 `minio backup run`。恢复完整包时默认处理包内全部组件，也可用 `minio restore run <完整包>` 仅恢复 MinIO。
+仅含 MinIO 的新备份使用 `format: 4`，含 MariaDB 时使用 `format: 5`，在 `components` 中声明 `minio`，包含 `minio.tar`、该文件的 SHA-256 和 `minio.mode/buckets` 清单。v1/v2/v3 旧包仍可恢复；v1/v2 不含 MinIO。完整备份可用 `--skip-minio` 排除 MinIO；单组件备份使用 `minio backup run`。恢复完整包时默认处理包内全部组件，也可用 `minio restore run <完整包>` 仅恢复 MinIO。
 
 默认 namespace 为 `openbkn`，selector 为 `component=minio`，容器优先选择 `minio`，否则选择唯一容器。必须匹配唯一就绪 Pod；标签不同可直接指定 Pod，例如：
 
@@ -376,7 +420,7 @@ bash deploy.sh kafka restore check /var/backups/openbkn/<备份包>.tar.gz
 bash deploy.sh kafka restore run /var/backups/openbkn/<备份包>.tar.gz --writers-stopped
 ```
 
-包内包含已消费的审计/Evidence 记录时，恢复运行还需确认原 MariaDB 账本已保留或使用同批备份恢复，且沿用原消费组：
+包内包含非空审计/Evidence 分区时，恢复运行还需确认停写后同批备份的原 MariaDB 账本已保留或恢复，且沿用原消费组位置：
 
 ```bash
 bash deploy.sh kafka restore run /var/backups/openbkn/<备份包>.tar.gz \
@@ -415,22 +459,24 @@ Kafka 在备份和恢复时都保持运行。备份不要求停业务、不修�
 
 每个分区开始时固定 `[low, high)`，`high` 为 read_committed 下的稳定结束位置。仅保存仍保留的已提交消息；新增消息不扩大范围，已过期、未提交及已中止事务中的消息不导出。Base64 保留二进制 key/value、null/空值、tombstone，以及 Header 的名称、顺序和重复项；保留原分区、源 offset 和消息时间。
 
-当前仅支持 `cleanup.policy=delete`，compacted Topic 会拒绝。保留期推进导致数据缺失、Topic 删除重建、分区数或关键配置变化时备份失败，不发布成功包。不同分区、消费组及 MariaDB 不是全局原子快照；不恢复源事务 ID、事务边界或生产者 epoch。
+默认备份及恢复始终跳过 `connect-configs`、`connect-offsets`、`connect-status` 三个 Kafka Connect Topic，并输出跳过提示；即使显式传入这些名称，也不会备份它们。旧备份包含这些 Topic 时，仍校验包和文件完整性，但不恢复它们的消息或消费位置；`--overwrite` 也不会删除或重建目标同名 Topic。只按这三个名称精确排除，不跳过任意 `connect-*` 名称。Connect 的自定义 Topic 名称需另行确认。环境若只有被排除的 Topic，Kafka 部分生成空业务范围的清单，恢复时不写 Kafka 数据。
 
-恢复前校验包路径、文件、分区范围、数量、SHA-256 和消费位置。目标保留自身集群身份、凭证、内部 Topic 和数据卷。已有 Topic 必须是全新空分区，分区数匹配；关键配置以备份包为准，`restore check` 只报告差异，`restore run` 在写入消息前自动对齐并读回验证。只修改包内记录的配置项，其他配置不变；缺少的 Topic 按备份配置创建。目标非空时即使指定 `--overwrite` 也拒绝，工具不自动删除 Topic 或追加历史消息。
+其他 Topic 当前仅支持 `cleanup.policy=delete`，compacted Topic 会拒绝。保留期推进导致数据缺失、Topic 删除重建、分区数或关键配置变化时备份失败，不发布成功包。不同分区、消费组及 MariaDB 不是全局原子快照；不恢复源事务 ID、事务边界或生产者 epoch。
+
+恢复前校验包路径、文件、分区范围、数量、SHA-256 和消费位置。目标保留自身集群身份、凭证、内部 Topic 和数据卷。已有 Topic 默认必须是全新空分区，分区数匹配；关键配置以备份包为准，`restore check` 只报告差异，`restore run` 在写入消息前自动对齐并读回验证。空 Topic 只修改包内记录的配置项，其他配置不变；缺少的 Topic 按备份配置创建。显式指定 `--overwrite` 时，备份内非空、offset 不从 0 开始、分区数或副本数不足以匹配备份要求的目标 Topic 会被删除并按备份配置重建，原消息及未记录的 Topic 自定义配置会丢失。`restore check --overwrite` 只报告待替换清单，不删除 Topic。包外 Topic 和内部 Topic 不修改，不向原消息后追加。相关消费者必须停止，消费位置、消息范围和账本确认保护不会被 `--overwrite` 绕过。
 
 按原分区顺序发送，逐条等待 Broker 确认并回读 key/value/headers 校验。消费位置按目标实际 offset 映射：源消息 `[100,101,105]` 导入为 `[0,1,2]`，源 committed offset `102` 映射到目标 `2`，全部已消费则映射到目标导入结束位置。所有分区通过后才修改消费组并回读确认；相关目标消费组必须停止，备份之外的消费位置会报错，无关 Topic 的位置不修改。
 
-`CreateTime` 尽量保留原时间，`LogAppendTime` 由目标 Broker 重新赋时；目标时间及 retention 约束仍生效。审计/Evidence 的消费端依赖 Broker 时间和 Kafka 坐标，所以不能把任意历史消息重新投入业务消费。
+`CreateTime` 尽量保留原时间，`LogAppendTime` 由目标 Broker 重新赋时；目标时间及 retention 约束仍生效。恢复保留原消费进度，不从头重放已经消费的审计/Evidence 记录；积压记录在业务重新启动后按原提交位置继续消费。依赖原 Broker 时间的业务语义仍需在业务核验中确认。
 
 对 `openbkn.audit.v1`、`openbkn.evidence.v1`，以下情况支持恢复：
 
 - 全新空分区（`low=high=count=0`），不要求存在消费组或账本确认。
-- 每个分区从 offset 0 完整保留、没有空洞（`low=0` 且消息数等于 `high`），对应账本消费组及包中其他相关消费组全部提交到 `high`。默认账本组分别为 `bkn-trace-audit-ledger-v1`、`bkn-trace-evidence-ledger-v1`；其他审计组名暂不自动推测。
+- 每个分区从 offset 0 完整保留、没有空洞（`low=0` 且消息数等于 `high`），非空分区有对应账本消费组的有效提交位置（`0 <= offset <= high`），允许存在积压。默认账本组分别为 `bkn-trace-audit-ledger-v1`、`bkn-trace-evidence-ledger-v1`；其他审计组名暂不自动推测。包中其他消费组也按各自记录的位置恢复。
 
-第二种情况保持每条消息的原 offset，并把原消费组恢复到末尾；已消费消息不会重新消费，新增消息从原来的末尾继续，避免复用 MariaDB 账本中已有的 Kafka 坐标。例如 117 条消息、offset 0～116、已提交位置 117，恢复后仍是原坐标，消费组从 117 接续。原业务账本须已保留或同批恢复，运行时要求 `--kafka-ledger-restored`，检查时会报告 `required_run_options`；该开关只是确认前置条件，不会替你恢复数据库。
+第二种情况保持每条消息的原 offset，并把原消费组恢复到备份记录的位置。例如 117 条消息、offset 0～116、已提交位置 80，恢复后仍是原坐标，消费组从 80 继续处理剩余 37 条；已提交位置是 117 时则从末尾接续。新增消息从 offset 117 开始，避免复用原账本中的 Kafka 坐标。备份前应停止全部相关生产者和消费者并等待 Pod 删除，再备份 MariaDB 与 Kafka，确保两者取自稳定状态。原业务账本须已保留或同批恢复，运行时要求 `--kafka-ledger-restored`，检查时会报告 `required_run_options`；该开关只是确认前置条件，不会替你恢复数据库。Kafka 备份本身仍可在线执行，但跨组件在线备份不能保证账本与消费位置一致。
 
-存在积压、缺少对应消费位置、保留范围从非零开始，或由于事务/保留策略出现 offset 空洞时，仍拒绝审计/Evidence 恢复，不能通过确认账本或 `--overwrite` 绕过。普通 Topic 仍使用上面的 offset 映射规则。需要重放这些受限历史消息来重建业务账本，需另做消费端迁移支持；当前流程不提供。
+缺少对应消费位置、保留范围从非零开始，或由于事务/保留策略出现 offset 空洞时，仍拒绝审计/Evidence 恢复，不能通过确认账本或 `--overwrite` 绕过。不把缺少的消费位置猜测为 0，也不强行推进至末尾。普通 Topic 仍使用上面的 offset 映射规则。工具不提供从头重放历史消息来重建账本的功能。
 
 备份检查按当前分区范围和消费进度提示限制，导出后再核对实际消息数量和连续性；受限的 Topic 在完成结果中列入 `restore_blocked_topics`。包含非空审计/Evidence 的包会列出 `kafka_ledger_restore_required`。受限包的恢复检查在连接 Kubernetes 前拒绝，不创建临时 Pod、不写目标数据。旧备份无需重做，使用新版脚本重新检查即可。Java 输出固定 UTF-8，并配置日志，避免中文问号及日志配置警告掩盖实际原因。
 
@@ -440,7 +486,7 @@ Kafka 在备份和恢复时都保持运行。备份不要求停业务、不修�
 
 临时 Pod 内存限制 512MiB、Java 堆上限 256MiB，顺序处理分区，单条 Base64 记录上限 24MiB。emptyDir 暂存导出文件，tar 流传回执行机；恢复反向上传并校验。执行机需为内层 tar、压缩包及校验副本保留空间。超时、空间不足或校验失败不发布成功包。
 
-恢复失败可能已有部分消息或消费位置写入。保持目标业务停止，禁止向部分导入的非空 Topic 直接重试；确认目标可替换后，按运维流程保留原数据、清理并重新准备空 Topic，再使用原包恢复。工具不自动删除或回滚 Topic。
+恢复失败可能已有部分消息或消费位置写入。保持目标业务停止，确认目标可替换后可使用同一可信备份包和 `--overwrite` 删除重建包内非空 Topic 后重试；也可人工准备全新空 Topic。覆盖删除和消息导入没有自动回滚，不能靠重试保留目标原消息。
 
 正常结束自动清理临时 Pod。同 namespace、同 bootstrap 字符串使用原子 ConfigMap 锁，不能阻止其他工具或不同地址的并发操作。强制杀进程可能遗留 `openbkn-kafka-backup-*` Pod 或 `openbkn-kafka-lock-*` ConfigMap，确认没有任务后再清理。
 

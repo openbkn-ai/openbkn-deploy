@@ -78,8 +78,8 @@ class ComponentTests(unittest.TestCase):
                 stage = self.root / (component + '-restore')
                 manifest = backup.unpack(package, stage)
                 self.assertEqual(manifest['components'], [component])
-                self.assertEqual(manifest['format'], 4)
-                self.assertEqual({p.name for p in stage.iterdir()}, {'manifest.json', backup.PAYLOADS[component]})
+                self.assertEqual(manifest['format'], 5 if component == 'mariadb' else 4)
+                self.assertEqual({p.name for p in stage.iterdir()}, ({'manifest.json', 'mariadb.tar', 'mariadb'} if component == 'mariadb' else {'manifest.json', backup.PAYLOADS[component]}))
                 if component == 'minio':
                     cluster.minio.objects = {}
                 if component == 'k8s':
@@ -119,7 +119,7 @@ class ComponentTests(unittest.TestCase):
     def test_selected_payload_hash_checked_without_extracting_unrelated_data(self):
         package = self.package(self.cluster(list(backup.PAYLOADS)))
         bad = self.rewrite(package, self.root / 'unrelated-bad.tar.gz',
-                           lambda m: m['sha256'].update({'mariadb.sql': 'corrupt'}))
+                           lambda m: m['sha256'].update({'mariadb.tar': 'corrupt'}))
         stage = self.root / 'selected'
         backup.unpack(bad, stage, ['minio'])
         self.assertEqual({p.name for p in stage.iterdir()}, {'manifest.json', 'minio.tar'})
@@ -138,8 +138,22 @@ class ComponentTests(unittest.TestCase):
                                     (3, ['mariadb', 'opensearch', 'redis', 'minio'])]:
             with self.subTest(version=version):
                 package = self.package(self.cluster(components), 'v' + str(version))
-                legacy = self.rewrite(package, self.root / ('legacy%d.tar.gz' % version),
-                                      lambda m: (m.update(format=version), m.pop('components')))
+                legacy = self.root / ('legacy%d.tar.gz' % version)
+                with tarfile.open(package, 'r:gz') as source, tarfile.open(legacy, 'w:gz') as target:
+                    manifest = json.load(source.extractfile('manifest.json'))
+                    manifest.update(format=version)
+                    manifest.pop('components')
+                    manifest['sha256'].pop('mariadb.tar')
+                    sql = b'CREATE DATABASE openbkn;\n'
+                    manifest['sha256']['mariadb.sql'] = backup.hashlib.sha256(sql).hexdigest()
+                    for member in source:
+                        content = source.extractfile(member).read()
+                        if member.name == 'mariadb.tar':
+                            member.name, content = 'mariadb.sql', sql
+                        elif member.name == 'manifest.json':
+                            content = json.dumps(manifest).encode()
+                        member.size = len(content)
+                        target.addfile(member, io.BytesIO(content))
                 manifest = backup.unpack(legacy, self.root / ('legacy%d-all' % version))
                 self.assertEqual(backup.manifest_components(manifest), components)
                 for component in components:
@@ -246,7 +260,7 @@ class ComponentTests(unittest.TestCase):
         with tarfile.open(package) as archive:
             manifest = json.load(archive.extractfile('manifest.json'))
             self.assertEqual(manifest['components'], ['mariadb', 'opensearch'])
-            self.assertEqual(set(archive.getnames()), {'manifest.json', 'mariadb.sql', 'repository.tar'})
+            self.assertEqual(set(archive.getnames()), {'manifest.json', 'mariadb.tar', 'repository.tar'})
         # A full archive has additional components; restore must neither extract
         # nor contact those that were not selected.
         source = self.cluster(list(backup.PAYLOADS))
