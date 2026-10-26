@@ -38,8 +38,7 @@ public final class KafkaBackupSmoke {
         ObjectNode complete = meta.deepCopy(); ((ObjectNode)complete.path("groups").path(group).get(0)).put("offset", 117);
         target.preflight(complete);
         ObjectNode missing = meta.deepCopy(); ((ObjectNode)missing.path("groups")).remove(group);
-        try { target.preflight(missing); throw new AssertionError("Missing ledger position accepted"); }
-        catch (IllegalArgumentException expected) { check(expected.getMessage().contains("提交位置"), "Unexpected missing-position failure"); }
+        target.preflight(missing);
         ObjectNode gap = meta.deepCopy(); ((ObjectNode)gap.path("topics").get(0).path("partitions").get(0)).put("count", 116);
         try { target.preflight(gap); throw new AssertionError("Ledger coordinate reuse accepted"); }
         catch (IllegalArgumentException expected) { check(expected.getMessage().contains("坐标"), "Unexpected coordinate failure"); }
@@ -56,6 +55,8 @@ public final class KafkaBackupSmoke {
             "Original ledger consumption position not restored");
         check(target.admin.listConsumerGroupOffsets(secondaryGroup).partitionsToOffsetAndMetadata().get(35, TimeUnit.SECONDS).get(tp).offset() == 116,
             "Secondary consumer backlog position not restored");
+        try { target.preflight(missing, true); throw new AssertionError("Target ledger position absent from backup was accepted"); }
+        catch (IllegalArgumentException expected) { check(expected.getMessage().contains("备份之外的消费位置"), "Unexpected target-position failure"); }
         check(target.offset(evidence, 0, true, false) == 0, "Empty Evidence topic restore failed");
         List<ConsumerRecord<byte[],byte[]>> restored = new ArrayList<>(); target.consume(tp, 0, 117, restored::add);
         for (int i = 0; i < 117; i++) check(restored.get(i).offset() == i && restored.get(i).value()[0] == (byte)i, "Ledger coordinates changed");
@@ -102,6 +103,19 @@ public final class KafkaBackupSmoke {
             .partitionsToOffsetAndMetadata().get(35, TimeUnit.SECONDS).get(tp).offset() == 80, "Overwrite lost data or saved position");
         check(target.description(untouched).topicId().toString().equals(untouchedId)
             && target.offset(untouched, 0, true, false) == 1, "Overwrite changed a topic outside the backup");
+        try (KafkaProducer<byte[],byte[]> producer = producer(source, null)) {
+            for (int i = 0; i < 4; i++) producer.send(new ProducerRecord<>(evidence, 0, new byte[]{2}, new byte[]{(byte)i})).get(35, TimeUnit.SECONDS);
+        }
+        ObjectNode evidenceRequest = OpenBknKafkaBackup.obj(); evidenceRequest.putArray("topics").add(evidence);
+        Path evidencePayload = work.resolve("evidence-without-group");
+        ObjectNode evidenceMeta = source.export(evidenceRequest, evidencePayload);
+        check(!evidenceMeta.path("groups").has("bkn-trace-evidence-ledger-v1"), "Source unexpectedly has an Evidence position");
+        target.preflight(evidenceMeta);
+        JsonNode evidenceResult = target.restore(evidencePayload);
+        check(evidenceResult.path("records").asLong() == 4 && target.offset(evidence, 0, true, false) == 4,
+            "Evidence records without a committed position were not restored");
+        check(!target.groups(Set.of(evidence)).has("bkn-trace-evidence-ledger-v1"),
+            "Restore fabricated a missing Evidence group position");
         System.out.println("PASS: original offsets, groups resume at 80/116, pending records consumed, overwrite recreates only selected nonempty topic, read-only plan and active-consumer guards");
     }
     public static void main(String[] args) throws Exception {

@@ -27,24 +27,15 @@ def ledger_restore_topics(metadata):
 
 
 def restore_blockers(metadata, *, counts_known=True):
-    """Preserve ledger coordinates and resume groups at their saved positions."""
+    """Preserve ledger coordinates and only the group positions present in the archive."""
     blockers = {}
     for topic in metadata['topics']:
         name = topic['name']
         if name not in LEDGER_GROUPS:
             continue
-        expected_group = LEDGER_GROUPS[name]
-        positions = {(item['topic'], item['partition']): item['offset']
-                     for item in metadata['groups'].get(expected_group, [])}
         for part in topic['partitions']:
             if part['low'] != 0 or counts_known and part['count'] != part['high']:
                 blockers[name] = '保留范围不完整或存在 offset 空洞，逻辑导入会改变账本引用的 Kafka 坐标'
-                break
-            if part['high'] == 0:
-                continue
-            position = positions.get((name, part['id']))
-            if position is None or not 0 <= position <= part['high']:
-                blockers[name] = '消费组 %s 缺少有效的分区提交位置，不能确定恢复起点' % expected_group
                 break
     return blockers
 

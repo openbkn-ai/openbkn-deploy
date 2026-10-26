@@ -1,8 +1,8 @@
 {
   "java_release": 17,
   "kafka_client": "3.9",
-  "source_sha256": "5f1fc3580ba1cf697babcd2872900165368a02c9e763f8a96ff7dab2c3dc8e37",
-  "jar_sha256": "05c2aeff51f7d45b0e5786d9a5e1c6b2d8ca6b2a5ec8b55432e71c62f0e828dc",
-  "tests_source_sha256": "36029beb1d216bcb0c1fff122a220f42468e3c8d3c1234c2bdb5b32fd1c9bc9b",
-  "tests_jar_sha256": "fa3601d983cd09ba9dee70682a600b8f8c1acc11eefd1dd133fae1e53e534b64"
+  "source_sha256": "d9f56b13f274975a48ba65b1d96e5ab57489f8ec378476d79c2206c665dcfd14",
+  "jar_sha256": "b1d5e3a09d6e3ddec8ef6a720eae50a6c23035e0fd88dd21138aef81291a2d00",
+  "tests_source_sha256": "42bd7e265db4630050c2e536a7a1a6a9044dd633ea3a4c9fac8649bb5390a39c",
+  "tests_jar_sha256": "6d7cf47bb80bb8f60968f657a2d9b14533b43662790d7024291aade2067c1b85"
 }

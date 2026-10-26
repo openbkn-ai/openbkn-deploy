@@ -343,18 +343,12 @@ public final class OpenBknKafkaBackup implements AutoCloseable {
     }
     static void validateLedgerRecovery(JsonNode meta) {
         for (JsonNode topic : meta.path("topics")) {
-            String name = topic.path("name").asText(), group = LEDGER_GROUPS.get(name);
-            if (group == null) continue;
+            String name = topic.path("name").asText();
+            if (!LEDGER_GROUPS.containsKey(name)) continue;
             for (JsonNode part : topic.path("partitions")) {
                 long high = part.path("high").asLong();
                 require(part.path("low").asLong() == 0 && part.path("count").asLong() == high,
                     "审计/Evidence 保留范围不完整或存在 offset 空洞，不能保持账本 Kafka 坐标: " + name);
-                if (high == 0) continue;
-                boolean committed = false;
-                for (JsonNode position : meta.path("groups").path(group)) if (position.path("topic").asText().equals(name)
-                    && position.path("partition").asInt() == part.path("id").asInt()
-                    && position.path("offset").asLong() >= 0 && position.path("offset").asLong() <= high) committed = true;
-                require(committed, "消费组 " + group + " 缺少有效的分区提交位置，不能确定恢复起点: " + name);
             }
         }
     }

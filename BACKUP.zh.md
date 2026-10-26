@@ -420,7 +420,7 @@ bash deploy.sh kafka restore check /var/backups/openbkn/<备份包>.tar.gz
 bash deploy.sh kafka restore run /var/backups/openbkn/<备份包>.tar.gz --writers-stopped
 ```
 
-包内包含非空审计/Evidence 分区时，恢复运行还需确认停写后同批备份的原 MariaDB 账本已保留或恢复，且沿用原消费组位置：
+包内包含非空审计/Evidence 分区时，恢复运行还需确认停写后同批备份的原 MariaDB 账本已保留或恢复；包内有消费组提交位置时沿用该位置，没有时保持缺失：
 
 ```bash
 bash deploy.sh kafka restore run /var/backups/openbkn/<备份包>.tar.gz \
@@ -448,7 +448,7 @@ Kafka 在备份和恢复时都保持运行。备份不要求停业务、不修�
 | `--kafka-user` / `--kafka-secret` / `--kafka-password-key` | 已有账号及 Secret 引用 |
 | `--kafka-ca-secret` | TLS CA Secret，需包含 `ca.crt` |
 | `--kafka-replicas` | 新建目标 Topic 副本数，默认 1 |
-| `--kafka-ledger-restored` | 确认原审计/Evidence MariaDB 账本已保留或同批恢复，恢复后沿用原消费组 |
+| `--kafka-ledger-restored` | 确认原审计/Evidence MariaDB 账本已保留或同批恢复；消费组位置按包内记录恢复，缺失时不创建 |
 | `--kafka-work-size` | 临时磁盘上限，默认 10Gi，至少容纳导出/导入数据 |
 
 多用户逗号分隔密码需要另提供只含单个账号密码的 Secret；暂不支持双向证书或 OAuth。工具 Pod 需要访问 Kafka `advertised.listeners` 的所有 Broker；有 NetworkPolicy 时需允许流量。执行账号需要 get/list/create/exec/delete Pods、读取 Events、create/delete 锁 ConfigMap 的权限。Kafka 账号需要读取 Topic、配置和消费位置；恢复额外需要建 Topic、修改 Topic 配置、写消息及修改消费位置。
@@ -472,11 +472,11 @@ Kafka 在备份和恢复时都保持运行。备份不要求停业务、不修�
 对 `openbkn.audit.v1`、`openbkn.evidence.v1`，以下情况支持恢复：
 
 - 全新空分区（`low=high=count=0`），不要求存在消费组或账本确认。
-- 每个分区从 offset 0 完整保留、没有空洞（`low=0` 且消息数等于 `high`），非空分区有对应账本消费组的有效提交位置（`0 <= offset <= high`），允许存在积压。默认账本组分别为 `bkn-trace-audit-ledger-v1`、`bkn-trace-evidence-ledger-v1`；其他审计组名暂不自动推测。包中其他消费组也按各自记录的位置恢复。
+- 每个分区从 offset 0 完整保留、没有空洞（`low=0` 且消息数等于 `high`）。备份中存在的消费组提交位置按原值恢复；没有记录的位置保持缺失，不推测为 0 或分区末尾。默认账本组分别为 `bkn-trace-audit-ledger-v1`、`bkn-trace-evidence-ledger-v1`；包中其他消费组也按各自记录的位置恢复。
 
-第二种情况保持每条消息的原 offset，并把原消费组恢复到备份记录的位置。例如 117 条消息、offset 0～116、已提交位置 80，恢复后仍是原坐标，消费组从 80 继续处理剩余 37 条；已提交位置是 117 时则从末尾接续。新增消息从 offset 117 开始，避免复用原账本中的 Kafka 坐标。备份前应停止全部相关生产者和消费者并等待 Pod 删除，再备份 MariaDB 与 Kafka，确保两者取自稳定状态。原业务账本须已保留或同批恢复，运行时要求 `--kafka-ledger-restored`，检查时会报告 `required_run_options`；该开关只是确认前置条件，不会替你恢复数据库。Kafka 备份本身仍可在线执行，但跨组件在线备份不能保证账本与消费位置一致。
+第二种情况保持每条消息的原 offset，并把包内记录的消费组位置恢复到备份值。例如 117 条消息、offset 0～116、已提交位置 80，恢复后仍是原坐标，消费组从 80 继续处理剩余 37 条；已提交位置是 117 时则从末尾接续；没有提交位置时恢复后也没有，消费者的起始策略由业务配置决定。新增消息从 offset 117 开始，避免复用原账本中的 Kafka 坐标。备份前应停止全部相关生产者和消费者并等待 Pod 删除，再备份 MariaDB 与 Kafka，确保两者取自稳定状态。原业务账本须已保留或同批恢复，运行时要求 `--kafka-ledger-restored`，检查时会报告 `required_run_options`；该开关只是确认前置条件，不会替你恢复数据库。Kafka 备份本身仍可在线执行，但跨组件在线备份不能保证账本与消费位置一致。
 
-缺少对应消费位置、保留范围从非零开始，或由于事务/保留策略出现 offset 空洞时，仍拒绝审计/Evidence 恢复，不能通过确认账本或 `--overwrite` 绕过。不把缺少的消费位置猜测为 0，也不强行推进至末尾。普通 Topic 仍使用上面的 offset 映射规则。工具不提供从头重放历史消息来重建账本的功能。
+保留范围从非零开始，或由于事务/保留策略出现 offset 空洞时，仍拒绝审计/Evidence 恢复，不能通过确认账本或 `--overwrite` 绕过。若源消费组没有提交位置，恢复后也不会创建；业务重启时的起始位置由业务消费者配置决定，重复消费与账本幂等处理由业务负责。目标若存在备份未记录的相关消费位置，预检查会拒绝，避免沿用错误进度。普通 Topic 仍使用上面的 offset 映射规则。工具不提供从头重放历史消息来重建账本的功能。
 
 备份检查按当前分区范围和消费进度提示限制，导出后再核对实际消息数量和连续性；受限的 Topic 在完成结果中列入 `restore_blocked_topics`。包含非空审计/Evidence 的包会列出 `kafka_ledger_restore_required`。受限包的恢复检查在连接 Kubernetes 前拒绝，不创建临时 Pod、不写目标数据。旧备份无需重做，使用新版脚本重新检查即可。Java 输出固定 UTF-8，并配置日志，避免中文问号及日志配置警告掩盖实际原因。
 
