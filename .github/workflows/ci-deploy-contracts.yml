@@ -29,6 +29,7 @@ jobs:
           bash scripts/tests/test-gen-dev-manifest.sh
           bash scripts/services/config_observability_test.sh
           bash scripts/services/openbkn_audit_consumer_test.sh
+          bash scripts/services/openbkn_helm_upgrade_test.sh
 
   permission-transition:
     runs-on: ubuntu-latest

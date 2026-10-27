@@ -896,14 +896,6 @@ _openbkn_prepare_audit_upgrade() {
     _OPENBKN_AUDIT_READY=true
 }
 
-_openbkn_preflight_images() {
-    local release_name="$1" namespace="$2"
-    shift 2
-    python3 "${SCRIPT_DIR}/scripts/lib/image_preflight.py" \
-        --namespace "${namespace}" --release "${release_name}" \
-        --timeout "${OPENBKN_IMAGE_PREFLIGHT_TIMEOUT:-240}" -- "$@"
-}
-
 _openbkn_helm_upgrade_release() {
     local release_name="$1" namespace="$2"
     shift 2
@@ -930,11 +922,6 @@ _openbkn_helm_upgrade_release() {
         [[ "${_OPENBKN_AUDIT_SKIP:-false}" != true ]] || return 0
         helm_args=("${_OPENBKN_AUDIT_ARGS[@]}")
     fi
-
-    # Pull on the existing Recreate nodes before any release mutation. A failed
-    # pull leaves the old Deployment running; no credentials/rendered Secrets
-    # are written to the Helm log by this preflight.
-    _openbkn_preflight_images "${release_name}" "${namespace}" "${helm_args[@]}" || return 1
 
     # Here rather than at either call site: both the repository and the local
     # --charts-dir paths reach helm through this function, and a cleanup wired
@@ -1866,6 +1853,7 @@ _install_openbkn_release_repo() {
         "${chart_ref}"
         "--namespace" "${namespace}"
         "-f" "${CONFIG_YAML_PATH}"
+        "--wait"
     )
 
     if [[ -n "${release_version}" ]]; then
@@ -1874,8 +1862,8 @@ _install_openbkn_release_repo() {
         helm_args+=("--version" "${target_version}")
     fi
 
-    # Bound the post-install hook wait. Helm always waits for post-install hooks
-    # (e.g. bkn-safe's client-seed Job) even without --wait, and defaults to only
+    # Bound readiness and post-install hook waits. Helm always waits for hooks
+    # (e.g. bkn-safe's client-seed Job), and defaults to only
     # 5m — a cold first-install image pull of a hook's dependency (bkn-safe's
     # bundled postgres, ~8m on a slow CN pull from SWR) blows past that and the
     # whole release is reported failed even though it self-heals. Match the local
