@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -243,6 +244,58 @@ class ComponentTests(unittest.TestCase):
         result = subprocess.run(['bash', str(script), 'backup', 'check'], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines()[1:], ['backup', 'check'])
+
+    def test_both_cli_entries_report_enospc_and_backup_after_space_recovers(self):
+        # Only local stand-ins are executed; no Kubernetes or database access.
+        (self.root / 'sitecustomize.py').write_text('''
+import errno, os, tempfile
+if os.environ.get('BACKUP_TEST_ENOSPC') == '1':
+    def fail(*args, **kwargs):
+        raise OSError(errno.ENOSPC, 'No space left on device')
+    tempfile.TemporaryFile = fail
+''')
+        kubectl = self.root / 'kubectl'
+        kubectl.write_text('#!' + sys.executable + '''
+import json, sys
+if 'get' in sys.argv:
+    print(json.dumps({'items': [{'metadata': {'name': 'mariadb-0'},
+        'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}]},
+        'spec': {'containers': [{'name': 'mariadb'}]}}]}))
+elif 'exec' in sys.argv:
+    command = sys.argv[sys.argv.index('--') + 1:]
+    if command[0] == 'sh':
+        query = sys.stdin.read()
+        if 'mariadb-dump' in command[2]:
+            print('CREATE DATABASE `qa_backup`;')
+        elif 'SELECT VERSION()' in query:
+            print('11.4.7-MariaDB')
+        elif 'SHOW DATABASES' in query:
+            print('qa_backup')
+''')
+        kubectl.chmod(0o700)
+        temporary = self.root / 'temporary'
+        temporary.mkdir()
+        root = Path(backup.__file__).resolve().parents[1]
+        env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH'],
+                   PYTHONPATH=str(self.root), TMPDIR=str(temporary), PYTHONDONTWRITEBYTECODE='1')
+        entries = [[sys.executable, str(root / 'scripts/backup.py'), 'backup', 'run', '--components', 'mariadb'],
+                   ['bash', str(root / 'deploy.sh'), 'mariadb', 'backup', 'run']]
+        for index, entry in enumerate(entries):
+            with self.subTest(entry=entry):
+                output = self.root / ('output-' + str(index))
+                command = entry + ['--databases', 'qa_backup', '--output-dir', str(output), '--timeout', '10']
+                failed = subprocess.run(command, env=dict(env, BACKUP_TEST_ENOSPC='1'), capture_output=True, text=True, timeout=20)
+                self.assertEqual(failed.returncode, 1, failed.stderr)
+                for expected in ['临时目录空间不足', str(temporary), 'TMPDIR', '[Errno 28]']:
+                    self.assertIn(expected, failed.stderr)
+                self.assertEqual(failed.stdout, '')
+                self.assertFalse(list(output.glob('*.tar.gz')))
+                recovered = subprocess.run(command, env=dict(env, BACKUP_TEST_ENOSPC='0'), capture_output=True, text=True, timeout=20)
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                result = json.loads(recovered.stdout)
+                self.assertEqual(result['result'], 'success')
+                self.assertTrue(Path(result['archive']).is_file())
+                self.assertFalse(list(output.glob('*.partial')))
 
     def test_default_backup_selects_all_data_and_k8s_components(self):
         args = backup.parser().parse_args(['backup', 'run'])

@@ -3,12 +3,14 @@
 import argparse
 import contextlib
 import datetime
+import errno
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import select
 import signal
 import subprocess
 import sys
@@ -137,28 +139,71 @@ def prepare_restore_stop(args):
     log('业务 Deployment 的 Pod 已退出；恢复失败时保持停止，核验成功后执行 openbkn start')
 
 
+def exhausted_directory(path, label):
+    """Only diagnose local capacity failure when the filesystem confirms it."""
+    try:
+        usage = os.statvfs(path)
+    except OSError:
+        return None
+    if usage.f_bavail == 0 or (usage.f_files > 0 and usage.f_favail == 0):
+        return (label + '空间或 inode 不足：' + str(path)
+                + '。请释放空间或 inode' + ('，或将 TMPDIR 指向容量充足的目录' if label == '临时目录' else '') + '后重试。')
+    return None
+
+
 def run(argv, *, data=None, source=None, target=None, timeout=3600):
-    """Stream large files; show a heartbeat and retain stderr separately from data."""
-    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+    """Stream data to disk, retaining bounded stderr in memory even if disk fills."""
+    try:
+        temporary_directory = tempfile.gettempdir()
+    except OSError as error:
+        configured = os.environ.get('TMPDIR')
+        capacity = exhausted_directory(configured, '临时目录') if configured else None
+        if capacity:
+            raise BackupError(capacity + '\n底层原因: ' + str(error)) from error
+        raise
+    command = Path(argv[0]).name  # Do not expose arguments containing credentials.
+    try:
         with contextlib.ExitStack() as stack:
+            out = stack.enter_context(tempfile.TemporaryFile(dir=temporary_directory)) if target is None else None
             incoming = source
             if data is not None:
-                incoming = stack.enter_context(tempfile.TemporaryFile())
+                incoming = stack.enter_context(tempfile.TemporaryFile(dir=temporary_directory))
                 incoming.write(data)
                 incoming.seek(0)
             process = subprocess.Popen(argv, stdin=incoming or subprocess.DEVNULL,
-                                       stdout=target or out, stderr=err, start_new_session=True)
+                                       stdout=target if target is not None else out,
+                                       stderr=subprocess.PIPE, start_new_session=True)
+            err = stack.enter_context(process.stderr)
+            os.set_blocking(err.fileno(), False)
+            diagnostic = bytearray()
+            stderr_eof = False
+
+            def drain_stderr():
+                nonlocal stderr_eof
+                # Keep draining after the limit to avoid blocking a noisy child.
+                # Bound each iteration so timeout/heartbeat checks still run.
+                for _ in range(16):
+                    try:
+                        block = os.read(err.fileno(), 65536)
+                    except BlockingIOError:
+                        break
+                    if not block:
+                        stderr_eof = True
+                        break
+                    diagnostic.extend(block[:max(0, 8192 - len(diagnostic))])
+
             started = time.monotonic()
             next_log = started + 20
             try:
                 while process.poll() is None:
+                    drain_stderr()
                     now = time.monotonic()
                     if now - started > timeout:
                         raise BackupError('命令超时；请检查集群中的任务状态后再重试')
                     if now >= next_log:
                         log('仍在执行当前步骤，已用时 %ds' % (now - started))
                         next_log = now + 20
-                    time.sleep(0.1)
+                    select.select([] if stderr_eof else [err], [], [], 0.1)
             finally:
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGTERM)
@@ -167,11 +212,30 @@ def run(argv, *, data=None, source=None, target=None, timeout=3600):
                     except subprocess.TimeoutExpired:
                         os.killpg(process.pid, signal.SIGKILL)
                         process.wait()
+            drain_stderr()
             if process.returncode:
-                err.seek(0)
-                raise BackupError('命令执行失败: ' + err.read(8192).decode(errors='replace'))
-            out.seek(0)
-            return out.read() if target is None else b''
+                details = diagnostic.decode(errors='replace').strip() or '子进程未提供错误输出'
+                capacity = exhausted_directory(temporary_directory, '临时目录')
+                target_name = getattr(target, 'name', None)
+                if not capacity and isinstance(target_name, (str, os.PathLike)):
+                    capacity = exhausted_directory(Path(target_name).resolve().parent, '输出目录')
+                if not capacity and any(marker in details for marker in ('ENOSPC', '[Errno 28]', 'No space left on device')):
+                    capacity = ('子进程报告空间不足；请检查命令目标的存储空间和 inode，'
+                                '并释放空间后重试。本地临时目录：' + temporary_directory
+                                + '（可通过 TMPDIR 调整）。')
+                message = ('命令执行失败（' + command + '，退出码 ' + str(process.returncode)
+                           + '，临时目录 ' + temporary_directory + '）: ' + details)
+                raise BackupError((capacity + '\n' if capacity else '') + message)
+            if out is not None:
+                out.seek(0)
+                return out.read()
+            return b''
+    except OSError as error:
+        if error.errno == errno.ENOSPC:
+            raise BackupError('临时目录空间不足：' + temporary_directory
+                              + '。请释放空间或将 TMPDIR 指向容量充足的目录后重试。'
+                              + '\n底层原因: ' + str(error)) from error
+        raise
 
 
 def digest(path):
