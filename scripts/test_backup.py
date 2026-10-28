@@ -1,13 +1,17 @@
 """Offline regression tests; no Kubernetes or production data access."""
 import contextlib
 import errno
+import gzip
 import io
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
 import sys
+import subprocess
 import unittest
+import zlib
 from unittest import mock
 
 import backup
@@ -347,6 +351,58 @@ class BackupTests(unittest.TestCase):
         self.rewrite_package(package, bad, bad_checksum=True)
         with self.assertRaisesRegex(backup.BackupError, '校验失败'):
             backup.unpack(bad, self.root / 'bad')
+
+    def test_truncated_package_cli_rejected_before_cluster_access(self):
+        package, _, _ = self.package()
+        bad = self.root / 'truncated.tar.gz'
+        bad.write_bytes(package.read_bytes()[:200])
+        sentinel = self.root / 'kubectl-called'
+        kubectl = self.root / 'kubectl'
+        kubectl.write_text('#!/bin/sh\ntouch "' + str(sentinel) + '"\nexit 91\n')
+        kubectl.chmod(0o700)
+        repo = Path(backup.__file__).resolve().parent.parent
+        env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH'],
+                   KUBECONFIG=str(self.root / 'missing-kubeconfig'), PYTHONDONTWRITEBYTECODE='1')
+        for entry, prefix in [('python', [sys.executable, str(repo / 'scripts/backup.py')]),
+                              ('shell', ['bash', str(repo / 'deploy.sh')])]:
+            for action in ('check', 'run'):
+                with self.subTest(entry=entry, action=action):
+                    result = subprocess.run(prefix + ['restore', action, str(bad), '--overwrite',
+                                            '--writers-stopped', '--non-interactive'],
+                                            cwd=repo, env=env, capture_output=True, text=True, timeout=20)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn('备份包不完整或损坏', result.stderr)
+                    self.assertIn('请重新复制或生成，并核对文件哈希', result.stderr)
+                    self.assertNotIn('Traceback', result.stderr)
+                    self.assertEqual(result.stdout, '')
+                    self.assertFalse(sentinel.exists())
+
+    def test_archive_read_errors_are_translated_at_each_phase(self):
+        package, _, _ = self.package()
+        for phase in ('open', 'iteration', 'extraction'):
+            for error in (EOFError('truncated'), gzip.BadGzipFile('CRC check failed'),
+                          tarfile.ReadError('invalid tar'), zlib.error('invalid compressed data')):
+                with self.subTest(phase=phase, error=type(error).__name__):
+                    if phase == 'open':
+                        patch = mock.patch.object(backup.tarfile, 'open', side_effect=error)
+                    elif phase == 'iteration':
+                        patch = mock.patch.object(backup, 'safe_members', side_effect=error)
+                    else:
+                        patch = mock.patch.object(tarfile.TarFile, 'extractall', side_effect=error)
+                    with patch, mock.patch.object(backup, 'Cluster') as cluster:
+                        with self.assertRaisesRegex(backup.BackupError, '备份包不完整或损坏') as raised:
+                            backup.main(['restore', 'run', str(package), '--non-interactive'])
+                    self.assertIs(raised.exception.__cause__, error)
+                    cluster.assert_not_called()
+
+    def test_archive_filesystem_errors_keep_original_diagnostic(self):
+        for error in (FileNotFoundError('missing archive'), PermissionError('access denied'),
+                      OSError(errno.ENOSPC, 'No space left on device')):
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(backup.tarfile, 'open', side_effect=error):
+                    with self.assertRaises(type(error)) as raised:
+                        backup.unpack(self.root / 'archive.tar.gz', self.root / 'bad')
+                self.assertIs(raised.exception, error)
 
     def test_wildcard_index_rejected_offline(self):
         package, _, _ = self.package()
