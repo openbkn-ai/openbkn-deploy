@@ -5,6 +5,7 @@ import contextlib
 import datetime
 import errno
 import fcntl
+import gzip
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+import zlib
 from urllib.parse import quote
 
 from k8s_backup import K8sBackup, add_arguments as add_k8s_arguments, validate_archive as validate_k8s_archive, validate_document as validate_k8s_document, validate_metadata as validate_k8s_metadata
@@ -258,9 +260,19 @@ def safe_members(archive):
         yield member
 
 
+@contextlib.contextmanager
+def read_backup_archive(package):
+    """Translate corruption during open, iteration or extraction into a CLI error."""
+    try:
+        with tarfile.open(package, 'r:gz') as archive:
+            yield archive
+    except (EOFError, gzip.BadGzipFile, tarfile.TarError, zlib.error) as error:
+        raise BackupError('备份包不完整或损坏，请重新复制或生成，并核对文件哈希') from error
+
+
 def unpack(package, destination, components=None, *, for_restore=False):
     """Check the envelope, then extract/hash only the requested component payloads."""
-    with tarfile.open(package, 'r:gz') as archive:
+    with read_backup_archive(package) as archive:
         members = list(safe_members(archive))
         names = {m.name for m in members}
         if 'manifest.json' not in names or names - {'manifest.json', 'k8s.json'} - (set(PAYLOADS.values()) | {'mariadb.tar'}) or any(not m.isfile() for m in members):
