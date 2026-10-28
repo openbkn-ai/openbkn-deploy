@@ -1,10 +1,12 @@
 """Offline regression tests; no Kubernetes or production data access."""
 import contextlib
+import errno
 import io
 import json
 from pathlib import Path
 import tarfile
 import tempfile
+import sys
 import unittest
 from unittest import mock
 
@@ -546,6 +548,112 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(output.tell(), 1048576)
         with self.assertRaisesRegex(backup.BackupError, 'failed'):
             backup.run(['sh', '-c', 'echo failed >&2; exit 1'])
+
+    def test_run_empty_stderr_retains_exit_code_and_directory_without_guessing_cause(self):
+        with self.assertRaises(backup.BackupError) as raised:
+            backup.run(['sh', '-c', 'exit 7'])
+        message = str(raised.exception)
+        self.assertIn('sh，退出码 7', message)
+        self.assertIn(tempfile.gettempdir(), message)
+        self.assertIn('未提供错误输出', message)
+        self.assertNotIn('空间不足', message)
+
+    def test_run_reports_full_temporary_filesystem_even_without_stderr(self):
+        for blocks, inodes in [(0, 10), (10, 0)]:
+            with self.subTest(blocks=blocks, inodes=inodes):
+                usage = mock.Mock(f_bavail=blocks, f_files=100, f_favail=inodes)
+                with mock.patch.object(backup.os, 'statvfs', return_value=usage):
+                    with self.assertRaises(backup.BackupError) as raised:
+                        backup.run(['sh', '-c', 'exit 1'])
+                message = str(raised.exception)
+                self.assertIn('临时目录空间或 inode 不足', message)
+                self.assertIn(tempfile.gettempdir(), message)
+                self.assertIn('TMPDIR', message)
+                self.assertIn('退出码 1', message)
+
+    def test_run_temporary_file_enospc_retains_reason_and_recovery_advice(self):
+        with mock.patch.object(backup.tempfile, 'TemporaryFile', side_effect=OSError(errno.ENOSPC, 'No space left on device')):
+            with self.assertRaises(backup.BackupError) as raised:
+                backup.run(['sh', '-c', 'exit 0'])
+        message = str(raised.exception)
+        for expected in ['临时目录空间不足', tempfile.gettempdir(), 'TMPDIR', '[Errno 28]']:
+            self.assertIn(expected, message)
+
+    def test_run_permission_failure_is_not_reported_as_capacity_failure(self):
+        with mock.patch.object(backup.tempfile, 'TemporaryFile', side_effect=PermissionError(errno.EACCES, 'Permission denied')):
+            with self.assertRaises(PermissionError):
+                backup.run(['sh', '-c', 'exit 0'])
+
+    def test_run_preserves_stderr_when_child_output_has_enospc(self):
+        with open('/dev/full', 'wb', buffering=0) as output:
+            with self.assertRaises(backup.BackupError) as raised:
+                backup.run([sys.executable, '-c', 'import os; os.write(1, b"data")'], target=output)
+        self.assertIn('[Errno 28]', str(raised.exception))
+        self.assertIn('No space left on device', str(raised.exception))
+        self.assertIn('子进程报告空间不足', str(raised.exception))
+        self.assertNotIn('临时目录空间不足', str(raised.exception))
+
+    def test_run_drains_large_stderr_with_bounded_diagnostics(self):
+        with self.assertRaises(backup.BackupError) as raised:
+            backup.run([sys.executable, '-c', 'import sys; sys.stderr.write("x" * 2097152); sys.exit(3)'], timeout=10)
+        self.assertIn('退出码 3', str(raised.exception))
+        self.assertEqual(str(raised.exception).rsplit('）: ', 1)[1], 'x' * 8192)
+
+    def test_run_preserves_enospc_when_temporary_stdout_is_full(self):
+        # /dev/full produces real ENOSPC without filling a disk or mounting tmpfs.
+        def full_temporary_file(**kwargs):
+            return open('/dev/full', 'w+b', buffering=0)
+        with mock.patch.object(backup.tempfile, 'TemporaryFile', side_effect=full_temporary_file):
+            with self.assertRaises(backup.BackupError) as raised:
+                backup.run([sys.executable, '-c', 'import os; os.write(1, b"data")'])
+        self.assertIn('子进程报告空间不足', str(raised.exception))
+        self.assertIn('[Errno 28]', str(raised.exception))
+
+    def test_run_reports_enospc_when_writing_temporary_stdin(self):
+        real_file = tempfile.TemporaryFile
+        calls = 0
+        def temporary_file(**kwargs):
+            nonlocal calls
+            calls += 1
+            return open('/dev/full', 'w+b', buffering=0) if calls == 2 else real_file(**kwargs)
+        with mock.patch.object(backup.tempfile, 'TemporaryFile', side_effect=temporary_file):
+            with self.assertRaisesRegex(backup.BackupError, '临时目录空间不足'):
+                backup.run(['sh', '-c', 'cat'], data=b'query')
+
+    def test_run_output_directory_capacity_is_distinguished_from_temporary_space(self):
+        available = mock.Mock(f_bavail=100, f_files=100, f_favail=100)
+        full = mock.Mock(f_bavail=0, f_files=100, f_favail=100)
+        with open(self.root / 'dump.sql', 'wb') as output:
+            with mock.patch.object(backup.os, 'statvfs', side_effect=[available, full]):
+                with self.assertRaises(backup.BackupError) as raised:
+                    backup.run(['sh', '-c', 'echo write-failed >&2; exit 1'], target=output)
+        message = str(raised.exception)
+        self.assertIn('输出目录空间或 inode 不足：' + str(self.root), message)
+        self.assertIn('write-failed', message)
+        self.assertNotIn('TMPDIR', message)
+
+    def test_run_failure_does_not_log_sensitive_arguments(self):
+        with self.assertRaises(backup.BackupError) as raised:
+            backup.run(['sh', '-c', 'exit 1', 'secret-password'])
+        self.assertNotIn('secret-password', str(raised.exception))
+
+    def test_run_timeout_still_terminates_child(self):
+        with self.assertRaisesRegex(backup.BackupError, '命令超时'):
+            backup.run([sys.executable, '-c', 'import time; time.sleep(30)'], timeout=0.1)
+
+    def test_run_reports_full_configured_directory_when_tempfile_cannot_find_a_directory(self):
+        with mock.patch.dict(backup.os.environ, {'TMPDIR': str(self.root)}):
+            with mock.patch.object(backup.tempfile, 'gettempdir', side_effect=FileNotFoundError('No usable temporary directory')):
+                with mock.patch.object(backup.os, 'statvfs', return_value=mock.Mock(f_bavail=0)):
+                    with self.assertRaises(backup.BackupError) as raised:
+                        backup.run(['sh', '-c', 'exit 0'])
+        self.assertIn('临时目录空间或 inode 不足：' + str(self.root), str(raised.exception))
+        self.assertIn('No usable temporary directory', str(raised.exception))
+
+    def test_run_capacity_probe_failure_does_not_hide_original_command_error(self):
+        with mock.patch.object(backup.os, 'statvfs', side_effect=PermissionError('cannot inspect filesystem')):
+            with self.assertRaisesRegex(backup.BackupError, 'original-error'):
+                backup.run(['sh', '-c', 'echo original-error >&2; exit 1'])
 
 
 if __name__ == '__main__':
