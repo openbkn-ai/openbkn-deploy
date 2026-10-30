@@ -320,45 +320,53 @@ preflight_confirm_fix() {
 }
 
 # --- hardware ----------------------------------------------------------------
+# GB follows the decimal units in the README; compare memory/disk budgets in
+# bytes, keeping MiB only for display so rounding cannot change boundary results.
+_preflight_check_hardware_requirement() {
+    local description="$1" actual="$2" minimum="$3" recommended="$4"
+    local minimum_label="$5" recommended_label="$6"
+    if (( actual >= recommended )); then
+        preflight_ok "${description} (recommended >= ${recommended_label})"
+    elif (( actual >= minimum )); then
+        preflight_warn "${description} (meets minimum ${minimum_label}; recommended >= ${recommended_label})"
+    else
+        preflight_fail "${description} (below minimum ${minimum_label}; recommended >= ${recommended_label})"
+    fi
+}
+
 preflight_check_hardware() {
     preflight_skip "hardware" && return 0
     log_info "Checking CPU / memory / disk..."
 
-    local cpu nproc_val mem_mb
+    local cpu nproc_val mem_bytes
     nproc_val="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
     cpu="${nproc_val:-0}"
-    if [[ "${cpu}" -ge 16 ]]; then
-        preflight_ok "CPU cores: ${cpu} (>= 16)"
-    else
-        preflight_warn "CPU cores: ${cpu} (recommended >= 16; kubeadm ignores NumCPU for init)"
-    fi
+    _preflight_check_hardware_requirement "CPU cores: ${cpu}" "${cpu}" 4 16 "4 cores" "16 cores"
 
     if command -v free &>/dev/null; then
-        mem_mb="$(free -m 2>/dev/null | awk '/^Mem:/ {print $2}')"
+        mem_bytes="$(free -b 2>/dev/null | awk '/^Mem:/ {print $2}')"
     else
-        mem_mb="0"
+        mem_bytes="0"
     fi
-    if [[ -n "${mem_mb}" && "${mem_mb}" -ge 47104 ]]; then
-        preflight_ok "Memory: ${mem_mb} MB (>= 48GB)"
-    elif [[ -n "${mem_mb}" && "${mem_mb}" -ge 1 ]]; then
-        preflight_warn "Memory: ${mem_mb} MB (recommended >= 48GB)"
+    if [[ "${mem_bytes}" =~ ^[0-9]+$ ]] && (( mem_bytes >= 1 )); then
+        _preflight_check_hardware_requirement "Memory: $((mem_bytes / 1048576)) MiB" "${mem_bytes}" \
+            8000000000 32000000000 "8 GB" "32 GB"
     else
         preflight_warn "Could not read memory (free not available?)"
     fi
 
     for mp in / /var; do
-        local line avail_mib
+        local line avail_kib
         if df -P "${mp}" &>/dev/null; then
             line="$(df -Pk "${mp}" 2>/dev/null | tail -1 || true)"
         else
             line="$(df -k "${mp}" 2>/dev/null | tail -1 || true)"
         fi
         # Column 4 = avail K-blocks on GNU & BSD df -k
-        avail_mib="$(echo "${line}" | awk '{print int($4/1024)}')"
-        if [[ -n "${avail_mib}" && "${avail_mib}" -ge 204800 ]]; then
-            preflight_ok "Disk free on ${mp}: ${avail_mib} MiB (>= 200GB)"
-        elif [[ -n "${avail_mib}" ]]; then
-            preflight_warn "Disk free on ${mp}: ${avail_mib} MiB (recommended >= 200GB free)"
+        avail_kib="$(echo "${line}" | awk '$4 ~ /^[0-9]+$/ {print $4}')"
+        if [[ "${avail_kib}" =~ ^[0-9]+$ ]]; then
+            _preflight_check_hardware_requirement "Disk free on ${mp}: $((avail_kib / 1024)) MiB" "$((avail_kib * 1024))" \
+                50000000000 500000000000 "50 GB free" "500 GB free"
         else
             preflight_warn "Could not parse disk free for ${mp}"
         fi
@@ -877,18 +885,19 @@ preflight_check_cidr_conflict() {
 preflight_check_containerd_disk() {
     preflight_skip "containerd-disk" && return 0
     log_info "Checking free space for /var/lib/containerd..."
-    local line avail_mib target="/var/lib/containerd"
+    local line avail_kib target="/var/lib/containerd"
     [[ -d "${target}" ]] || target="/var"
     if df -Pk "${target}" &>/dev/null; then
         line="$(df -Pk "${target}" 2>/dev/null | tail -1 || true)"
     else
         line="$(df -k "${target}" 2>/dev/null | tail -1 || true)"
     fi
-    avail_mib="$(echo "${line}" | awk '{print int($4/1024)}')"
-    if [[ -n "${avail_mib}" && "${avail_mib}" -ge 102400 ]]; then
-        preflight_ok "Disk free for ${target}: ${avail_mib} MiB (>= 100 GiB for images)"
-    elif [[ -n "${avail_mib}" ]]; then
-        preflight_warn "Disk free for ${target}: ${avail_mib} MiB (recommended >= 100 GiB for container images)"
+    avail_kib="$(echo "${line}" | awk '$4 ~ /^[0-9]+$/ {print $4}')"
+    if [[ "${avail_kib}" =~ ^[0-9]+$ ]]; then
+        # Images and local data can share this filesystem; do not add a separate
+        # 100 GiB image requirement to the documented 50 GB minimum.
+        _preflight_check_hardware_requirement "Disk free for ${target}: $((avail_kib / 1024)) MiB" "$((avail_kib * 1024))" \
+            50000000000 500000000000 "50 GB free" "500 GB free"
     else
         preflight_warn "Could not read free space for ${target}"
     fi

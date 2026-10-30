@@ -1,10 +1,13 @@
 .PHONY: test lint ci test-integration-kafka
 
 test:
+	bash scripts/lib/preflight_hardware_test.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*backup.py' -q
 
 lint:
 	bash -n deploy.sh scripts/services/opensearch.sh
+	bash -n scripts/lib/preflight_checks.sh
+	bash -n scripts/lib/preflight_hardware_test.sh
 	python3 -c "import ast; from pathlib import Path; [ast.parse(p.read_text()) for p in list(Path('scripts').glob('*backup*.py')) + [Path('scripts/kafka_worker.py'), Path('scripts/openbkn_workloads.py'), Path('scripts/lib/opensearch_snapshot.py')]]"
 
 ci: lint test
