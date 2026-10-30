@@ -24,6 +24,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
+      - name: Kafka controller heap migration
+        run: bash scripts/services/kafka_heap_test.sh
       - name: Manifest and observability configuration contracts
         run: |
           bash scripts/tests/test-gen-dev-manifest.sh
