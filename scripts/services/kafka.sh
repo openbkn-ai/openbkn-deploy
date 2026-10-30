@@ -8,25 +8,76 @@ _kafka_resolve_image_defaults() {
     fi
 }
 
+# Read the live template, since kubectl edits need not appear in Helm values.
+_kafka_controller_heap_opts() {
+    local state
+    state="$(kubectl -n "${KAFKA_NAMESPACE}" get statefulset "${KAFKA_RELEASE_NAME}-controller" -o json)" || return 1
+    printf '%s' "${state}" | python3 -c '
+import json, sys
+try:
+    containers = json.load(sys.stdin)["spec"]["template"]["spec"]["containers"]
+    kafka = [c for c in containers if c.get("name") == "kafka"]
+    if len(kafka) != 1:
+        raise ValueError("expected one Kafka container")
+    env = [e for e in kafka[0].get("env", []) if e.get("name") == "KAFKA_HEAP_OPTS"]
+    if len(env) != 1 or "valueFrom" in env[0]:
+        raise ValueError("expected one literal KAFKA_HEAP_OPTS")
+    value = env[0].get("value")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("empty KAFKA_HEAP_OPTS")
+    print(value, end="")
+except (ValueError, KeyError, TypeError) as error:
+    print("Cannot inspect Kafka controller heap: " + str(error), file=sys.stderr)
+    sys.exit(1)
+'
+}
+
+_kafka_controller_heap_is_legacy() {
+    # Only the original pair is migrated; any extra JVM option is customized.
+    local initial='-XX:InitialRAMPercentage=75(\.0+)?'
+    local maximum='-XX:MaxRAMPercentage=75(\.0+)?'
+    local forward="^[[:space:]]*${initial}[[:space:]]+${maximum}[[:space:]]*$"
+    local reverse="^[[:space:]]*${maximum}[[:space:]]+${initial}[[:space:]]*$"
+    [[ "$1" =~ ${forward} || "$1" =~ ${reverse} ]]
+}
+
 install_kafka() {
     log_info "Installing Kafka (1 controller + 1 broker) via Helm..."
 
     local fresh_install="true"
+    local controller_heap_opts="${KAFKA_HEAP_OPTS}" current_heap_opts migrate_heap=false
     if is_helm_installed "${KAFKA_RELEASE_NAME}" "${KAFKA_NAMESPACE}"; then
-        local limit_status
+        local limit_status=0
         if bkn_helm_release_has_resource_limits "${KAFKA_RELEASE_NAME}" "${KAFKA_NAMESPACE}"; then
             log_info "Kafka has resource limits. Reconciling chart values to remove them."
         else
             limit_status=$?
-            if [[ "${limit_status}" == "1" ]]; then
-                log_info "Kafka is already installed without resource limits. Skipping upgrade."
-                return 0
+            if [[ "${limit_status}" != "1" ]]; then
+                log_error "Could not inspect Kafka Helm manifest for resource limits; skipping upgrade."
+                return 1
             fi
-            log_error "Could not inspect Kafka Helm manifest for resource limits; skipping upgrade."
+        fi
+        if ! current_heap_opts="$(_kafka_controller_heap_opts)"; then
+            log_error "Could not inspect Kafka controller heap; skipping upgrade."
             return 1
+        fi
+        if _kafka_controller_heap_is_legacy "${current_heap_opts}" && [[ "${current_heap_opts}" != "${KAFKA_HEAP_OPTS}" ]]; then
+            migrate_heap=true
+            log_info "Migrating legacy Kafka controller heap to the broker heap configuration."
+        else
+            controller_heap_opts="${current_heap_opts}"
+        fi
+        if [[ "${limit_status:-0}" == "1" && "${migrate_heap}" == false ]]; then
+            log_info "Kafka has no resource limits or legacy controller heap to reconcile. Skipping upgrade."
+            return 0
         fi
         fresh_install="false"
     fi
+
+    # JSON encoding keeps customized JVM options containing commas/backslashes
+    # intact instead of letting Helm's --set parser split them into other keys.
+    local controller_heap_json
+    controller_heap_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${controller_heap_opts}")" || return 1
 
     # Kafka password handling
     local existing_pass
@@ -201,6 +252,7 @@ EOF
         --set controller.replicaCount="${KAFKA_REPLICAS}"
         --set controller.controllerOnly=true
         --set broker.replicaCount="${KAFKA_REPLICAS}"
+        --set-json controller.heapOpts="${controller_heap_json}"
         --set broker.heapOpts="${KAFKA_HEAP_OPTS}"
         # Client/inter-broker can be SASL, but controller listener should stay PLAINTEXT for compatibility
         --set listeners.client.protocol="${KAFKA_PROTOCOL}"
