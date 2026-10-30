@@ -283,8 +283,12 @@ OPENBKN_CORE_REQ_CPU=200m OPENBKN_CORE_REQ_MEM=512Mi \
 | Operating system | CentOS 8+, OpenEuler 23+, or compatible Linux | CentOS 8+ |
 | CPU | 4 cores | 16 cores or more |
 | Memory | 8 GB | 32 GB or more |
-| Disk | 200 GB | 500 GB or more |
+| Disk | 50 GB | 500 GB or more |
 | Privileges | root or a user with sudo access | root or a user with sudo access |
+
+> **Configuration and validation scope**: The minimum configuration is for testing and learning and still requires full deployment and runtime validation; it does not mean the default installation has been verified on that hardware. For constrained hosts, explicitly use `sudo bash ./deploy.sh --distro=k3s openbkn install`; the default kubeadm path retains each chart's resource settings. These requirements do not automatically tune service resources or guarantee capacity under production workloads.
+>
+> **Preflight measurements**: GB uses decimal units (1 GB = 1,000,000,000 bytes); CPU checks use the logical core count returned by `nproc`. Below minimum is `FAIL`, minimum met but below recommended is `WARN`, and recommended met is `OK`. Disk checks measure **available space** on the filesystems containing `/`, `/var`, and the container image directory, rather than nominal disk capacity; repeated checks of the same filesystem are not additive. Images and data share the disk budget, with no separate 100 GiB image-directory requirement. The 50 GB minimum leaves limited headroom; allow space for the OS, images, data growth, and upgrades.
 
 ### Network requirements
 
