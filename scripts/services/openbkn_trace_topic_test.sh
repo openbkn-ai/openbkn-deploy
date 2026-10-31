@@ -42,7 +42,13 @@ _openbkn_prepare_trace_evidence_topic test
 [[ ! -s "${TOPIC_TEST_DIR}/calls" ]]
 
 TOPIC_WAIT_STATUS=0
-CORE_SET_VALUES=('kafkaConsumers.evidence.brokers[0]=other.example:9092' 'kafkaConsumers.evidence.existingSecret.name=custom-secret' 'kafkaConsumers.evidence.saslMechanism=SCRAM-SHA-256')
+CORE_SET_VALUES=(
+    'kafkaConsumers.evidence.brokers[0]=other.example:9092'
+    'kafkaConsumers.evidence.existingSecret.name=custom-secret'
+    'kafkaConsumers.evidence.existingSecret.usernameKey=login'
+    'kafkaConsumers.evidence.existingSecret.passwordKey=passcode'
+    'kafkaConsumers.evidence.saslMechanism=SCRAM-SHA-256'
+)
 _openbkn_prepare_trace_evidence_topic test
 python3 - "${TOPIC_TEST_DIR}/manifest.json" <<'PY'
 import json,sys
@@ -50,11 +56,18 @@ x=json.load(open(sys.argv[1])); e={v['name']:v for v in x['spec']['template']['s
 assert e['TASK_KAFKA_BROKERS']['value']=='other.example:9092'
 assert e['TASK_KAFKA_MECHANISM']['value']=='SCRAM-SHA-256'
 assert e['TASK_KAFKA_PASSWORD']['valueFrom']['secretKeyRef']['name']=='custom-secret'
+assert e['TASK_KAFKA_USER']['valueFrom']['secretKeyRef']=={'name':'custom-secret','key':'login'}
+assert e['TASK_KAFKA_PASSWORD']['valueFrom']['secretKeyRef']['key']=='passcode'
 PY
 
 CORE_SET_VALUES=('kafkaConsumers.evidence.saslMechanism=invalid')
 : >"${TOPIC_TEST_DIR}/calls"
 if _openbkn_prepare_trace_evidence_topic test 2>/dev/null; then echo 'FAIL: invalid mechanism must stop'; exit 1; fi
+[[ ! -s "${TOPIC_TEST_DIR}/calls" ]]
+
+CORE_SET_VALUES=('kafkaConsumers.evidence.existingSecret.usernameKey=')
+: >"${TOPIC_TEST_DIR}/calls"
+if _openbkn_prepare_trace_evidence_topic test 2>/dev/null; then echo 'FAIL: empty Secret key must stop'; exit 1; fi
 [[ ! -s "${TOPIC_TEST_DIR}/calls" ]]
 
 echo 'openbkn_trace_topic_test: PASS (bounded Job, cleanup, failed wait, overrides, invalid settings)'

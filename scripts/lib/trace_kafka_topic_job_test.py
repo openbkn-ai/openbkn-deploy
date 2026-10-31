@@ -21,11 +21,27 @@ class TopicJobTest(unittest.TestCase):
         self.assertEqual(env['TASK_KAFKA_PASSWORD']['valueFrom']['secretKeyRef'],
                          {'name': 'credentials', 'key': 'password'})
         self.assertNotIn('value', env['TASK_KAFKA_PASSWORD'])
+        self.assertEqual(env['TASK_KAFKA_USER']['valueFrom']['secretKeyRef'],
+                         {'name': 'credentials', 'key': 'username'})
 
     def test_invalid_settings(self):
         for mechanism, partitions in [('invalid', '1'), ('PLAIN', '0')]:
             with self.assertRaises(ValueError):
                 render('test', 'kafka:test', 'broker', 'credentials', mechanism, partitions, '1')
+
+    def test_custom_secret_keys_are_preserved(self):
+        job = render('test', 'kafka:test', 'broker:9092', 'credentials', 'PLAIN', '1', '1',
+                     'login', 'passcode')
+        env = {e['name']: e for e in job['spec']['template']['spec']['containers'][0]['env']}
+        self.assertEqual(env['TASK_KAFKA_USER']['valueFrom']['secretKeyRef'],
+                         {'name': 'credentials', 'key': 'login'})
+        self.assertEqual(env['TASK_KAFKA_PASSWORD']['valueFrom']['secretKeyRef'],
+                         {'name': 'credentials', 'key': 'passcode'})
+
+    def test_empty_secret_keys_are_rejected(self):
+        for keys in [('', 'passcode'), ('login', '')]:
+            with self.assertRaises(ValueError):
+                render('test', 'kafka:test', 'broker', 'credentials', 'PLAIN', '1', '1', *keys)
 
     def run_admin(self, timestamp, mechanism='PLAIN', creation_fails=False, exists=False):
         with tempfile.TemporaryDirectory() as temporary:

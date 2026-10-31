@@ -32,11 +32,14 @@ echo 'Evidence topic LogAppendTime verified.'
 '''
 
 
-def render(namespace, image, brokers, secret, mechanism, partitions, replicas):
+def render(namespace, image, brokers, secret, mechanism, partitions, replicas,
+           username_key='username', password_key='password'):
     if mechanism not in ('PLAIN', 'SCRAM-SHA-256', 'SCRAM-SHA-512'):
         raise ValueError('unsupported Kafka SASL mechanism')
     if int(partitions) < 1 or int(replicas) < 1:
         raise ValueError('topic partitions and replicas must be positive')
+    if not username_key or not password_key:
+        raise ValueError('Kafka credential Secret keys must be nonempty')
     env = [dict(name=k, value=v) for k, v in {
         'KAFKA_HEAP_OPTS': '-Xms32m -Xmx96m',
         'TASK_KAFKA_BROKERS': brokers,
@@ -45,7 +48,7 @@ def render(namespace, image, brokers, secret, mechanism, partitions, replicas):
         'TASK_TOPIC_REPLICAS': str(replicas),
     }.items()]
     env += [dict(name=name, valueFrom=dict(secretKeyRef=dict(name=secret, key=key)))
-            for name, key in [('TASK_KAFKA_USER', 'username'), ('TASK_KAFKA_PASSWORD', 'password')]]
+            for name, key in [('TASK_KAFKA_USER', username_key), ('TASK_KAFKA_PASSWORD', password_key)]]
     return dict(apiVersion='batch/v1', kind='Job',
                 metadata=dict(generateName='bkn-trace-evidence-topic-', namespace=namespace),
                 spec=dict(backoffLimit=0, activeDeadlineSeconds=90,
