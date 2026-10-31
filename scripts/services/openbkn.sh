@@ -1167,6 +1167,7 @@ except (ValueError, binascii.Error):
 
 _openbkn_prepare_trace_evidence_topic() (
     local namespace="$1" image job_name="" manifest consumer_enabled brokers secret mechanism override
+    local username_key=username password_key=password
     # Explicit operator overrides remain authoritative.
     consumer_enabled="$(_openbkn_last_set_value kafkaConsumers.evidence.enabled "${CORE_SET_VALUES[@]-}")" || consumer_enabled=true
     [[ "${consumer_enabled}" == false ]] && return 0
@@ -1176,6 +1177,8 @@ _openbkn_prepare_trace_evidence_topic() (
     if override="$(_openbkn_last_set_value 'kafkaConsumers.evidence.brokers[0]' "${CORE_SET_VALUES[@]-}")"; then brokers="${override}"; fi
     if override="$(_openbkn_last_set_value kafkaConsumers.evidence.existingSecret.name "${CORE_SET_VALUES[@]-}")"; then secret="${override}"; fi
     if override="$(_openbkn_last_set_value kafkaConsumers.evidence.saslMechanism "${CORE_SET_VALUES[@]-}")"; then mechanism="${override}"; fi
+    if override="$(_openbkn_last_set_value kafkaConsumers.evidence.existingSecret.usernameKey "${CORE_SET_VALUES[@]-}")"; then username_key="${override}"; fi
+    if override="$(_openbkn_last_set_value kafkaConsumers.evidence.existingSecret.passwordKey "${CORE_SET_VALUES[@]-}")"; then password_key="${override}"; fi
     image="${OPENBKN_TRACE_KAFKA_ADMIN_IMAGE:-${KAFKA_IMAGE:-}}"
     if [[ -z "${image}" ]] && declare -F _kafka_resolve_image_defaults >/dev/null; then
         _kafka_resolve_image_defaults
@@ -1190,7 +1193,8 @@ _openbkn_prepare_trace_evidence_topic() (
     if ! python3 "${SCRIPT_DIR}/scripts/lib/trace_kafka_topic_job.py" \
         "${namespace}" "${image}" "${brokers}" \
         "${secret}" "${mechanism}" \
-        "${OPENBKN_TRACE_TOPIC_PARTITIONS:-1}" "${OPENBKN_TRACE_TOPIC_REPLICATION_FACTOR:-1}" >"${manifest}"; then
+        "${OPENBKN_TRACE_TOPIC_PARTITIONS:-1}" "${OPENBKN_TRACE_TOPIC_REPLICATION_FACTOR:-1}" \
+        "${username_key}" "${password_key}" >"${manifest}"; then
         log_error "Cannot render the BKN Trace Evidence topic prerequisite Job"
         return 1
     fi
