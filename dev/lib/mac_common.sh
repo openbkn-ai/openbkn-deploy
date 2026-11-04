@@ -339,12 +339,12 @@ mac_doctor() {
     return 0
 }
 
-# Mac-only: prepare HTTPS for ISF install.
+# Mac-only: prepare HTTPS for the legacy identity service installation.
 #   1. flip mac-config.yaml accessAddress to scheme=https / port=443
 #   2. generate a self-signed TLS cert (CN/SAN = accessAddress.host) and
 #      apply it as Secret bkn-ingress-tls in the bkn namespace
 # Idempotent: re-running just rotates the cert and re-applies the Secret.
-# After ISF install completes, run mac_isf_patch_ingress_tls to wire it in.
+# After installation completes, run mac_isf_patch_ingress_tls to wire it in.
 mac_prepare_isf_https() {
     local cfg="${CONFIG_YAML_PATH:-${MAC_DEV_ROOT}/conf/mac-config.yaml}"
     [[ -f "${cfg}" ]] || { mac_log_error "mac-config not found: ${cfg}"; return 1; }
@@ -385,7 +385,7 @@ mac_prepare_isf_https() {
     fi
 }
 
-# Patch the ISF ingress to attach the TLS Secret. Run AFTER `deploy.sh isf install`.
+# Patch the legacy identity service ingress to attach the TLS Secret. Run AFTER `deploy.sh isf install`.
 mac_isf_patch_ingress_tls() {
     local cfg="${CONFIG_YAML_PATH:-${MAC_DEV_ROOT}/conf/mac-config.yaml}"
     local ns="${MAC_ISF_NAMESPACE:-$(awk '/^namespace:/{print $2;exit}' "${cfg}" | tr -d "'\"")}"
@@ -393,13 +393,13 @@ mac_isf_patch_ingress_tls() {
     local secret="${MAC_ISF_TLS_SECRET:-bkn-ingress-tls}"
     local ing
     ing="$(kubectl get ingress -n "${ns}" -o jsonpath='{.items[?(@.metadata.name=="ingress-informationsecurityfabric")].metadata.name}' 2>/dev/null)"
-    [[ -n "${ing}" ]] || { mac_log_warn "ISF ingress not found in ${ns}; skip TLS patch"; return 0; }
+    [[ -n "${ing}" ]] || { mac_log_warn "Identity service ingress not found in ${ns}; skip TLS patch"; return 0; }
     local host
     host="$(awk '/^accessAddress:/{f=1;next} f&&/^  host:/{print $2;exit}' "${CONFIG_YAML_PATH:-${MAC_DEV_ROOT}/conf/mac-config.yaml}" | tr -d "'\"")"
     host="${host:-localhost}"
     kubectl patch ingress "${ing}" -n "${ns}" --type=merge -p \
         "{\"spec\":{\"tls\":[{\"hosts\":[\"${host}\"],\"secretName\":\"${secret}\"}]}}" >/dev/null \
-        && mac_log_info "✓ ISF ingress patched with TLS (host=${host}, secret=${secret})"
+        && mac_log_info "✓ Identity service ingress patched with TLS (host=${host}, secret=${secret})"
 }
 
 mac_kube_context_guard() {

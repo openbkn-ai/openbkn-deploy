@@ -250,7 +250,7 @@ main() {
                 exit 1
             fi
             local -a _kw_final=("${_kw_pos[@]}")
-            # --full pulls ISF as a manifest dependency; ISF needs https → reuse the
+            # --full pulls the legacy identity service as a manifest dependency; it needs https → reuse the
             # same prep/patch helpers as `mac.sh isf install` so it actually works.
             if [[ "${_kw_saw_full}" == "true" ]] && [[ "${_kw_pos[0]:-}" == "install" ]]; then
                 mac_prepare_isf_https || exit 1
@@ -279,7 +279,7 @@ main() {
                 export CONFIG_YAML_PATH="${MAC_DEV_ROOT}/conf/mac-config.yaml"
             fi
             export OPENBKN_SKIP_PLATFORM_BOOTSTRAP="${OPENBKN_SKIP_PLATFORM_BOOTSTRAP:-true}"
-            # Mac dev needs HTTPS for ISF (hydra/oauth2 issuer must be https).
+            # Mac dev needs HTTPS for the legacy identity service (hydra/oauth2 issuer must be https).
             # Auto-prepare TLS secret + flip mac-config before install; patch ingress after.
             if [[ "${1:-}" == "install" ]]; then
                 mac_prepare_isf_https || exit 1

@@ -471,7 +471,7 @@ RDS_EOF
 )
     fi
 
-    # ISF replacement: charts reading depServices.hydra.* (mf-model-manager,
+    # Identity service replacement: charts reading depServices.hydra.* (mf-model-manager,
     # mf-model-api, operator-integration) introspect against bkn-safe's paired
     # hydra. bkn-safe now installs co-located in the same namespace, so use the
     # short service names (no cross-namespace .bkn-safe suffix). Overrides any

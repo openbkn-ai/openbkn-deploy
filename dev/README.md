@@ -42,7 +42,7 @@ Run from the repository root. Invoke **`mac.sh` with bash** (e.g. `bash ./dev/ma
 | 6 | `bash ./dev/mac.sh openbkn install` | **Yes** — deploy Core (full stack incl. bkn-safe); runs bundled data-services beforehand unless skipped |
 | 7 | `bash ./dev/mac.sh onboard` | Optional (models/BKN; needs `bkn` CLI; add `-y` to skip prompts) |
 
-Optional (same `deploy.sh` Helm paths as Linux; you need a working cluster + values that match your dependencies): `bash ./dev/mac.sh isf install|download|uninstall|status`. ISF may require DB/config beyond the minimal mac sample—see Linux `deploy.sh` help and your `CONFIG_YAML_PATH`.
+Optional (same `deploy.sh` Helm paths as Linux; you need a working cluster + values that match your dependencies): `bash ./dev/mac.sh isf install|download|uninstall|status`. The legacy identity service may require DB/config beyond the minimal mac sample—see Linux `deploy.sh` help and your `CONFIG_YAML_PATH`.
 
 **Minimal path:** `cluster up` → `openbkn install` (runs **data-services** first). If you skip that bundle (`OPENBKN_SKIP_DATA_SERVICES_BUNDLE=true`), you must provide reachable DB/Kafka/etc. yourself or run **`data-services install`** beforehand.
 
@@ -97,7 +97,7 @@ See also: top-of-file comments in [`mac.sh`](mac.sh), `bash ./dev/mac.sh -h`.
   kind load docker-image <img:tag> --name bkn-dev        # push a host-built image into kind
   ```
 
-- **`mac.sh isf install` switches the stack to HTTPS automatically**: ISF (hydra/oauth2) requires HTTPS issuers, so the install path will (1) flip `mac-config.yaml` `accessAddress` to `https/443`, (2) generate a self-signed TLS cert + Secret `bkn-ingress-tls`, (3) `helm upgrade` any already-installed OpenBKN releases so they pick up the new https `accessAddress`, then (4) install ISF and patch its ingress with TLS. Total time ~10 min on a fresh install. Browsers will warn on the self-signed cert — accept once. To stay on HTTP, just don't install ISF — the default full stack (incl. bkn-safe) also runs on HTTP; only ISF forces HTTPS.
+- **`mac.sh isf install` switches the stack to HTTPS automatically**: the legacy identity service (hydra/oauth2) requires HTTPS issuers, so the install path will (1) flip `mac-config.yaml` `accessAddress` to `https/443`, (2) generate a self-signed TLS cert + Secret `bkn-ingress-tls`, (3) `helm upgrade` any already-installed OpenBKN releases so they pick up the new https `accessAddress`, then (4) install the service and patch its ingress with TLS. Total time ~10 min on a fresh install. Browsers will warn on the self-signed cert — accept once. To stay on HTTP, just don't install it — the default full stack (incl. bkn-safe) also runs on HTTP; only the legacy service forces HTTPS.
 
 - **Quick verify after install** (proxy unset, Core pods Ready):
   ```bash

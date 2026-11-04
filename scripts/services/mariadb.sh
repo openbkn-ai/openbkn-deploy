@@ -130,7 +130,7 @@ setup_mariadb_databases() {
     core_manifest="${CORE_VERSION_MANIFEST_FILE:-$(resolve_embedded_release_manifest "bkn-foundry" "${HELM_CHART_VERSION:-}")}"
 
     if [[ -f "${isf_manifest}" ]] && should_skip_db_init_for_manifest "${isf_manifest}"; then
-        log_info "ISF manifest ${isf_manifest} has pre-stage data-migrator; retaining idempotent database setup"
+        log_info "Identity service manifest ${isf_manifest} has pre-stage data-migrator; retaining idempotent database setup"
     fi
 
     if [[ -f "${core_manifest}" ]] && should_skip_db_init_for_manifest "${core_manifest}"; then

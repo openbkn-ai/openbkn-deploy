@@ -300,7 +300,7 @@ if missing:
 for i,chart in ver_lines.items():
     lines[i]=re.sub(r'(version:\s*)\S+', lambda m: m.group(1)+resolved[chart], lines[i])
 
-# --version_file overrides Foundry/core only; keep dependency manifests (e.g. ISF)
+# --version_file overrides Foundry/core only; keep dependency manifests (e.g. the legacy identity service)
 # pinned to the committed file by rewriting their relative `manifest:` paths to
 # absolute (relative paths would otherwise resolve next to OUT, not the repo).
 TPL_DIR=os.path.dirname(os.path.abspath(TEMPLATE))

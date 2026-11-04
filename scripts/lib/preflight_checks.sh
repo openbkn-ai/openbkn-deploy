@@ -994,7 +994,7 @@ preflight_check_existing_release() {
     if ! command -v kubectl &>/dev/null || ! kubectl cluster-info &>/dev/null; then
         return 0
     fi
-    log_info "Checking for existing bkn/isf/dip/bkn-safe-related Helm releases..."
+    log_info "Checking for existing related Helm releases..."
     local r total bad bad_names bad_count
     r="$(helm list -A 2>/dev/null | awk 'NR>1 && tolower($0) ~ /bkn|isf|dip|bkn-safe/' || true)"
     if [[ -z "${r}" ]]; then
@@ -1002,7 +1002,7 @@ preflight_check_existing_release() {
         PREFLIGHT_OPENBKN_RELEASE_BAD=0
         PREFLIGHT_OPENBKN_RELEASE_NAMES=""
         export PREFLIGHT_OPENBKN_RELEASE_TOTAL PREFLIGHT_OPENBKN_RELEASE_BAD PREFLIGHT_OPENBKN_RELEASE_NAMES
-        preflight_ok "No obvious bkn/isf/dip Helm release names in helm list -A"
+        preflight_ok "No obvious related Helm release names in helm list -A"
         return 0
     fi
 
@@ -1013,17 +1013,17 @@ preflight_check_existing_release() {
     bad="$(echo "${r}" | awk '$8!="deployed" && $0!~/[Dd]eployed/' || true)"
     if [[ -z "${bad}" ]]; then
         PREFLIGHT_OPENBKN_RELEASE_BAD=0
-        preflight_ok "Helm has ${total} bkn/isf/dip release(s), all in 'deployed' state — reusing"
+        preflight_ok "Helm has ${total} related release(s), all in 'deployed' state — reusing"
     else
         bad_names="$(echo "${bad}" | awk '{print $1"("$8")"}' | paste -sd ',' -)"
         bad_count="$(echo "${bad}" | grep -c . || true)"
         PREFLIGHT_OPENBKN_RELEASE_BAD="${bad_count}"
-        preflight_warn "Helm: ${bad_count}/${total} bkn/isf/dip release(s) not in 'deployed' state: ${bad_names} (others are healthy and will be reused)"
+        preflight_warn "Helm: ${bad_count}/${total} related release(s) not in 'deployed' state: ${bad_names} (others are healthy and will be reused)"
     fi
     export PREFLIGHT_OPENBKN_RELEASE_TOTAL PREFLIGHT_OPENBKN_RELEASE_BAD PREFLIGHT_OPENBKN_RELEASE_NAMES
     if [[ -n "${PREFLIGHT_REPORT_FILE:-}" ]]; then
         {
-            echo "--- existing helm releases (bkn/isf/dip) ---"
+            echo "--- existing related helm releases ---"
             echo "${r}"
         } >> "${PREFLIGHT_REPORT_FILE}" 2>/dev/null || true
     fi
