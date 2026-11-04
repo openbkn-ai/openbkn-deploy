@@ -193,7 +193,7 @@ def helm_deployed(namespace):
         name = it.get("name", "")
         chart = it.get("chart", "")           # "<chart>-<version>", e.g. "bkn-safe-0.1.0"
         # Strip the chart-name prefix to get the version. The version itself can
-        # contain '-' (dev builds: "0.1.0-feat-isf-replacement.shab0ab73e"), so a
+        # contain '-' (dev builds: "0.1.0-feat-identity-replacement.shab0ab73e"), so a
         # naive rsplit('-') is wrong. Chart name == release name for this product.
         if chart.startswith(name + "-"):
             chart_ver = chart[len(name) + 1:]
