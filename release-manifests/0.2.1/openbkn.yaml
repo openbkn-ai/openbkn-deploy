@@ -1,0 +1,63 @@
+# Release lockfile for OpenBKN 0.2.1. All component charts are pinned to 0.2.1.
+# Consumed by: deploy.sh openbkn install --version=0.2.1
+apiVersion: deploy.openbkn.ai/v0.2.1
+kind: VersionSet
+product: bkn-foundry
+version: 0.2.1
+source:
+  type: oci
+  registry: oci://ghcr.io/openbkn-ai/charts
+releases:
+  core-data-migrator:
+    chart: core-data-migrator
+    version: 0.2.1
+    stage: pre
+  bkn-safe:
+    chart: bkn-safe
+    version: 0.2.1
+  mf-model-manager:
+    chart: mf-model-manager
+    version: 0.2.1
+  mf-model-api:
+    chart: mf-model-api
+    version: 0.2.1
+  # Evidence consumers must be installed before their producers.
+  agent-observability:
+    chart: agent-observability
+    version: 0.2.1
+  vega-backend:
+    chart: vega-backend
+    version: 0.2.1
+  bkn-backend:
+    chart: bkn-backend
+    version: 0.2.1
+  ontology-query:
+    chart: ontology-query
+    version: 0.2.1
+  agent-operator-integration:
+    chart: agent-operator-integration
+    version: 0.2.1
+  oss-gateway-backend:
+    chart: oss-gateway-backend
+    version: 0.2.1
+  sandbox:
+    chart: sandbox
+    version: 0.2.1
+  agent-retrieval:
+    chart: agent-retrieval
+    version: 0.2.1
+  bkn-agent:
+    chart: bkn-agent
+    version: 0.2.1
+  otelcol-contrib:
+    chart: otelcol-contrib
+    version: 0.2.1
+  bkn-studio:
+    chart: bkn-studio
+    version: 0.2.1
+  bkn-sample-studio:
+    chart: bkn-sample-studio
+    version: 0.2.1
+  bkn-project:
+    chart: bkn-project
+    version: 0.2.1
