@@ -1,0 +1,86 @@
+server:
+  runMode: release
+  httpPort: 13014
+  language: zh-CN
+  readTimeOut: 600
+  writeTimeOut: 600
+  # 留空表示使用 mf-model-manager 的系统默认小模型
+  defaultSmallModelName: ""
+  defaultSmallModelEnabled: false
+  proxySyncWorkerEnabled: true
+  proxySyncWorkerCount: 4
+  proxySyncPollInterval: 1
+  proxySyncLeaseSeconds: 60
+  proxySyncMaxAttempts: 12
+  proxyOutboxCleanupInterval: 3600
+log:
+  logLevel: info
+  developMode: false
+  maxAge: 100
+  maxBackups: 20
+  maxSize: 100
+otel:
+  service_name: "bkn-backend"
+  environment: "production"
+  # 无 scheme：otlptracehttp.WithEndpoint 只接受 host:port
+  otlp_endpoint: "otelcol-contrib:4318"
+  trace:
+    enabled: false
+    sampling_rate: 1.0
+  log:
+    enabled: false
+    level: "info"
+depServices:
+  class-443:
+    ingressClass: class-443
+  rds:
+    host: mariadb
+    port: 3306
+    user: root
+    # 字面量：代码无 env 覆盖入口，viper 不展开 ${...}。
+    # 必须与 .env 的 MARIADB_ROOT_PASSWORD（默认 openbkn）保持一致。
+    password: openbkn
+    type: MariaDB
+  mq:
+    mqType: kafka
+    mqHost: kafka
+    # 19092 是 SASL_PLAINTEXT 监听器；权限事件发布必须走它
+    mqPort: 19092
+    protocol: sasl_plaintext
+    tenant: default
+    auth:
+      username: admin
+      # 与 .env 的 KAFKA_SASL_PASSWORD（默认 openbkn-kafka）一致
+      password: openbkn-kafka
+      mechanism: PLAIN
+  opensearch:
+    host: opensearch
+    port: 9200
+    protocol: http
+    user: admin
+    # 字面量；必须与 .env 的 OPENSEARCH_PASSWORD 一致
+    password: OpenBKN_Admin123!
+  hydra-admin:
+    host: hydra
+    port: 4445
+    protocol: http
+  mf-model-manager:
+    host: mf-model-manager
+    port: 9898
+    protocol: http
+  mf-model-api:
+    host: mf-model-api
+    port: 9898
+    protocol: http
+  ontology-query:
+    host: ontology-query
+    port: 13018
+    protocol: http
+  vega-backend:
+    host: vega-backend
+    port: 13014
+    protocol: http
+  agent-operator-integration:
+    host: agent-operator-integration
+    port: 9000
+    protocol: http

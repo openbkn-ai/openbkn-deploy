@@ -67,6 +67,24 @@ bash ./dev/mac.sh openbkn install       # full stack incl. mandatory bkn-safe (a
 
 Config defaults: `dev/conf/mac-config.yaml`. `isf` is delegated to `deploy.sh` — see [dev/README.md](dev/README.md).
 
+### docker compose (optional — single host, no Kubernetes)
+
+No k8s / Helm required: `compose/` brings the same stack up on one host (gateway, middleware, auth, every
+business service). Service names and ports mirror `charts/`, and values the charts render from
+`{{ .Values.* }}` are pre-expanded into static files. Intended for **local / single-host / on-prem
+verification**, not production; state lives in local Docker volumes.
+
+```bash
+cd compose
+cp .env.example .env        # adjust PUBLIC_BASE_URL and passwords
+docker compose up -d
+docker compose ps           # once all healthy: http://localhost:8080 (admin / 111111)
+```
+
+Optional stacks: `-f docker-compose.trace.yml` (BKN Trace), `-f docker-compose.sandbox.yml --profile sandbox`
+(sandbox control plane, needs host `docker.sock`). See [compose/README.md](compose/README.md).
+`OPENBKN_VERSION` defaults to `0.2.1`, matching the images currently published.
+
 ## 🚀 Quick Start
 
 ### Host prerequisites

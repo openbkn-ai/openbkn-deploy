@@ -1,0 +1,11 @@
+mqType: kafka
+mqHost: kafka
+# 与 bkn-backend / vega-backend 一致使用 SASL_PLAINTEXT 内部监听端口
+mqPort: 19092
+mqLookupdHost: ""
+mqLookupdPort: 0
+auth:
+  username: admin
+  # 字面值：bind mount 不做变量替换，须与 .env 的 KAFKA_SASL_PASSWORD 一致
+  password: openbkn-kafka
+  mechanism: PLAIN

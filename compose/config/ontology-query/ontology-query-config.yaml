@@ -1,0 +1,68 @@
+server:
+  runMode: release
+  httpPort: 13018
+  language: zh-CN
+  readTimeOut: 120
+  writeTimeOut: 120
+  viewDataTimeout: 5m
+  defaultSmallModelEnabled: true
+  filteredCrossJoinMaxEdgeExpand: 10000
+log:
+  logLevel: info
+  developMode: false
+  maxAge: 100
+  maxBackups: 20
+  maxSize: 100
+otel:
+  service_name: "ontology-query"
+  environment: "production"
+  otlp_endpoint: "otelcol-contrib:4318"
+  # base 栈没有 collector，关闭以免每 5s 刷导出失败日志；
+  # 启用 trace 栈后可改回 true。
+  trace:
+    enabled: false
+    sampling_rate: 1.0
+  log:
+    enabled: false
+    level: "info"
+depServices:
+  class-443:
+    ingressClass: class-443
+  rds:
+    # ontology-query 实际不连库（SetDBSetting 未被调用），保留段落与 chart 对齐
+    host: mariadb
+    port: 3306
+    user: root
+    password: openbkn
+    type: MARIADB
+  opensearch:
+    host: opensearch
+    port: 9200
+    protocol: http
+    user: admin
+    # 与 .env 的 OPENSEARCH_PASSWORD 一致
+    password: OpenBKN_Admin123!
+  hydra-admin:
+    host: hydra
+    port: 4445
+    protocol: http
+  bkn-backend:
+    host: bkn-backend
+    port: 13014
+    protocol: http
+  agent-operator-integration:
+    host: agent-operator-integration
+    port: 9000
+    protocol: http
+  mf-model-manager:
+    host: mf-model-manager
+    port: 9898
+    protocol: http
+  mf-model-api:
+    host: mf-model-api
+    port: 9898
+    protocol: http
+  vega-backend:
+    host: vega-backend
+    port: 13014
+    protocol: http

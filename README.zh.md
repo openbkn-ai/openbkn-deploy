@@ -66,6 +66,22 @@ bash ./dev/mac.sh openbkn install       # 全量含必选 bkn-safe（认证已�
 
 默认配置：`dev/conf/mac-config.yaml`。`isf` 会转调 `deploy.sh` —— 见 [dev/README.zh.md](dev/README.zh.md)。
 
+### docker compose（可选 — 不用 Kubernetes 的单机栈）
+
+不需要 k8s / Helm：`compose/` 提供一组 compose 文件，在单台主机上起同一套服务（网关、中间件、认证、全部业务服务）。
+服务名与端口和 `charts/` 保持一致，chart 里由 `{{ .Values.* }}` 渲染的配置已展开成静态文件。面向**本地 / 单机 / 内网验证**，
+不是生产方案；数据保存在本机 Docker volume 中。
+
+```bash
+cd compose
+cp .env.example .env        # 按需修改 PUBLIC_BASE_URL 与密码
+docker compose up -d
+docker compose ps           # 全绿后访问 http://localhost:8080（初始账号 admin / 111111）
+```
+
+可选栈：`-f docker-compose.trace.yml`（BKN Trace）、`-f docker-compose.sandbox.yml --profile sandbox`（沙箱控制面，需宿主 `docker.sock`）。
+详见 [compose/README.zh.md](compose/README.zh.md)。`OPENBKN_VERSION` 默认 `0.2.1`（与当前已上架镜像一致）。
+
 ## 🚀 Quick Start
 
 ### 主机前置条件
