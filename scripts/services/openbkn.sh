@@ -8,6 +8,7 @@ CORE_NAMESPACE_FROM_CLI="${CORE_NAMESPACE_FROM_CLI:-false}"
 # Default local charts directory
 CORE_LOCAL_CHARTS_DIR="${CORE_LOCAL_CHARTS_DIR:-}"
 CORE_VERSION_MANIFEST_FILE="${CORE_VERSION_MANIFEST_FILE:-}"
+CORE_RUNTIME_PROFILE="${CORE_RUNTIME_PROFILE:-}"
 
 # --registry=<swr|ghcr|FULL>: alias for image.registry. Empty means "not set on
 # CLI"; the swr default is applied in _openbkn_apply_default_set_values only when the
@@ -82,6 +83,15 @@ parse_openbkn_args() {
                 ;;
             --version_file)
                 CORE_VERSION_MANIFEST_FILE="$2"
+                shift 2
+                ;;
+            --runtime-profile=*)
+                CORE_RUNTIME_PROFILE="${1#*=}"
+                shift
+                ;;
+            --runtime-profile)
+                [[ $# -ge 2 && -n "$2" ]] || { log_error '--runtime-profile requires a JSON file'; return 1; }
+                CORE_RUNTIME_PROFILE="$2"
                 shift 2
                 ;;
             --registry=*)
@@ -970,6 +980,10 @@ _openbkn_helm_upgrade_release() {
         helm_args=("${_OPENBKN_AUDIT_ARGS[@]}")
     fi
 
+    if _openbkn_has_runtime_values "${release_name}"; then
+        python3 "${SCRIPT_DIR}/scripts/lib/runtime_profile.py" patch-env --state "${_OPENBKN_RUNTIME_DIR}" --namespace "${namespace}" --release "${release_name}" || return 1
+    fi
+
     # Here rather than at either call site: both the repository and the local
     # --charts-dir paths reach helm through this function, and a cleanup wired
     # to only one of them leaves the other stuck on exactly the error it exists
@@ -1726,6 +1740,9 @@ _openbkn_should_skip_upgrade() {
     local chart_name="$3"
     local target_version="$4"
 
+    if _openbkn_has_runtime_values "${release_name}"; then
+        return 1
+    fi
     if ! should_skip_upgrade_same_chart_version "${release_name}" "${namespace}" "${chart_name}" "${target_version}"; then
         return 1
     fi
@@ -1848,6 +1865,10 @@ _install_openbkn_release_local() {
         "--wait" "--timeout=600s"
     )
 
+    if _openbkn_has_runtime_values "${release_name}"; then
+        helm_args+=("-f" "${_OPENBKN_RUNTIME_DIR}/${release_name}.values.json")
+    fi
+
     # Per-release values first, then all --set values (so explicit --set wins)
     local set_value
     _openbkn_release_extra_sets "${release_name}" "${namespace}"
@@ -1860,6 +1881,19 @@ _install_openbkn_release_local() {
     for set_value in "${CORE_SET_VALUES[@]}"; do
         helm_args+=("--set" "${set_value}")
     done
+
+    if _openbkn_has_runtime_values "${release_name}"; then
+        local runtime_image_key runtime_image_value
+        while IFS=$'\t' read -r runtime_image_key runtime_image_value; do
+            [[ -n "${runtime_image_key}" ]] || continue
+            [[ "${runtime_image_key}" != registry || "${OFFLINE_MODE:-false}" != true ]] || continue
+            helm_args+=("--set-string" "image.${runtime_image_key}=${runtime_image_value}")
+        done < <(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("image",{}); [print(k+"\t"+str(v[k])) for k in ("registry","repository","tag") if k in v]' "${_OPENBKN_RUNTIME_DIR}/${release_name}.values.json")
+    fi
+    if [[ "${mode}" == --runtime-prepare-only ]]; then
+        python3 "${SCRIPT_DIR}/scripts/lib/runtime_profile.py" render --state "${_OPENBKN_RUNTIME_DIR}" --release "${release_name}" -- "${helm_args[@]}"
+        return $?
+    fi
 
     if [[ "${mode}" == --prepare-only ]]; then
         _openbkn_helm_upgrade_release "${release_name}" "${namespace}" --prepare-only "${chart_name}-${target_version}" "${helm_args[@]}"
@@ -1893,7 +1927,7 @@ _install_openbkn_release_repo() {
     # Clean up any pending state before installing
     local current_status
     current_status=$(helm status "${release_name}" -n "${namespace}" -o json 2>/dev/null | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
-    if [[ "${release_name}" != agent-observability && -n "${current_status}" && "${current_status}" != "deployed" && "${current_status}" != "failed" ]]; then
+    if [[ "${mode}" != --runtime-prepare-only && "${release_name}" != agent-observability && -n "${current_status}" && "${current_status}" != "deployed" && "${current_status}" != "failed" ]]; then
         log_info "Cleaning up ${release_name} (status: ${current_status})..."
         helm uninstall "${release_name}" -n "${namespace}" 2>/dev/null || true
     fi
@@ -1924,6 +1958,10 @@ _install_openbkn_release_repo() {
 
     helm_args+=("--devel")
 
+    if _openbkn_has_runtime_values "${release_name}"; then
+        helm_args+=("-f" "${_OPENBKN_RUNTIME_DIR}/${release_name}.values.json")
+    fi
+
     # Per-release values first, then all --set values (so explicit --set wins)
     local set_value
     _openbkn_release_extra_sets "${release_name}" "${namespace}"
@@ -1936,6 +1974,19 @@ _install_openbkn_release_repo() {
     for set_value in "${CORE_SET_VALUES[@]}"; do
         helm_args+=("--set" "${set_value}")
     done
+
+    if _openbkn_has_runtime_values "${release_name}"; then
+        local runtime_image_key runtime_image_value
+        while IFS=$'\t' read -r runtime_image_key runtime_image_value; do
+            [[ -n "${runtime_image_key}" ]] || continue
+            [[ "${runtime_image_key}" != registry || "${OFFLINE_MODE:-false}" != true ]] || continue
+            helm_args+=("--set-string" "image.${runtime_image_key}=${runtime_image_value}")
+        done < <(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("image",{}); [print(k+"\t"+str(v[k])) for k in ("registry","repository","tag") if k in v]' "${_OPENBKN_RUNTIME_DIR}/${release_name}.values.json")
+    fi
+    if [[ "${mode}" == --runtime-prepare-only ]]; then
+        python3 "${SCRIPT_DIR}/scripts/lib/runtime_profile.py" render --state "${_OPENBKN_RUNTIME_DIR}" --release "${release_name}" -- "${helm_args[@]}"
+        return $?
+    fi
 
     if [[ "${mode}" == --prepare-only ]]; then
         _openbkn_helm_upgrade_release "${release_name}" "${namespace}" --prepare-only "${chart_name}-${target_version}" "${helm_args[@]}"
@@ -2161,7 +2212,7 @@ install_openbkn() (
     # Confine traps and prepared AO arguments to this installation invocation.
     _OPENBKN_AUDIT_PLAN_DIR=""
     _OPENBKN_AUDIT_READY=false
-    trap '_openbkn_audit_cleanup' EXIT
+    trap '_openbkn_audit_cleanup; _openbkn_runtime_cleanup' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
     _install_openbkn_impl "$@"
@@ -2233,6 +2284,20 @@ _install_openbkn_impl() {
 
     local -a release_names=()
     bkn_mapfile_compat release_names _openbkn_release_names
+
+    _openbkn_prepare_runtime_profile "${namespace}" "${release_names[@]}" || return 1
+    if [[ -f "${_OPENBKN_RUNTIME_DIR:-}/profile.json" ]]; then
+        local runtime_release runtime_version
+        while IFS= read -r runtime_release; do
+            runtime_version="$(_openbkn_resolve_release_version "${runtime_release}")"
+            if [[ "${use_local}" == true ]]; then
+                _install_openbkn_release_local "${runtime_release}" "${charts_dir}" "${namespace}" --runtime-prepare-only || return 1
+            else
+                _install_openbkn_release_repo "${runtime_release}" "${namespace}" "${HELM_CHART_REPO_NAME}" "${runtime_version}" --runtime-prepare-only || return 1
+            fi
+        done < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["releases"]))' "${_OPENBKN_RUNTIME_DIR}/profile.json")
+        python3 "${SCRIPT_DIR}/scripts/lib/runtime_profile.py" apply --state "${_OPENBKN_RUNTIME_DIR}" --namespace "${namespace}" || return 1
+    fi
 
     if _openbkn_release_list_contains "agent-observability" "${release_names[@]}"; then
         if ! _openbkn_prepare_trace_profile "${namespace}"; then
@@ -2404,4 +2469,28 @@ uninstall_openbkn() {
     bkn_delete_jobs_name_match_ere_in_ns "${namespace}" 'migrator|data-migrator'
 
     log_info "BKN Foundry services uninstallation completed."
+}
+
+# Runtime delivery data belongs to its provider. The community installer only
+# knows the generic values, key-generation and rendered-configuration contract.
+_openbkn_runtime_cleanup() {
+    if [[ -n "${_OPENBKN_RUNTIME_DIR:-}" ]]; then
+        rm -rf "${_OPENBKN_RUNTIME_DIR}"
+        _OPENBKN_RUNTIME_DIR=""
+    fi
+}
+
+_openbkn_has_runtime_values() {
+    [[ -n "${_OPENBKN_RUNTIME_DIR:-}" && -f "${_OPENBKN_RUNTIME_DIR}/$1.values.json" ]]
+}
+
+_openbkn_prepare_runtime_profile() {
+    local namespace="$1" version
+    shift
+    _OPENBKN_RUNTIME_DIR="$(mktemp -d)" || return 1
+    chmod 700 "${_OPENBKN_RUNTIME_DIR}"
+    version="$(_manifest_strip_quotes "$(_manifest_read_top_level_field "${CORE_VERSION_MANIFEST_FILE}" version)")"
+    python3 "${SCRIPT_DIR}/scripts/lib/runtime_profile.py" prepare \
+        --state "${_OPENBKN_RUNTIME_DIR}" --namespace "${namespace}" \
+        --profile "${CORE_RUNTIME_PROFILE:-}" --version "${version}" --releases "$@"
 }
