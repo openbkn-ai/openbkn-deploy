@@ -17,6 +17,7 @@ import sys
 STATE_NAME = "openbkn-runtime-profile"
 API = "deploy.openbkn.ai/runtime-profile/v1"
 NAME = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\Z")
+MISSING = object()
 
 
 def run(args, payload=None):
@@ -43,6 +44,23 @@ def write(path, value):
 def get(kind, name, namespace):
     raw = run(["kubectl", "get", kind, name, "-n", namespace, "--ignore-not-found", "-o", "json"])
     return json.loads(raw) if raw.strip() else None
+
+
+def value_at(values, path, default=MISSING):
+    for part in path.split("."):
+        if not isinstance(values, dict) or part not in values:
+            return default
+        values = values[part]
+    return values
+
+
+def set_value(values, path, value):
+    parts = path.split(".")
+    for part in parts[:-1]:
+        values = values.setdefault(part, {})
+        if not isinstance(values, dict):
+            raise ValueError("Runtime value path conflicts with an existing non-object field")
+    values[parts[-1]] = copy.deepcopy(value)
 
 
 def validate(profile, version, releases):
@@ -73,7 +91,7 @@ def validate(profile, version, releases):
             if field in image and (not isinstance(image[field], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]*", image[field])):
                 raise ValueError("Invalid runtime image coordinate")
         mapping = entry.get("valueEnv", {})
-        if not isinstance(mapping, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in mapping.items()):
+        if not isinstance(mapping, dict) or any(not isinstance(k, str) or not all(k.split(".")) or not isinstance(v, str) or not v for k, v in mapping.items()):
             raise ValueError("Invalid runtime environment mapping")
     declared = profile.get("secrets", [])
     if not isinstance(declared, list) or len(declared) > 16:
@@ -177,8 +195,8 @@ def prepare(args):
                 for field, env_name in entry.get("valueEnv", {}).items():
                     if env_name in live:
                         if "value" not in live[env_name]:
-                            raise ValueError("Cannot normalize a non-literal extension provider configuration")
-                        current[field] = live[env_name]["value"]
+                            raise ValueError("Cannot normalize a non-literal runtime environment mapping")
+                        set_value(current, field, live[env_name]["value"])
                 write(directory / f"{release}.deployment.json", deployment)
         previous = (old or {}).get("releases", {}).get(release, {}).get("values", {})
         for field in entry.get("exclusiveValues", []):
@@ -188,6 +206,13 @@ def prepare(args):
         observed[release] = copy.deepcopy(active)
         desired = copy.deepcopy(entry["values"])
         desired["namespace"] = args.namespace
+        for field in entry.get("valueEnv", {}):
+            if field in entry.get("exclusiveValues", []):
+                continue
+            existing = value_at(current, field)
+            previous_value = value_at(previous, field)
+            if existing is not MISSING and (previous_value is MISSING or not equivalent(existing, previous_value)):
+                set_value(desired, field, existing)
         previous_env = envs(previous.get("extraEnv", []))
         for name, default in envs(desired.get("extraEnv", [])).items():
             existing = active.get(name)

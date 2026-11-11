@@ -25,6 +25,9 @@ bash ./deploy.sh -y openbkn install --version=0.2.2 \
 
 选中的部署描述保存在目标命名空间的 `openbkn-runtime-profile` Secret。后续同版本的普通 `openbkn install` 自动沿用；跨平台版本升级需要对应的新部署描述，防止覆盖成社区镜像。已有其他扩展提供者时拒绝覆盖。企业镜像的拉取凭据沿用集群既有配置；数据库仍由平台迁移器管理。
 
+部署描述的 `valueEnv` 将 Helm 值路径（支持 `licenseHub.url` 这样的嵌套路径）映射到容器环境变量。非独占映射保留 Helm 值和运行中环境变量中的自定义字面值；仍由部署描述管理的默认值随新版描述更新。扩展提供者的独占保护继续由 `exclusiveValues` 控制。
+切换到新企业包时，即使平台版本相同，也应通过 `--runtime-profile` 传入新包的部署描述。不传入时仅复用已保存的描述，不会获取新版企业配置。
+
 
 ## Linux：默认 `k8s`（kubeadm）与可选 k3s
 
