@@ -4,6 +4,7 @@
 # Licensed under the OpenBKN License. See LICENSE-OPENBKN.txt in the project root.
 
 """Exercise the ordinary installer with real Helm and a private local API fixture."""
+import base64
 import copy
 import json
 import os
@@ -18,7 +19,7 @@ from test_runtime_profile import profile
 ROOT = Path(__file__).resolve().parents[2]
 
 SHIM = r'''#!/usr/bin/env python3
-import json, os, pathlib, subprocess, sys
+import json, os, pathlib, re, subprocess, sys
 path=pathlib.Path(os.environ['RUNTIME_TEST_STATE'])
 state=json.loads(path.read_text());args=sys.argv[1:];tool=pathlib.Path(sys.argv[0]).name
 if tool=='kubectl' and args[0]=='get':
@@ -36,8 +37,7 @@ elif tool=='kubectl' and args[0]=='patch':
     value['spec']['template']['spec']['containers'][0]['env']=operations[1]['value']
     state['revision']+=1;value['metadata']['resourceVersion']=str(state['revision']);state['writes'].append('kubectl patch')
 elif tool=='helm' and args[0]=='list':
-    release=args[-1].strip('^$')
-    if release in state['values']: print(release)
+    print('\n'.join(release for release in state['values'] if re.fullmatch(args[-1], release)))
 elif tool=='helm' and args[:2]==['get','values']:
     print(json.dumps(state['values'][args[2]]))
 elif tool=='helm' and args[0] in ('show','package'):
@@ -60,7 +60,10 @@ elif tool=='helm' and args[:2]==['upgrade','--install']:
     workload=entry.get('workload')
     if workload:
         env=list(values.get('extraEnv',[]))
-        env.extend({'name':n,'value':values[k]} for k,n in entry.get('valueEnv',{}).items())
+        for key,name in entry.get('valueEnv',{}).items():
+            value=values
+            for part in key.split('.'): value=value[part]
+            env.append({'name':name,'value':value})
         state['revision']+=1
         state['objects']['deployment|'+workload['name']]={'metadata':{'resourceVersion':str(state['revision'])},'spec':{'template':{'spec':{'containers':[{'name':workload['container'],'env':env}]}}}}
 else: raise SystemExit('Unexpected fixture command: '+tool+' '+args[0])
@@ -89,6 +92,7 @@ class RuntimeInstallerTest(unittest.TestCase):
         self.profile["platformVersion"] = "0.2.2"
         self.profile["releases"] = dict(zip(("bkn-backend", "agent-retrieval"), self.profile["releases"].values()))
         self.profile["releases"]["bkn-backend"]["workload"] = {"name": "bkn-backend", "container": "bkn-backend"}
+        self.profile["releases"]["agent-retrieval"]["workload"] = {"name": "agent-retrieval", "container": "agent-retrieval"}
         self.charts = self.root / "charts"
         self.charts.mkdir()
         self.chart_paths = {}
@@ -155,6 +159,7 @@ data:
   image: {{ .Values.image | toJson | quote }}
   env: {{ .Values.extraEnv | toJson | quote }}
   extension: {{ .Values.extensionJSON | default "" | quote }}
+  upstream: {{ (.Values.upstream | default dict).url | default "" | quote }}
 ''')
         return chart
 
@@ -210,6 +215,83 @@ data:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("update the platform Chart", result.stderr)
         self.assertEqual(self.load()["writes"], [])
+
+    def test_helm_and_live_mapped_addresses_survive_local_and_repository_upgrades(self):
+        entry = self.profile["releases"]["agent-retrieval"]
+        field = next(key for key in entry["valueEnv"] if key not in entry.get("exclusiveValues", []))
+        env_name = entry["valueEnv"][field]
+        for mode in ("local", "repo"):
+            with self.subTest(mode=mode):
+                first = self.install(mode)
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                state = self.load()
+                desired = state["values"]["agent-retrieval"]
+                for part in field.split(".")[:-1]:
+                    desired = desired[part]
+                desired[field.split(".")[-1]] = "https://helm-custom.example:3443"
+                workload = state["objects"]["deployment|agent-retrieval"]
+                workload["spec"]["template"]["spec"]["containers"][0]["env"] = []
+                self.state.write_text(json.dumps(state))
+                for patched in (False, True):
+                    address = "https://patched-custom.example:3443" if patched else "https://helm-custom.example:3443"
+                    if patched:
+                        state = self.load()
+                        env = state["objects"]["deployment|agent-retrieval"]["spec"]["template"]["spec"]["containers"][0]["env"]
+                        next(e for e in env if e["name"] == env_name)["value"] = address
+                        self.state.write_text(json.dumps(state))
+                    result = self.install(mode, provided=False)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    state = self.load()
+                    actual = state["values"]["agent-retrieval"]
+                    for part in field.split("."):
+                        actual = actual[part]
+                    self.assertEqual(actual, address)
+                    self.assertIn(address, state["renders"]["agent-retrieval"])
+
+    def test_new_profile_adopts_a_manual_address_from_an_older_profile(self):
+        first = self.install()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        state = self.load()
+        secret = state["objects"]["secret|openbkn-runtime-profile"]
+        old = json.loads(base64.b64decode(secret["data"]["profile.json"]))
+        entry = old["releases"]["agent-retrieval"]
+        field = next(key for key in entry["valueEnv"] if key not in entry.get("exclusiveValues", []))
+        env_name = entry["valueEnv"].pop(field)
+        for values in (entry["values"], state["values"]["agent-retrieval"]):
+            for part in field.split(".")[:-1]:
+                values = values[part]
+            del values[field.split(".")[-1]]
+        secret["data"]["profile.json"] = base64.b64encode(json.dumps(old).encode()).decode()
+        env = state["objects"]["deployment|agent-retrieval"]["spec"]["template"]["spec"]["containers"][0]["env"]
+        next(e for e in env if e["name"] == env_name)["value"] = "https://older-patch.example:3443"
+        self.state.write_text(json.dumps(state))
+        result = self.install(provided=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("https://older-patch.example:3443", self.load()["renders"]["agent-retrieval"])
+
+    def test_empty_chart_value_uses_provider_default(self):
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.load()
+        entry = self.profile["releases"]["agent-retrieval"]
+        field = next(key for key in entry["valueEnv"] if key not in entry.get("exclusiveValues", []))
+        expected = entry["values"]
+        for part in field.split("."):
+            expected = expected[part]
+        values = state["values"]["agent-retrieval"]
+        for part in field.split(".")[:-1]:
+            values = values[part]
+        values[field.split(".")[-1]] = ""
+        env = state["objects"]["deployment|agent-retrieval"]["spec"]["template"]["spec"]["containers"][0]["env"]
+        env[:] = [e for e in env if e["name"] != entry["valueEnv"][field]]
+        self.state.write_text(json.dumps(state))
+        result = self.install(provided=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        actual = self.load()["values"]["agent-retrieval"]
+        for part in field.split("."):
+            actual = actual[part]
+        self.assertEqual(actual, expected)
+        self.assertIn(expected, self.load()["renders"]["agent-retrieval"])
 
 
 if __name__ == "__main__":

@@ -31,7 +31,8 @@ def profile():
                              "values": {"image": {"registry": "registry.example/private", "repository": "provider", "tag": "pinned"},
                                         "extraEnv": [{"name": "PROVIDER_ENABLED", "value": "true"}, {"name": "SOURCE_URL", "value": "http://source"},
                                                      *[{"name": env, "valueFrom": {"secretKeyRef": {"name": "provider-keys", "key": key}}} for env, key in (("KEY_ONE", "one"), ("KEY_TWO", "two"))]]}},
-                "loader": {"values": {"extensionURL": "http://provider/tools", "extensionJSON": '{"tools":[{"name":"sample"}]}'},
+                "loader": {"values": {"extensionURL": "http://provider/tools", "extensionJSON": '{"tools":[{"name":"sample"}]}', "upstream": {"url": "http://shared-service"}},
+                           "workload": {"name": "loader", "container": "loader"}, "valueEnv": {"upstream.url": "UPSTREAM_URL"},
                            "exclusiveValues": ["extensionURL", "extensionJSON"], "requiredManifestStrings": ["sample"]}}}
 
 
@@ -198,6 +199,83 @@ class RuntimeProfileTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "concurrently"):
             runtime.apply(self.args)
         self.assertEqual(self.cluster.objects[("secret", runtime.STATE_NAME)]["metadata"]["resourceVersion"], "10")
+
+    def test_mapped_nested_values_preserve_explicit_helm_overrides(self):
+        for address in ("https://custom-service:3443", "http://custom-service:3000"):
+            with self.subTest(address=address):
+                self.cluster.values["loader"] = {"upstream": {"url": address}}
+                self.prepare()
+                self.assertEqual(runtime.read(self.root / "loader.values.json")["upstream"]["url"], address)
+
+    def test_empty_mapped_values_use_provider_default(self):
+        for address in (None, ""):
+            with self.subTest(address=address):
+                self.cluster.values["loader"] = {"upstream": {"url": address}}
+                self.prepare()
+                self.assertEqual(runtime.read(self.root / "loader.values.json")["upstream"]["url"], "http://shared-service")
+
+    def test_empty_live_mapping_does_not_erase_custom_helm_value(self):
+        self.cluster.values["loader"] = {"upstream": {"url": "https://helm-service"}}
+        self.cluster.objects[("deployment", "loader")] = {
+            "metadata": {"resourceVersion": "7"}, "spec": {"template": {"spec": {"containers": [
+                {"name": "loader", "env": [{"name": "UPSTREAM_URL", "value": ""}]}]}}}}
+        self.prepare()
+        self.assertEqual(runtime.read(self.root / "loader.values.json")["upstream"]["url"], "https://helm-service")
+
+    def test_live_mapped_value_wins_over_helm_and_survives_ordinary_reinstall(self):
+        self.cluster.values["loader"] = {"upstream": {"url": "http://helm-service"}}
+        self.cluster.objects[("deployment", "loader")] = {
+            "metadata": {"resourceVersion": "7"}, "spec": {"template": {"spec": {"containers": [
+                {"name": "loader", "env": [{"name": "UPSTREAM_URL", "value": "https://patched-service"}]}]}}}}
+        self.prepare()
+        self.assertEqual(runtime.read(self.root / "loader.values.json")["upstream"]["url"], "https://patched-service")
+        runtime.apply(self.args)
+        self.args.profile = ""
+        self.prepare()
+        self.assertEqual(runtime.read(self.root / "loader.values.json")["upstream"]["url"], "https://patched-service")
+
+    def test_profile_default_can_change_without_replacing_operator_override(self):
+        self.prepare()
+        runtime.apply(self.args)
+        self.cluster.values["loader"] = {"upstream": {"url": "http://shared-service"}}
+        self.desired["releases"]["loader"]["values"]["upstream"]["url"] = "http://new-default"
+        runtime.write(self.input, self.desired)
+        self.prepare()
+        self.assertEqual(runtime.read(self.root / "loader.values.json")["upstream"]["url"], "http://new-default")
+        self.cluster.values["loader"] = {"upstream": {"url": "http://operator-service"}}
+        self.prepare()
+        self.assertEqual(runtime.read(self.root / "loader.values.json")["upstream"]["url"], "http://operator-service")
+
+    def test_nested_mapping_does_not_replace_other_values_or_scalar_parents(self):
+        self.cluster.values["loader"] = {"upstream": {"url": "http://custom", "unmanaged": "not-owned"}}
+        self.prepare()
+        values = runtime.read(self.root / "loader.values.json")
+        self.assertEqual(values["upstream"]["url"], "http://custom")
+        self.assertNotIn("upstream.url", values)
+        nested = {"upstream": {"url": "http://old", "unmanaged": "keep"}}
+        runtime.set_value(nested, "upstream.url", "http://new")
+        self.assertEqual(nested["upstream"], {"url": "http://new", "unmanaged": "keep"})
+        with self.assertRaisesRegex(ValueError, "non-object"):
+            runtime.set_value({"upstream": "existing-scalar"}, "upstream.url", "http://custom")
+
+    def test_invalid_mapping_paths_fail_preflight(self):
+        for path in ("", ".url", "upstream..url", "upstream."):
+            with self.subTest(path=path):
+                self.desired["releases"]["loader"]["valueEnv"] = {path: "UPSTREAM_URL"}
+                with self.assertRaisesRegex(ValueError, "environment mapping"):
+                    runtime.validate(self.desired, "1.0", ["provider", "loader"])
+
+    def test_new_mapping_adopts_old_manual_address_without_changing_keys(self):
+        old = copy.deepcopy(self.desired)
+        del old["releases"]["loader"]["valueEnv"]
+        del old["releases"]["loader"]["values"]["upstream"]
+        self.cluster.objects[("secret", runtime.STATE_NAME)] = {"metadata": {"resourceVersion": "3"}, "data": {"profile.json": base64.b64encode(json.dumps(old).encode()).decode()}}
+        self.cluster.objects[("secret", "provider-keys")] = self.secret()
+        self.cluster.objects[("deployment", "loader")] = {"metadata": {"resourceVersion": "7"}, "spec": {"template": {"spec": {"containers": [
+            {"name": "loader", "env": [{"name": "UPSTREAM_URL", "value": "http://old-patch"}]}]}}}}
+        self.prepare()
+        self.assertEqual(runtime.read(self.root / "loader.values.json")["upstream"]["url"], "http://old-patch")
+        self.assertEqual(runtime.read(self.root / "pending-secrets.json"), [])
 
 
 if __name__ == "__main__":

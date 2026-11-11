@@ -25,6 +25,10 @@ The installer renders the actual Charts before writing runtime resources. Initia
 
 The selected profile is retained in the target namespace's `openbkn-runtime-profile` Secret. Subsequent ordinary installs at the same platform version reuse it. Platform version upgrades require a matching new delivery profile, preventing accidental replacement with community images. Other extension providers are never silently overwritten. Enterprise image pull credentials remain part of the existing cluster configuration; database initialization remains owned by the platform migrator.
 
+Profile `valueEnv` entries map Helm value paths (including nested paths such as `licenseHub.url`) to workload environment names. Nonexclusive mappings retain operator overrides from Helm values and live literal environment settings; profile-owned defaults follow the next profile version. Extension-provider ownership remains governed by `exclusiveValues`.
+Empty or null nonexclusive mappings use the provider default; an empty live value does not erase an existing nonempty Helm override. The installer reads user-supplied Helm values without `--all`, so Chart defaults are not treated as operator overrides.
+When adopting a newer provider bundle, pass its profile explicitly even if the platform version is unchanged. Omitting `--runtime-profile` reuses the saved descriptor; it does not fetch a newer provider configuration.
+
 
 ## Linux: default `k8s` (kubeadm) vs optional k3s
 
