@@ -32,6 +32,8 @@ jobs:
           bash scripts/services/config_observability_test.sh
           bash scripts/services/openbkn_audit_consumer_test.sh
           bash scripts/services/openbkn_helm_upgrade_test.sh
+      - name: Runtime delivery profiles and persistent keys
+        run: python3 -m unittest discover -s scripts/lib -p 'test_runtime_profile*.py'
 
   permission-transition:
     runs-on: ubuntu-latest

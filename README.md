@@ -12,6 +12,20 @@ For portable MariaDB and OpenSearch backups, restore commands, and initial snaps
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE.txt)
 
+## Provider runtime delivery profiles
+
+An enterprise bundle supplies per-release values, image coordinates and persistent-key requirements through `--runtime-profile=<JSON>`. The community installer loads declarative data; it contains no enterprise tool definitions and runs no provider-supplied scripts.
+
+```bash
+bash ./deploy.sh -y openbkn install --version=0.2.2 \
+  --runtime-profile=/path/to/enterprise-bundle/eval-runtime-profile.json
+```
+
+The installer renders the actual Charts before writing runtime resources. Initial installs create distinct persistent keys. Upgrades and reinstalls reuse them; missing previously used keys, corruption or conflicting runtime key material stop installation and require restoration. Manual workload settings are incorporated into Helm values, keys become Secret references, and custom service addresses and an explicit disabled state are retained.
+
+The selected profile is retained in the target namespace's `openbkn-runtime-profile` Secret. Subsequent ordinary installs at the same platform version reuse it. Platform version upgrades require a matching new delivery profile, preventing accidental replacement with community images. Other extension providers are never silently overwritten. Enterprise image pull credentials remain part of the existing cluster configuration; database initialization remains owned by the platform migrator.
+
+
 ## Linux: default `k8s` (kubeadm) vs optional k3s
 
 **`KUBE_DISTRO` defaults to `k8s`** (package-manager Kubernetes + **kubeadm** on a single node). **k3s** is an optional lighter single-node stack. If you install k3s with `deploy.sh k3s install`, keep **`preflight.sh`** / **`openbkn`** aligned by passing **`--distro=k3s`** **before** the module (or **`export KUBE_DISTRO=k3s`**) — otherwise `preflight` may flag a k3s/kubeadm mismatch and installs can disagree on bootstrap.

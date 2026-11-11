@@ -73,6 +73,7 @@ usage() {
     echo "  openbkn status               Show OpenBKN services status"
     echo "  openbkn stop|start           Stop/restore business Deployments (keep data services running)"
     echo "                                Use --set to pass custom values to all charts"
+    echo "                                --runtime-profile=<JSON> installs a provider delivery profile; later upgrades reuse it"
     echo "  infra install                Install Kubernetes and platform data services"
     echo ""
     echo "Examples:"

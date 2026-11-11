@@ -12,6 +12,20 @@ MariaDB 与 OpenSearch 的单文件备份、跨环境恢复及首次快照目录
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE.txt)
 
+## 企业能力的部署描述
+
+企业包通过 `--runtime-profile=<JSON>` 为社区安装器提供每个服务的配置、镜像坐标和持久密钥要求。安装器不内置企业工具定义，也不执行部署描述中的脚本。
+
+```bash
+bash ./deploy.sh -y openbkn install --version=0.2.2 \
+  --runtime-profile=/path/to/enterprise-bundle/eval-runtime-profile.json
+```
+
+安装前先使用当前 Chart 渲染并核对配置支持。首次创建持久密钥；升级、重装复用已有密钥。已在使用的密钥缺失、损坏或与运行配置冲突时，安装停止并要求恢复，不生成替代密钥。运行中的手工配置补丁会合入 Helm 值；密钥统一转为 Secret 引用，服务地址和显式关闭状态保留。
+
+选中的部署描述保存在目标命名空间的 `openbkn-runtime-profile` Secret。后续同版本的普通 `openbkn install` 自动沿用；跨平台版本升级需要对应的新部署描述，防止覆盖成社区镜像。已有其他扩展提供者时拒绝覆盖。企业镜像的拉取凭据沿用集群既有配置；数据库仍由平台迁移器管理。
+
+
 ## Linux：默认 `k8s`（kubeadm）与可选 k3s
 
 **`KUBE_DISTRO` 默认为 `k8s`**（包管理安装 Kubernetes + 单节点 **kubeadm**）。**k3s** 为可选的更轻的单节点栈。若已用 `deploy.sh k3s install` 装好集群，后续的 **`preflight.sh`** / **`openbkn`** 请保持 distro 一致：在子模块名前加 **`--distro=k3s`**，或 **`export KUBE_DISTRO=k3s`**，否则 `preflight` 可能报 k3s 与 kubeadm 路径不一致，bootstrap 行为也容易对不上。

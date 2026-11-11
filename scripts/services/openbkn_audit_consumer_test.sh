@@ -224,6 +224,8 @@ preflight_precedes_application_loop() {
     init_openbkn_databases() { :; }
     bkn_mapfile_compat() { local var="$1"; shift; mapfile -t "${var}" < <("$@"); }
     _openbkn_release_names() { printf '%s\n' unrelated-before agent-observability unrelated-after; }
+    # Runtime-profile installation has its own real-Helm installer fixture.
+    _openbkn_prepare_runtime_profile() { :; }
     _openbkn_prepare_trace_profile() { :; }
     _openbkn_warn_unwired_evidence_producers() { :; }
     _openbkn_resolve_release_version() { printf 0.1.4; }
