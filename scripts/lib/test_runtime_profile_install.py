@@ -269,6 +269,30 @@ data:
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("https://older-patch.example:3443", self.load()["renders"]["agent-retrieval"])
 
+    def test_empty_chart_value_uses_provider_default(self):
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.load()
+        entry = self.profile["releases"]["agent-retrieval"]
+        field = next(key for key in entry["valueEnv"] if key not in entry.get("exclusiveValues", []))
+        expected = entry["values"]
+        for part in field.split("."):
+            expected = expected[part]
+        values = state["values"]["agent-retrieval"]
+        for part in field.split(".")[:-1]:
+            values = values[part]
+        values[field.split(".")[-1]] = ""
+        env = state["objects"]["deployment|agent-retrieval"]["spec"]["template"]["spec"]["containers"][0]["env"]
+        env[:] = [e for e in env if e["name"] != entry["valueEnv"][field]]
+        self.state.write_text(json.dumps(state))
+        result = self.install(provided=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        actual = self.load()["values"]["agent-retrieval"]
+        for part in field.split("."):
+            actual = actual[part]
+        self.assertEqual(actual, expected)
+        self.assertIn(expected, self.load()["renders"]["agent-retrieval"])
+
 
 if __name__ == "__main__":
     unittest.main()

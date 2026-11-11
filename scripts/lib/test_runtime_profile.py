@@ -201,11 +201,26 @@ class RuntimeProfileTest(unittest.TestCase):
         self.assertEqual(self.cluster.objects[("secret", runtime.STATE_NAME)]["metadata"]["resourceVersion"], "10")
 
     def test_mapped_nested_values_preserve_explicit_helm_overrides(self):
-        for address in ("https://custom-service:3443", ""):
+        for address in ("https://custom-service:3443", "http://custom-service:3000"):
             with self.subTest(address=address):
                 self.cluster.values["loader"] = {"upstream": {"url": address}}
                 self.prepare()
                 self.assertEqual(runtime.read(self.root / "loader.values.json")["upstream"]["url"], address)
+
+    def test_empty_mapped_values_use_provider_default(self):
+        for address in (None, ""):
+            with self.subTest(address=address):
+                self.cluster.values["loader"] = {"upstream": {"url": address}}
+                self.prepare()
+                self.assertEqual(runtime.read(self.root / "loader.values.json")["upstream"]["url"], "http://shared-service")
+
+    def test_empty_live_mapping_does_not_erase_custom_helm_value(self):
+        self.cluster.values["loader"] = {"upstream": {"url": "https://helm-service"}}
+        self.cluster.objects[("deployment", "loader")] = {
+            "metadata": {"resourceVersion": "7"}, "spec": {"template": {"spec": {"containers": [
+                {"name": "loader", "env": [{"name": "UPSTREAM_URL", "value": ""}]}]}}}}
+        self.prepare()
+        self.assertEqual(runtime.read(self.root / "loader.values.json")["upstream"]["url"], "https://helm-service")
 
     def test_live_mapped_value_wins_over_helm_and_survives_ordinary_reinstall(self):
         self.cluster.values["loader"] = {"upstream": {"url": "http://helm-service"}}

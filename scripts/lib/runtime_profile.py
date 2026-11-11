@@ -196,7 +196,9 @@ def prepare(args):
                     if env_name in live:
                         if "value" not in live[env_name]:
                             raise ValueError("Cannot normalize a non-literal runtime environment mapping")
-                        set_value(current, field, live[env_name]["value"])
+                        value = live[env_name]["value"]
+                        if field in entry.get("exclusiveValues", []) or value not in (None, ""):
+                            set_value(current, field, value)
                 write(directory / f"{release}.deployment.json", deployment)
         previous = (old or {}).get("releases", {}).get(release, {}).get("values", {})
         for field in entry.get("exclusiveValues", []):
@@ -211,7 +213,7 @@ def prepare(args):
                 continue
             existing = value_at(current, field)
             previous_value = value_at(previous, field)
-            if existing is not MISSING and (previous_value is MISSING or not equivalent(existing, previous_value)):
+            if existing is not MISSING and existing not in (None, "") and (previous_value is MISSING or not equivalent(existing, previous_value)):
                 set_value(desired, field, existing)
         previous_env = envs(previous.get("extraEnv", []))
         for name, default in envs(desired.get("extraEnv", [])).items():
