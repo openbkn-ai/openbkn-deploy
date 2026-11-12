@@ -215,66 +215,6 @@ def convert_document(document: Any) -> tuple[Any, dict[str, Any]]:
     return converted, {"changed": changed, "unchanged": unchanged, "errors": errors}
 
 
-def plan_manual_mounts(inventory: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Create import candidates from an enriched binding snapshot; never delete mounts.
-
-    input_schema is an explicit offline snapshot from the execution factory. Only
-    required inputs and optional inputs with defaults become action parameters.
-    Model-derived references, SKILL, and ambiguous schemas are never guessed.
-    """
-    network, branch = inventory.get("kn_id"), inventory.get("branch", "main")
-    if not network or not isinstance(branch, str) or not branch:
-        raise MigrationError("mount inventory requires one kn_id and branch")
-    bindings = inventory.get("bindings")
-    existing = inventory.get("action_types", [])
-    if not isinstance(bindings, list) or not isinstance(existing, list):
-        raise MigrationError("mount inventory requires bindings and action_types arrays")
-    actions, mapping, skipped, errors = [], [], [], []
-    seen = {}
-    existing_ids = {action.get("id") for action in existing if isinstance(action, dict)}
-    for binding in bindings:
-        identifier = binding.get("id", "unknown") if isinstance(binding, dict) else "unknown"
-        try:
-            if not isinstance(binding, dict): raise MigrationError("binding is not an object")
-            kind = binding.get("capability_type")
-            source_kinds = {source.get("kind") for source in binding.get("sources", []) if isinstance(source, dict)}
-            reason = None
-            if kind not in {"function", "mcp_tool"}: reason = "outside_scope"
-            elif not source_kinds.intersection({"manual", "box"}): reason = "not_an_explicit_mount"
-            elif source_kinds.intersection({"object_type", "action_type"}): reason = "shared_model_reference_requires_review"
-            if reason:
-                skipped.append({"binding_id": identifier, "reason": reason})
-                continue
-            owner, capability = binding.get("box_id"), binding.get("capability_id")
-            if not owner or not capability: raise MigrationError("binding is missing its scoped tool identity")
-            if binding.get("status") == "missing" or binding.get("metadata_available") is not True:
-                raise MigrationError("tool metadata is unavailable; refresh the inventory")
-            source = {"type": "mcp", "mcp_id": owner, "tool_name": capability} if kind == "mcp_tool" else {"type": "tool", "box_id": owner, "tool_id": capability}
-            context = (binding.get("kn_id", network), binding.get("branch", branch))
-            if context != (network, branch): raise MigrationError("inventory mixes knowledge networks or branches")
-            key = (*context, kind, owner, capability)
-            equivalent = [action for action in existing if isinstance(action, dict) and action.get("operation_config") == {"type": "tool"} and not action.get("object_type_id") and all((action.get("action_source") or {}).get(key) == value for key, value in source.items())]
-            if len(equivalent) > 1: raise MigrationError("multiple equivalent actions require explicit selection")
-            if equivalent:
-                mapping.append({"binding_id": identifier, "action_id": equivalent[0]["id"], "result": "existing"})
-                continue
-            if key in seen:
-                mapping.append({"binding_id": identifier, "action_id": seen[key], "result": "duplicate"})
-                continue
-            parameters = parameters_from_schema(binding.get("input_schema"))
-            action_id = "action_" + hashlib.sha256(json.dumps(key, separators=(",", ":")).encode()).hexdigest()[:24]
-            if action_id in existing_ids: raise MigrationError("generated action ID conflicts with an existing definition")
-            if not binding.get("name"): raise MigrationError("tool display name is required")
-            if any(action.get("name") == binding["name"] for action in [*existing, *actions]): raise MigrationError("tool display name conflicts with an existing action")
-            action = {"id": action_id, "name": binding["name"], "branch": context[1], "operation_config": {"type": "tool"}, "object_type_id": "", "action_type": "modify", "action_intent": "modify", "action_source": source, "parameters": parameters, "comment": binding.get("description", "")}
-            actions.append(action)
-            seen[key] = action_id
-            mapping.append({"binding_id": identifier, "kn_id": context[0], "branch": context[1], "action_id": action_id, "result": "created"})
-        except MigrationError as error:
-            errors.append({"binding_id": identifier, "reason": str(error)})
-    return {"entries": actions}, {"kn_id": network, "branch": branch, "mapping": mapping, "skipped": skipped, "errors": errors}
-
-
 DB_COLUMNS = (
     "f_id", "f_name", "f_kn_id", "f_branch", "f_action_type", "f_action_intent",
     "f_object_type_id", "f_operation_config", "f_parameters", "f_condition",
@@ -503,9 +443,8 @@ def configure_artifact_paths(args: argparse.Namespace) -> None:
     args.output_explicit = args.output is not None
     args.rollback_default = args.rollback is ROLLBACK_DEFAULT
     base = Path(os.getenv("OPENBKN_MIGRATION_WORKDIR", "~/.openbkn-ai/migrations")).expanduser()
-    if args.input or args.mounts:
-        source = args.input or args.mounts
-        identity = f"offline\0{source.resolve()}"
+    if args.input:
+        identity = f"offline\0{args.input.resolve()}"
         mode = "offline"
     else:
         identity = "\0".join((
@@ -644,7 +583,6 @@ def connect_database(args: argparse.Namespace, pymysql: Any) -> tuple[Any, subpr
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mounts", type=Path, help="Offline enriched manual capability binding inventory")
     parser.add_argument("--input", type=Path, help="Offline action/network JSON export")
     parser.add_argument("--output", type=Path, help="Optional override for the generated plan or rollback snapshot path")
     parser.add_argument("--report", type=Path, help="Optional override for the generated report path")
@@ -667,17 +605,6 @@ def main() -> int:
         parser.error("--rollback requires --apply")
     if args.allow_partial and (not args.apply or args.rollback is not None):
         parser.error("--allow-partial requires --apply without --rollback")
-    if args.mounts:
-        if args.input or args.apply or args.rollback:
-            parser.error("mount planning is offline and cannot apply changes")
-        configure_artifact_paths(args)
-        validate_artifact_paths(args.output, args.report, [path for path in (args.mounts, args.tool_schemas) if path])
-        converted, report = plan_manual_mounts(json.loads(args.mounts.read_text()))
-        private_json(args.report, report)
-        if report["errors"]: return 2
-        private_json(args.output, converted)
-        print(f"plan: {args.output}\nreport: {args.report}")
-        return 0
     if args.input:
         if args.apply or args.rollback:
             parser.error("offline conversion cannot apply database changes")

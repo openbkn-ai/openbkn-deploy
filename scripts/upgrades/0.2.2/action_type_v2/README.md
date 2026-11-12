@@ -2,6 +2,8 @@
 
 This upgrade tool lives in `openbkn-deploy`, outside runtime modules. Apply the `bkn-foundry` 0.2.2 `02-action-operation.sql` schema change first. Stop action writes and back up `t_action_type` and `t_action_schedule` before applying data changes. Switch all action services to the new model only after the full migration succeeds.
 
+Only existing action definitions are migrated. Manually mounted Function, API, and MCP capabilities remain independent in the dynamic model; this tool does not convert them into action types or remove their bindings.
+
 The default database mode reads `depServices.rds` from the installed `bkn-backend` Helm release in namespace `openbkn`. It temporarily port-forwards in-cluster Service DNS addresses to `127.0.0.1`. Select another deployment with `--namespace`, `--release`, and `--kube-context`; explicit connection arguments or `BKN_DB_*` take precedence over Helm. Use an environment variable or Helm for the password.
 
 ```bash
@@ -21,7 +23,7 @@ python3 migrate_action_definitions.py \
   --apply
 ```
 
-For an explicit partial apply, add `--allow-partial --apply`. Convertible actions are written in one transaction; `apply-report.json` records `applied_count` and `skipped_actions`. The command still exits `2` while any action is skipped. Repair its tool definition and rerun to process the remaining actions. Keep old execution services stopped until an unscoped dry run has no errors and all actions are migrated; old and new action models do not run together. All updates use optimistic checks. To restore, stop new writes and run `python3 migrate_action_definitions.py --rollback --apply`; this reads all default batch snapshots and skips records never applied or already restored. A specific snapshot can be selected with `--rollback /path/to/snapshot.json --apply`. Dry-run plans may be refreshed without replacing immutable rollback snapshots. Keep them as sensitive backup data. `--kn-id` scopes a dry run, while `--input` and `--mounts` are offline-only conversion modes. Do not use a scoped result as the full cutover gate.
+For an explicit partial apply, add `--allow-partial --apply`. Convertible actions are written in one transaction; `apply-report.json` records `applied_count` and `skipped_actions`. The command still exits `2` while any action is skipped. Repair its tool definition and rerun to process the remaining actions. Keep old execution services stopped until an unscoped dry run has no errors and all actions are migrated; old and new action models do not run together. All updates use optimistic checks. To restore, stop new writes and run `python3 migrate_action_definitions.py --rollback --apply`; this reads all default batch snapshots and skips records never applied or already restored. A specific snapshot can be selected with `--rollback /path/to/snapshot.json --apply`. Dry-run plans may be refreshed without replacing immutable rollback snapshots. Keep them as sensitive backup data. `--kn-id` scopes a dry run, while `--input` converts an action export offline without database writes. Historical capability mounts are outside this migration. Do not use a scoped result as the full cutover gate.
 
 Focused tests: `python3 -m unittest -v test_migrate_action_definitions.py`. Optional MariaDB integration tests require `BKN_MIGRATION_TEST_DB_*`, `BKN_FOUNDRY_ROOT`, and CREATE DATABASE permission on a dedicated test server.
 

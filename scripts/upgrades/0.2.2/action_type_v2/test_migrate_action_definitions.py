@@ -14,7 +14,7 @@ from unittest import mock
 
 from migrate_action_definitions import (
     MigrationError, apply_plan, apply_snapshot_path, convert_document, load_rollback_snapshots,
-    main, migrate_action, migration_report, plan_rows, private_json, plan_manual_mounts,
+    main, migrate_action, migration_report, plan_rows, private_json,
     ROLLBACK_DEFAULT, cluster_database_service, configure_artifact_paths, resolve_database_config,
     rollback_snapshot_paths, select_rollback_changes, validate_artifact_paths, write_migration_snapshot,
 )
@@ -56,7 +56,7 @@ class ActionMigrationTests(unittest.TestCase):
             os.environ, {"OPENBKN_MIGRATION_WORKDIR": directory}, clear=True,
         ):
             args = argparse.Namespace(
-                input=None, mounts=None, rollback=None, apply=False, output=None, report=None,
+                input=None, rollback=None, apply=False, output=None, report=None,
                 host="db.example.com", port=3306, database="openbkn", namespace="openbkn",
                 release="bkn-backend", kube_context="cluster", kn_id=None,
             )
@@ -149,11 +149,14 @@ class ActionMigrationTests(unittest.TestCase):
         source["parameters"][0] = {"name": "id", "value_from": "property", "value": "id"}
         with self.assertRaises(MigrationError):
             migrate_action(source)
-        document = {"object_types": [{"id": "orders"}], "action_types": [self.old_action(), source]}
+        bindings = [{"id": "send", "capability_type": "function", "sources": [{"kind": "manual"}]}]
+        document = {"object_types": [{"id": "orders"}], "capability_bindings": bindings,
+                    "action_types": [self.old_action(), source]}
         converted, report = convert_document(document)
         self.assertEqual(["notify"], report["changed"])
         self.assertEqual(1, len(report["errors"]))
         self.assertEqual(document["object_types"], converted["object_types"])
+        self.assertEqual(bindings, converted["capability_bindings"])
         self.assertNotIn("operation_config", document["action_types"][0])
 
     def test_typed_constants_preserve_json_types_and_exact_integers(self):
@@ -175,25 +178,6 @@ class ActionMigrationTests(unittest.TestCase):
         action = self.old_action()
         action["schedule"] = {"cron": "* * * * *"}
         with self.assertRaises(MigrationError): migrate_action(action)
-
-    def test_mount_candidates_are_stable_deduplicated_and_keep_model_references(self):
-        binding = {"id": "mount1", "kn_id": "kn", "branch": "main", "capability_type": "function", "box_id": "box", "capability_id": "send", "metadata_available": True, "name": "Send", "sources": [{"kind": "manual"}], "input_schema": {"type": "object", "properties": {"message": {"type": "string"}, "notify": {"type": "boolean", "default": False}}, "required": ["message"]}}
-        inventory = {"kn_id": "kn", "bindings": [binding, {**binding, "id": "mount2"}, {**binding, "id": "logic", "sources": [{"kind": "object_type"}]}, {**binding, "id": "skill", "capability_type": "skill"}]}
-        converted, report = plan_manual_mounts(inventory)
-        self.assertFalse(report["errors"])
-        self.assertEqual(1, len(converted["entries"]))
-        self.assertEqual(2, len(report["skipped"]))
-        self.assertEqual(report["mapping"][0]["action_id"], report["mapping"][1]["action_id"])
-        self.assertIs(converted["entries"][0]["parameters"][1]["value"], False)
-        self.assertEqual((converted, report), plan_manual_mounts(inventory))
-        inventory["action_types"] = converted["entries"]
-        empty, repeated = plan_manual_mounts(inventory)
-        self.assertEqual([], empty["entries"])
-        self.assertEqual("existing", repeated["mapping"][0]["result"])
-        inventory["bindings"][0] = {**binding, "input_schema": None}
-        inventory["action_types"] = []
-        _, failed = plan_manual_mounts(inventory)
-        self.assertTrue(failed["errors"])
 
     def test_implicit_mcp_inputs_require_an_explicit_tool_schema_snapshot(self):
         action = self.old_action(False)
