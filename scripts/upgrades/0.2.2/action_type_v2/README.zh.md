@@ -1,6 +1,6 @@
 # OpenBKN 0.2.2 行动类定义一次性迁移
 
-本目录是从旧行动类切换到 `object`、`relation`、`tool` 操作模型的一次性数据迁移入口。它属于 `openbkn-deploy` 升级工具，不随业务模块启动，也不会由 Helm 自动执行。先升级 `bkn-foundry` 的 `migrations/bkn-backend/mariadb/0.2.2/02-action-operation.sql` 结构，再迁移数据；所有服务应在数据迁移完成后统一切换到新行动模型。
+本目录是从旧行动类切换到 `object`、`relation`、`tool` 操作模型的一次性数据迁移入口。它属于 `openbkn-deploy` 升级工具，不随业务模块启动，也不会由 Helm 自动执行。先升级 `bkn-foundry` 的 `migrations/bkn-backend/mariadb/0.2.2/02-action-operation.sql` 结构，再迁移数据；所有服务应在数据迁移完成后统一切换到新行动模型。迁移范围仅为已有行动类定义；动力模型中手工挂载的 Function、API、MCP 保持独立，不会转换为行动类，也不会被删除。
 
 ## 预检与执行
 
@@ -63,7 +63,7 @@ python3 migrate_action_definitions.py \
 
 如需只使用指定快照，可运行 `--rollback /path/to/snapshot.json --apply`。预检计划会随重复预检更新；正式执行的回滚快照不会被后续预检覆盖。回滚快照含旧参数值，应按敏感备份保管。
 
-`--kn-id` 可限制单个知识网络预检；正式切换前仍需对全库预检。`--input` 可离线转换 JSON 导出，`--mounts` 可离线规划历史能力挂载的候选行动；两者都不会写数据库。
+`--kn-id` 可限制单个知识网络预检；正式切换前仍需对全库预检。`--input` 可离线转换已有行动类的 JSON 导出，不会写数据库。历史能力挂载不属于本工具的迁移范围。
 
 ## 测试
 
