@@ -1,0 +1,132 @@
+# OpenBKN Foundry — 可选 BKN Trace 栈
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.trace.yml up -d
+#
+# 说明：
+#   - 两个镜像都是 distroless（无 shell/curl），无法配置容器内 healthcheck，
+#     用 restart + 消费方重试兜底。
+#   - 8081 是无鉴权的内部控制面，不映射到宿主；容器间通过服务名访问。
+#   - 主栈的 Kafka 已提供 SASL_PLAINTEXT 19092 监听，但 trace evidence/audit 消费
+#     还要求 topic 预建与凭据注入；为保证 base 栈可独立启动，这里显式关闭
+#     evidence/audit 的 Kafka 通路，仅保留 OTLP + OpenSearch + MariaDB 落盘。
+#   - bkn_trace 库由 data-migrator 的 config.monorepo.yaml databases 预先创建。
+
+services:
+  agent-observability:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/agent-observability:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-agent-observability
+    restart: unless-stopped
+    stop_grace_period: 40s
+    networks:
+      - openbkn
+    ports:
+      # 公开 API；内部 8081 不对外，避免 unsigned 控制面暴露
+      - "${TRACE_HTTP_HOST_PORT:-18080}:8080"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      bkn-safe:
+        condition: service_started
+      hydra:
+        condition: service_started
+    environment:
+      BKN_TRACE_HTTP_ADDRESS: ":8080"
+      BKN_TRACE_INTERNAL_HTTP_ADDRESS: ":8081"
+      BKN_TRACE_LOG_LEVEL: info
+      OPENSEARCH_ENDPOINT: http://opensearch:9200
+      OPENSEARCH_TRACE_INDEX: ss4o_traces-default-namespace
+      OPENSEARCH_LOG_INDEX: ss4o_logs-default-namespace
+      OPENSEARCH_TRACE_TIMESTAMP_PIPELINE: ""
+      OPENSEARCH_EVIDENCE_INDEX: bkn-trace-evidence-v2
+      OPENSEARCH_AUTH_ENABLED: "true"
+      OPENSEARCH_AUTH_USERNAME: admin
+      OPENSEARCH_AUTH_PASSWORD: ${OPENSEARCH_PASSWORD:-OpenBKN_Admin123!}
+      BKN_TRACE_EVIDENCE_STORE: opensearch
+      # budget 的第四个来源是 MariaDB 连接池，memory store 会让 admission 永久不可用
+      BKN_TRACE_CORE_STORE: mariadb
+      BKN_TRACE_CORE_MARIADB_DSN: root:${MARIADB_ROOT_PASSWORD:-openbkn}@tcp(mariadb:3306)/bkn_trace?parseTime=true&multiStatements=true
+      BKN_TRACE_CORE_AUTO_MIGRATE: "true"
+      BKN_TRACE_DURABLE_ANSWER_ENABLED: "false"
+      BKN_TRACE_CORE_ABANDON_INTERVAL: 30s
+      BKN_TRACE_CORE_ONE_SHOT_IDLE_TTL: 15m
+      BKN_TRACE_CORE_MAX_OPERATIONS_PER_INTERACTION: "256"
+      BKN_TRACE_CORE_MAX_CLAIMS_PER_INTERACTION: "32"
+      BKN_TRACE_CORE_MAX_EVIDENCE_REFS_PER_INTERACTION: "4096"
+      BKN_TRACE_EVIDENCE_COLLECTION_STATE: enabled
+      BKN_TRACE_EVIDENCE_INITIAL_STATE: enabled
+      BKN_TRACE_CAPTURE_POLICY_SNAPSHOT_TTL: 15m
+      BKN_TRACE_PROJECTION_ENABLED: "true"
+      BKN_TRACE_HISTORICAL_PROVENANCE_ENABLED: "false"
+      BKN_TRACE_PROJECTION_INDEX: bkn-trace-core
+      BKN_TRACE_PROJECTION_INTERVAL: 1s
+      BKN_TRACE_PROJECTION_LOCK_DURATION: 30s
+      BKN_TRACE_PROJECTION_LEASE_IO_TIMEOUT: 2s
+      BKN_TRACE_ANSWER_TASK_IO_TIMEOUT: 10s
+      BKN_TRACE_ANSWER_ACK_IO_TIMEOUT: 2s
+      # PLAINTEXT Kafka 下必须全部关闭
+      BKN_TRACE_EVIDENCE_KAFKA_ENABLED: "false"
+      BKN_TRACE_AUDIT_KAFKA_ENABLED: "false"
+      BKN_AUDIT_KAFKA_ENABLED: "false"
+      BKN_TRACE_ALLOW_UNAUTHENTICATED_INGEST: "false"
+      BKN_TRACE_ALLOW_UNAUTHENTICATED_QUERY: "false"
+      BKN_TRACE_EVIDENCE_INGEST_TOKEN: ${TRACE_EVIDENCE_INGEST_TOKEN:-change-me-trace-evidence-token}
+      BKN_TRACE_HYDRA_ADMIN_URL: http://hydra:4445
+      BKN_TRACE_PUBLIC_LIFECYCLE_ENABLED: "true"
+      BKN_OBSERVABILITY_CURSOR_SIGNING_KEY: ${BKN_OBSERVABILITY_CURSOR_SIGNING_KEY:-}
+      BKN_SAFE_BASE_URL: http://bkn-safe:3000
+      BKN_SAFE_URL: http://bkn-safe:3000
+      BKN_SAFE_ACCESS_TIMEOUT: 3s
+      BKN_TRACE_BKN_RESOLVER_URL: http://bkn-backend:13014
+      BKN_TRACE_VEGA_RESOLVER_URL: http://vega-backend:13014
+      BKN_TRACE_EXECUTION_FACTORY_URL: http://agent-operator-integration:9000
+      BKN_TRACE_MODEL_MANAGER_URL: http://mf-model-manager:9898
+      BKN_TRACE_RESOLVER_TIMEOUT: 3s
+      BKN_OBSERVABILITY_SOURCE_TIMEOUT: 3s
+      BKN_OBSERVABILITY_MAX_CONCURRENT_SOURCES: "4"
+      BKN_TRACE_ADMISSION_BUDGET_PROFILE: default
+      BKN_TRACE_ADMISSION_COLLECTOR_METRICS_ENDPOINT: http://otelcol-contrib:8888/metrics
+      BKN_TRACE_ADMISSION_OPENSEARCH_CAPACITY_THRESHOLD: "0.90"
+      BKN_TRACE_ADMISSION_OPENSEARCH_HEAP_THRESHOLD: "0.90"
+      BKN_TRACE_ADMISSION_COLLECTOR_QUEUE_THRESHOLD: "0.90"
+      BKN_TRACE_ADMISSION_STORAGE_POOL_THRESHOLD: "0.90"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  otelcol-contrib:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/otelcol-openbkn:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-otelcol-contrib
+    restart: unless-stopped
+    command: ["--config=/conf/collector-config.yaml"]
+    networks:
+      - openbkn
+    ports:
+      - "127.0.0.1:${OTLP_GRPC_HOST_PORT:-14317}:4317"
+      - "127.0.0.1:${OTLP_HTTP_HOST_PORT:-14318}:4318"
+    volumes:
+      - ./config/otelcol-contrib/collector-config.yaml:/conf/collector-config.yaml:ro
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      agent-observability:
+        condition: service_started
+    environment:
+      OPENSEARCH_AUTH_USERNAME: admin
+      OPENSEARCH_AUTH_PASSWORD: ${OPENSEARCH_PASSWORD:-OpenBKN_Admin123!}
+      TRACE_ADMISSION_POLICY_URL: http://agent-observability:8081/api/agent-observability/v1/internal/trace-evidence/policy
+      TRACE_ADMISSION_CONFIGURATION_URL: http://agent-observability:8081/api/agent-observability/v1/internal/trace-evidence/configuration
+      TRACE_ADMISSION_HEARTBEAT_URL: http://agent-observability:8081/api/agent-observability/v1/internal/trace-evidence/endpoints:heartbeat
+      TRACE_ADMISSION_ACK_URL_BASE: http://agent-observability:8081/api/agent-observability/v1/internal/trace-evidence/operations
+      TRACE_ADMISSION_WORKLOAD_IDENTITY: trace-gateway
+      TRACE_ADMISSION_POLL_INTERVAL: 10s
+      TRACE_ADMISSION_HTTP_TIMEOUT: 3s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 768M
