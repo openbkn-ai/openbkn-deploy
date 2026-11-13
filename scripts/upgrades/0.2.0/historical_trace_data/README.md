@@ -9,3 +9,5 @@
 Audit 发布后最多统一回读 5 轮，共享 8 秒回读窗口，轮间退避为 1、2、4 秒（最后一次等待不超过剩余窗口）。每轮复用 `fetch_audits()`，只查询未确认项；数据库调用耗时也计入窗口，但不打断已在执行的查询。到期未确认项记为 `publication_requires_readback`，不会算作迁移成功。
 
 `progress.json` 的 `audit_total`、`audit_already_verified`、`audit_published`、`audit_verified`、`audit_pending`、`audit_retained`、`audit_readback_round` 和 `audit_readback_elapsed_seconds` 表示当前批次。`audit_published` 统计 Kafka 已确认数量，`audit_verified` 包含发布前已确认项；`report.md` 汇总所有批次的 Audit 数量。
+
+历史终态载荷外层 `_trace_evidence_completion` 的转换合同、纯离线受影响记录盘点以及需要单独批准的存量恢复步骤，见 [历史终态元数据排查与恢复](terminal-completion-recovery.md)。
