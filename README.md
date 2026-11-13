@@ -148,6 +148,7 @@ sudo bash ./deploy.sh openbkn install
 # Or specify addresses explicitly (skips interactive prompts):
 #   --access_address       Address for clients to reach OpenBKN services (can be IP or domain)
 #   --api_server_address   IP bound to a local network interface for K8s API server (must be a real NIC IP)
+#                          Also used for the local control plane and local etcd when initializing a kubeadm cluster
 sudo bash ./deploy.sh openbkn install \
   --access_address=<your-ip> \
   --api_server_address=<your-ip>

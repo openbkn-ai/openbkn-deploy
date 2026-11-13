@@ -84,6 +84,34 @@ check_prerequisites() {
     log_info "Prerequisites check passed"
 }
 
+# Render the kubeadm configuration. A supplied local address pins kubeadm's
+# node-local endpoint as well as the shared control plane endpoint.
+write_kubeadm_config() {
+    local local_address="${1:-}"
+    cat <<EOF
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+EOF
+    if [[ -n "${local_address}" ]]; then
+        printf 'localAPIEndpoint:\n  advertiseAddress: %s\n' "${local_address}"
+    fi
+    cat <<EOF
+nodeRegistration:
+  criSocket: unix:///var/run/containerd/containerd.sock
+  kubeletExtraArgs:
+    pod-infra-container-image: ${IMAGE_REPOSITORY}/pause:3.9
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: stable-1.28
+controlPlaneEndpoint: ${API_SERVER_ADVERTISE_ADDRESS}:6443
+networking:
+  podSubnet: ${POD_CIDR}
+  serviceSubnet: ${SERVICE_CIDR}
+imageRepository: ${IMAGE_REPOSITORY}
+EOF
+}
+
 # Initialize Kubernetes master node
 init_k8s_master() {
     log_info "Initializing Kubernetes master node..."
@@ -116,6 +144,7 @@ init_k8s_master() {
     # Resolve API server advertise address
     # This must be a real IP bound to a local network interface (not a domain
     # or NAT public IP), because kubeadm binds the API server to it.
+    local explicit_api_address="${API_SERVER_ADVERTISE_ADDRESS}"
     if [[ -z "${API_SERVER_ADVERTISE_ADDRESS}" ]]; then
         API_SERVER_ADVERTISE_ADDRESS=$(hostname -I | awk '{print $1}')
     fi
@@ -148,23 +177,7 @@ init_k8s_master() {
     # Create kubeadm config file to specify image repository
     log_info "Creating kubeadm configuration file..."
     mkdir -p /tmp/kubeadm
-    cat > /tmp/kubeadm/config.yaml <<EOF
-apiVersion: kubeadm.k8s.io/v1beta3
-kind: InitConfiguration
-nodeRegistration:
-  criSocket: unix:///var/run/containerd/containerd.sock
-  kubeletExtraArgs:
-    pod-infra-container-image: ${IMAGE_REPOSITORY}/pause:3.9
----
-apiVersion: kubeadm.k8s.io/v1beta3
-kind: ClusterConfiguration
-kubernetesVersion: stable-1.28
-controlPlaneEndpoint: ${API_SERVER_ADVERTISE_ADDRESS}:6443
-networking:
-  podSubnet: ${POD_CIDR}
-  serviceSubnet: ${SERVICE_CIDR}
-imageRepository: ${IMAGE_REPOSITORY}
-EOF
+    write_kubeadm_config "${explicit_api_address}" > /tmp/kubeadm/config.yaml
     
     # Final CRI check before init
     if ! crictl info &>/dev/null; then
