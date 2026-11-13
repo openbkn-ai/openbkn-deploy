@@ -85,7 +85,25 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -r historical_trace_data/requirements.txt
-      - run: python -m unittest discover -s historical_trace_data -p 'test_*.py'
+      - uses: actions/checkout@v4
+        with:
+          repository: openbkn-ai/bkn-foundry
+          # Immutable native strict-import/storage-codec contract for deploy #82.
+          ref: 9a0a0a26c1efd2119b8f9a54b10e06d45863de97
+          path: _trace-foundry
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.9'
+      - name: Build pinned offline native Core validator
+        working-directory: _trace-foundry/bkn-trace/agent-observability
+        run: |
+          go build -o "$RUNNER_TEMP/trace-core-validator" ./cmd/historical-data-validate
+          go version -m "$RUNNER_TEMP/trace-core-validator"
+          sha256sum "$RUNNER_TEMP/trace-core-validator"
+      - name: Verify conversion with native strict Core preflight
+        env:
+          BKN_TEST_CORE_VALIDATOR: ${{ runner.temp }}/trace-core-validator
+        run: python -m unittest discover -s historical_trace_data -p 'test_*.py'
       - uses: actions/setup-go@v5
         with:
           go-version-file: scripts/upgrades/0.2.0/historical_trace_data/span-codec/go.mod

@@ -10,7 +10,8 @@ import json
 import re
 
 from native_core import _id
-from snapshot import canonical
+from snapshot import canonical, strict_loads
+from terminal_payload import restore_completion
 
 TABLES = {
     'conversations': 'bkn_trace_conversations', 'interactions': 'bkn_trace_interactions',
@@ -24,11 +25,11 @@ TABLES = {
 OWNER_FIELDS = ('application_principal_id', 'effective_subject_type', 'effective_subject_id', 'delegation_id')
 
 
-def _json(value):
+def _json(value, loads=json.loads):
     if isinstance(value, bytes): value = value.decode('utf-8')
     if isinstance(value, str):
         if value.startswith('0x'): value = bytes.fromhex(value[2:]).decode('utf-8')
-        return json.loads(value)
+        return loads(value)
     return copy.deepcopy(value)
 
 
@@ -141,8 +142,12 @@ def plan_core_history(source):
         'input_payload', 'output_payload', 'error_payload', 'request_id', 'trace_id', 'span_id',
         'started_at', 'finished_at', 'status', 'retryable'),
         rename={'attempt_no': 'attempt', 'input_payload': 'input', 'output_payload': 'output', 'error_payload': 'error'},
-        json_fields=('capability_profile', 'input_payload', 'output_payload', 'error_payload'),
+        json_fields=('capability_profile', 'input_payload'),
         time_fields=('started_at', 'finished_at'), bool_fields=('retryable',))
+    for call, row in zip(core['call_facts'], rows['call_facts']):
+        for field in ('output', 'error'):
+            call[field] = _json(row.get(field + '_payload'), loads=strict_loads)
+        restore_completion(call)
     core['idempotency_records'] = _convert(rows['idempotency_records'], (
         'scope', 'external_conversation_key', 'idempotency_key', 'request_hash', 'resource_type',
         'resource_id', 'created_at'), time_fields=('created_at',))
