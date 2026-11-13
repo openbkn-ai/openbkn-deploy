@@ -24,6 +24,8 @@ def completion():
 
 def wrapped_source(field='output_payload', metadata=None):
     source = fixture()
+    # Native SQL requires a distinct operation key for the synthetic parent.
+    source['bkn_trace_operations'][0]['operation_key'] = 'synthetic-parent-key'
     call = source['bkn_trace_operation_call_facts'][0]
     payload = strict_loads(call['output_payload'])
     payload['_trace_evidence_completion'] = completion() if metadata is None else metadata
