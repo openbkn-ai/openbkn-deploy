@@ -187,6 +187,8 @@ def prepare(args):
     old = json.loads(base64.b64decode(saved["data"]["profile.json"], validate=True)) if saved else None
     profile = read(args.profile) if args.profile else old
     if profile is None:
+        if getattr(args, "image_tag", ""):
+            raise ValueError("--image-tag requires an enterprise runtime profile")
         return
     chart_versions = dict(item.split("=", 1) for item in getattr(args, "chart_versions", []))
     validate(profile, args.version, args.releases, chart_versions)

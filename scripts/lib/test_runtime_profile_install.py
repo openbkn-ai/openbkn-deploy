@@ -235,6 +235,14 @@ data:
         self.assertIn("0.2.3", result.stderr)
         self.assertEqual(before, self.load()["writes"])
 
+    def test_explicit_tag_only_applies_to_profile_owned_image(self):
+        tag = "0.2.2-main.20261117120000.sha2222222"
+        result = self.install(image_tag=tag)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        renders = self.load()["renders"]
+        self.assertIn(tag, renders["bkn-backend"])
+        self.assertNotIn(tag, renders["agent-retrieval"])
+
     def test_corrupt_retained_keys_stop_the_normal_installer_before_any_workload_changes(self):
         self.assertEqual(self.install().returncode, 0)
         state = self.load()
