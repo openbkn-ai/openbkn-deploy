@@ -66,6 +66,8 @@ elif tool=='helm' and args[:2]==['upgrade','--install']:
             env.append({'name':name,'value':value})
         state['revision']+=1
         state['objects']['deployment|'+workload['name']]={'metadata':{'resourceVersion':str(state['revision'])},'spec':{'template':{'spec':{'containers':[{'name':workload['container'],'env':env}]}}}}
+elif tool=='skopeo' and args[0]=='list-tags':
+    print(json.dumps({'Tags': json.loads(os.environ['RUNTIME_TEST_TAGS'])}))
 else: raise SystemExit('Unexpected fixture command: '+tool+' '+args[0])
 path.write_text(json.dumps(state));path.chmod(0o600)
 '''
@@ -80,7 +82,7 @@ class RuntimeInstallerTest(unittest.TestCase):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.helm = shutil.which("helm")
-        for tool in ("kubectl", "helm"):
+        for tool in ("kubectl", "helm", "skopeo"):
             executable = self.bin / tool
             executable.write_text(SHIM)
             executable.chmod(0o700)
@@ -122,8 +124,8 @@ _openbkn_resolve_target_namespace(){ echo isolated; }
 _openbkn_resolve_charts_dir(){ [[ "$RUNTIME_TEST_MODE" != local ]] || echo "$RUNTIME_TEST_CHARTS"; }
 _openbkn_release_names(){ printf 'bkn-backend\nagent-retrieval\n'; }
 _openbkn_release_exists(){ return 1; }
-_openbkn_resolve_release_version(){ echo 0.2.2; }; _openbkn_resolve_chart_name(){ echo "$1"; }
-_manifest_read_top_level_field(){ echo 0.2.2; }
+_openbkn_resolve_release_version(){ echo "$RUNTIME_TEST_CHART_VERSION"; }; _openbkn_resolve_chart_name(){ echo "$1"; }
+_manifest_read_top_level_field(){ echo "$RUNTIME_TEST_MANIFEST_VERSION"; }
 _openbkn_trace_kafka_brokers(){ echo broker:9092; }
 should_skip_upgrade_same_chart_version(){ return 0; }
 _openbkn_drop_literal_env_now_from_secret(){ :; }
@@ -142,6 +144,8 @@ ONBOARD_SKIP_OSS_STORAGE=true
 HELM_CHART_VERSION=0.2.2
 HELM_CHART_REPO_NAME=fixture
 CORE_RUNTIME_PROFILE="$RUNTIME_TEST_INPUT"
+CORE_LATEST_SELECTED_BRANCH="$RUNTIME_TEST_LATEST_BRANCH"
+CORE_IMAGE_TAG="$RUNTIME_TEST_IMAGE_TAG"
 install_openbkn
 ''')
 
@@ -163,12 +167,16 @@ data:
 ''')
         return chart
 
-    def install(self, mode="local", provided=True):
+    def install(self, mode="local", provided=True, manifest_version="0.2.2", chart_version="0.2.2",
+                latest_branch="", image_tag=""):
         env = {**os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
                "RUNTIME_TEST_ROOT": str(ROOT), "RUNTIME_TEST_STATE": str(self.state), "RUNTIME_TEST_HELM": self.helm,
                "RUNTIME_TEST_MODE": mode, "RUNTIME_TEST_CHARTS": str(self.charts), "RUNTIME_TEST_CONFIG": str(self.config),
                "RUNTIME_TEST_INPUT": str(self.input) if provided else "", "RUNTIME_TEST_PROFILE_JSON": json.dumps(self.profile),
-               "RUNTIME_TEST_BACKEND_CHART": self.chart_paths["bkn-backend"], "RUNTIME_TEST_RETRIEVAL_CHART": self.chart_paths["agent-retrieval"]}
+               "RUNTIME_TEST_BACKEND_CHART": self.chart_paths["bkn-backend"], "RUNTIME_TEST_RETRIEVAL_CHART": self.chart_paths["agent-retrieval"],
+               "RUNTIME_TEST_MANIFEST_VERSION": manifest_version, "RUNTIME_TEST_CHART_VERSION": chart_version,
+               "RUNTIME_TEST_LATEST_BRANCH": latest_branch, "RUNTIME_TEST_IMAGE_TAG": image_tag,
+               "RUNTIME_TEST_TAGS": json.dumps(["0.2.2-main.20261117010000.sha1111111", "0.2.2-main.20261117120000.sha2222222", "0.2.3-main.20261116010000.sha3333333"]) }
         return subprocess.run(["bash", str(self.script)], env=env, capture_output=True, text=True, timeout=90)
 
     def load(self):
@@ -193,6 +201,39 @@ data:
                 self.assertIn(expected_registry, state["renders"]["bkn-backend"])
                 for value in keys.values():
                     self.assertNotIn(value, first.stdout + first.stderr + again.stdout + again.stderr)
+
+    def test_saved_profile_main_latest_selects_enterprise_tag_without_rotating_keys(self):
+        for mode in ("local", "repo"):
+            with self.subTest(mode=mode):
+                self.state.write_text(json.dumps({"objects": {}, "values": {}, "renders": {}, "writes": [], "revision": 0}))
+                first = self.install(mode)
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                state = self.load()
+                key_name = self.profile["secrets"][0]["name"]
+                keys = copy.deepcopy(state["objects"]["secret|" + key_name]["data"])
+                legacy = copy.deepcopy(self.profile)
+                state["objects"]["secret|openbkn-runtime-profile"]["data"]["profile.json"] = base64.b64encode(json.dumps(legacy).encode()).decode()
+                before = len(state["writes"])
+                self.state.write_text(json.dumps(state))
+                latest = self.install(mode, provided=False, manifest_version="main",
+                                      chart_version="0.2.2-main.20261117100000.sha5555555", latest_branch="main")
+                self.assertEqual(latest.returncode, 0, latest.stdout + latest.stderr)
+                state = self.load()
+                self.assertEqual(state["objects"]["secret|" + key_name]["data"], keys)
+                self.assertIn("helm upgrade bkn-backend", state["writes"][before:])
+                self.assertIn("0.2.2-main.20261117120000.sha2222222", state["renders"]["bkn-backend"])
+                saved = json.loads(base64.b64decode(state["objects"]["secret|openbkn-runtime-profile"]["data"]["profile.json"]))
+                self.assertNotIn("tag", saved["releases"]["bkn-backend"]["values"]["image"])
+
+    def test_saved_profile_main_rejects_other_release_before_writes(self):
+        self.assertEqual(self.install().returncode, 0)
+        before = self.load()["writes"]
+        result = self.install(provided=False, manifest_version="main",
+                              chart_version="0.2.3-main.20261117100000.sha5555555", latest_branch="main")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("0.2.2", result.stderr)
+        self.assertIn("0.2.3", result.stderr)
+        self.assertEqual(before, self.load()["writes"])
 
     def test_corrupt_retained_keys_stop_the_normal_installer_before_any_workload_changes(self):
         self.assertEqual(self.install().returncode, 0)
