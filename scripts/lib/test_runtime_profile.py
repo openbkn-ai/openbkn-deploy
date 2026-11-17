@@ -100,6 +100,12 @@ class RuntimeProfileTest(unittest.TestCase):
         self.assertFalse((self.root / "profile.json").exists())
         self.assertFalse(any(args[1] in ("create", "replace", "patch") for args, _ in self.cluster.calls))
 
+    def test_explicit_image_tag_requires_runtime_profile(self):
+        self.args.profile = ""
+        self.args.image_tag = "0.2.2-main.20261117120000.sha2222222"
+        with self.assertRaisesRegex(ValueError, "requires an enterprise runtime profile"):
+            runtime.prepare(self.args)
+
     def test_new_install_stages_keys_without_cluster_writes_then_persists_profile(self):
         values = self.prepare()
         self.assertEqual(values["namespace"], "isolated")
