@@ -43,6 +43,7 @@ class Cluster:
         self.calls = []
         self.render = "PROVIDER_ENABLED provider-keys sample"
         self.denied = False
+        self.tags = []
 
     def run(self, args, payload=None):
         self.calls.append((args, payload))
@@ -58,6 +59,8 @@ class Cluster:
             return json.dumps(self.values[args[3]])
         if args[:2] == ["helm", "template"]:
             return self.render
+        if args[:2] == ["skopeo", "list-tags"]:
+            return json.dumps({"Tags": self.tags})
         if args[0] == "kubectl" and args[1] in ("create", "replace"):
             resource = json.loads(payload)
             kind = resource["kind"].lower()
@@ -125,6 +128,67 @@ class RuntimeProfileTest(unittest.TestCase):
         self.args.profile = ""
         self.prepare()
         self.assertEqual(runtime.read(self.root / "pending-secrets.json"), [])
+
+    def test_saved_legacy_profile_follows_main_build_and_keeps_keys(self):
+        legacy = copy.deepcopy(self.desired)
+        legacy["platformVersion"] = "0.2.2"
+        legacy["releases"]["provider"]["values"]["image"]["tag"] = "0.2.2"
+        self.cluster.objects[("secret", runtime.STATE_NAME)] = {
+            "apiVersion": "v1", "kind": "Secret",
+            "metadata": {"name": runtime.STATE_NAME, "namespace": "isolated", "resourceVersion": "3"},
+            "data": {"profile.json": base64.b64encode(json.dumps(legacy).encode()).decode()}}
+        self.cluster.objects[("secret", "provider-keys")] = self.secret()
+        self.cluster.tags = ["0.2.2-main.20261117000000.sha1111111",
+                             "0.2.2-main.20261117120000.sha2222222",
+                             "0.2.3-main.20261116000000.sha3333333",
+                             "0.2.2-release-0.2.2.20261118000000.sha4444444"]
+        self.args.profile = ""
+        self.args.version = "main"
+        self.args.chart_versions = ["provider=0.2.2-main.20261117000000.sha1111111", "loader=0.2.1"]
+        self.args.latest_branch = "main"
+        values = self.prepare()
+        self.assertEqual(values["image"]["tag"], "0.2.2-main.20261117120000.sha2222222")
+        self.assertNotIn("tag", runtime.read(self.root / "profile.json")["releases"]["provider"]["values"]["image"])
+        self.assertEqual(runtime.read(self.root / "pending-secrets.json"), [])
+        runtime.apply(self.args)
+        self.assertEqual(self.cluster.objects[("secret", "provider-keys")]["data"], self.secret()["data"])
+
+    def test_release_install_drops_legacy_tag_and_explicit_tag_wins(self):
+        values = self.prepare()
+        self.assertNotIn("tag", values["image"])
+        runtime.apply(self.args)
+        saved = json.loads(base64.b64decode(self.cluster.objects[("secret", runtime.STATE_NAME)]["data"]["profile.json"]))
+        self.assertNotIn("tag", saved["releases"]["provider"]["values"]["image"])
+        self.args.image_tag = "chosen-build"
+        self.args.latest_branch = "main"
+        values = self.prepare()
+        self.assertEqual(values["image"]["tag"], "chosen-build")
+        self.assertFalse(any(args[0] == "skopeo" for args, _ in self.cluster.calls))
+
+    def test_main_rejects_cross_release_profile_before_writes(self):
+        self.args.version = "main"
+        self.args.chart_versions = ["provider=2.0.0-main.20261117000000.sha1111111", "loader=1.0"]
+        with self.assertRaisesRegex(ValueError, "1.0.*provider=2.0.0"):
+            self.prepare()
+        self.assertFalse(any(args[1] in ("create", "replace", "patch") for args, _ in self.cluster.calls))
+
+    def test_latest_rejects_enterprise_image_from_another_release(self):
+        self.desired["platformVersion"] = "0.2.2"
+        runtime.write(self.input, self.desired)
+        self.args.version = "main"
+        self.args.chart_versions = ["provider=0.2.2-main.20261117000000.sha1111111"]
+        self.args.latest_branch = "main"
+        self.cluster.tags = ["0.2.2-main.20261117000000.sha1111111",
+                             "0.2.3-main.20261118000000.sha2222222"]
+        with self.assertRaisesRegex(ValueError, "0.2.3-main.*0.2.2"):
+            self.prepare()
+        self.assertFalse(any(args[1] in ("create", "replace", "patch") for args, _ in self.cluster.calls))
+
+    def test_release_branch_uses_its_own_timestamped_image(self):
+        self.cluster.tags = ["0.2.2-main.20261118000000.sha1111111",
+                             "0.2.2-release-0.2.2.20261117000000.sha2222222"]
+        self.assertEqual(runtime.newest_image_tag(self.desired["releases"]["provider"]["values"]["image"], "release/0.2.2"),
+                         "0.2.2-release-0.2.2.20261117000000.sha2222222")
 
     def test_live_manual_keys_are_retained_and_normalized_to_secret_references(self):
         self.cluster.objects[("deployment", "provider")] = {

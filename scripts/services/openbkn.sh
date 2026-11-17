@@ -9,6 +9,8 @@ CORE_NAMESPACE_FROM_CLI="${CORE_NAMESPACE_FROM_CLI:-false}"
 CORE_LOCAL_CHARTS_DIR="${CORE_LOCAL_CHARTS_DIR:-}"
 CORE_VERSION_MANIFEST_FILE="${CORE_VERSION_MANIFEST_FILE:-}"
 CORE_RUNTIME_PROFILE="${CORE_RUNTIME_PROFILE:-}"
+CORE_IMAGE_TAG="${CORE_IMAGE_TAG:-}"
+CORE_LATEST_SELECTED_BRANCH=""
 
 # --registry=<swr|ghcr|FULL>: alias for image.registry. Empty means "not set on
 # CLI"; the swr default is applied in _openbkn_apply_default_set_values only when the
@@ -94,6 +96,16 @@ parse_openbkn_args() {
                 CORE_RUNTIME_PROFILE="$2"
                 shift 2
                 ;;
+            --image-tag=*)
+                CORE_IMAGE_TAG="${1#*=}"
+                [[ -n "${CORE_IMAGE_TAG}" ]] || { log_error '--image-tag requires a tag'; return 1; }
+                shift
+                ;;
+            --image-tag)
+                [[ $# -ge 2 && -n "$2" ]] || { log_error '--image-tag requires a tag'; return 1; }
+                CORE_IMAGE_TAG="$2"
+                shift 2
+                ;;
             --registry=*)
                 CORE_IMAGE_REGISTRY="${1#*=}"
                 shift
@@ -174,6 +186,10 @@ parse_openbkn_args() {
                 ;;
         esac
     done
+    if [[ -n "${CORE_IMAGE_TAG}" ]]; then
+        [[ "${CORE_IMAGE_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { log_error 'Invalid --image-tag'; return 1; }
+        CORE_SET_VALUES+=("image.tag=${CORE_IMAGE_TAG}")
+    fi
 }
 
 # Target namespace: explicit --namespace overrides `namespace:` in CONFIG_YAML_PATH (avoids uninstall missing releases when YAML drifted from the cluster).
@@ -2204,6 +2220,7 @@ _openbkn_resolve_latest_manifest() {
         return 1
     fi
     CORE_VERSION_MANIFEST_FILE="${tmp_manifest}"
+    CORE_LATEST_SELECTED_BRANCH="$(git -C "${SCRIPT_DIR}" symbolic-ref --quiet --short HEAD)" || return 1
     log_info "--latest: using generated manifest ${CORE_VERSION_MANIFEST_FILE}"
 }
 
@@ -2485,12 +2502,19 @@ _openbkn_has_runtime_values() {
 }
 
 _openbkn_prepare_runtime_profile() {
-    local namespace="$1" version
+    local namespace="$1" version chart_version
     shift
+    local release
+    local -a chart_versions=()
+    for release in "$@"; do
+        chart_version="$(_openbkn_resolve_release_version "${release}")" || return 1
+        chart_versions+=(--chart-version "${release}=${chart_version}")
+    done
     _OPENBKN_RUNTIME_DIR="$(mktemp -d)" || return 1
     chmod 700 "${_OPENBKN_RUNTIME_DIR}"
     version="$(_manifest_strip_quotes "$(_manifest_read_top_level_field "${CORE_VERSION_MANIFEST_FILE}" version)")"
     python3 "${SCRIPT_DIR}/scripts/lib/runtime_profile.py" prepare \
         --state "${_OPENBKN_RUNTIME_DIR}" --namespace "${namespace}" \
-        --profile "${CORE_RUNTIME_PROFILE:-}" --version "${version}" --releases "$@"
+        --profile "${CORE_RUNTIME_PROFILE:-}" --version "${version}" --releases "$@" \
+        "${chart_versions[@]}" --latest-branch "${CORE_LATEST_SELECTED_BRANCH}" --image-tag "${CORE_IMAGE_TAG}"
 }

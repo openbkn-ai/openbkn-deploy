@@ -18,6 +18,7 @@ STATE_NAME = "openbkn-runtime-profile"
 API = "deploy.openbkn.ai/runtime-profile/v1"
 NAME = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\Z")
 MISSING = object()
+BUILD_TAG = re.compile(r"(?P<version>\d+\.\d+\.\d+)-(?P<branch>[a-z0-9.-]+)\.(?P<stamp>\d{14})\.sha[0-9a-f]+\Z")
 
 
 def run(args, payload=None):
@@ -63,16 +64,27 @@ def set_value(values, path, value):
     values[parts[-1]] = copy.deepcopy(value)
 
 
-def validate(profile, version, releases):
+def validate(profile, version, releases, chart_versions=None):
     if not isinstance(profile, dict) or profile.get("apiVersion") != API:
         raise ValueError("Unsupported runtime profile")
-    if profile.get("platformVersion") != version:
-        raise ValueError("Runtime profile does not match the platform version; provide the matching delivery profile")
-    if not NAME.fullmatch(profile.get("name", "")):
-        raise ValueError("Invalid runtime profile name")
     entries = profile.get("releases")
     if not isinstance(entries, dict) or not entries or set(entries) - set(releases):
         raise ValueError("Runtime profile requires releases absent from the platform manifest")
+    actual = profile.get("platformVersion")
+    if version == "main" and chart_versions:
+        image_releases = {name for name, entry in entries.items()
+                          if isinstance(entry, dict) and isinstance(entry.get("values"), dict)
+                          and entry["values"].get("image")}
+        targets = {name: chart_versions.get(name, "") for name in (image_releases or entries)}
+        mismatched = {name: target for name, target in targets.items()
+                      if target.split("-", 1)[0] != actual}
+        if mismatched:
+            detail = ", ".join(f"{name}={target or 'missing'}" for name, target in mismatched.items())
+            raise ValueError(f"Runtime profile platform version {actual} does not match target Chart versions ({detail}); provide the matching delivery profile")
+    elif actual != version:
+        raise ValueError(f"Runtime profile platform version {actual} does not match target version {version}; provide the matching delivery profile")
+    if not NAME.fullmatch(profile.get("name", "")):
+        raise ValueError("Invalid runtime profile name")
     for name, entry in entries.items():
         if not NAME.fullmatch(name) or not isinstance(entry, dict) or not isinstance(entry.get("values"), dict):
             raise ValueError("Invalid runtime release values")
@@ -147,6 +159,28 @@ def validate_secret(resource, spec):
         raise ValueError(f"Secret {spec['name']} keys must differ; restore the existing Secret")
 
 
+def newest_image_tag(image, branch):
+    registry = image.get("registry", "")
+    repository = image.get("repository", "")
+    if not registry or not repository:
+        raise ValueError("Runtime image registry and repository are required for --latest")
+    reference = f"{registry}/{repository}"
+    try:
+        tags = json.loads(run(["skopeo", "list-tags", f"docker://{reference}"]))["Tags"]
+    except FileNotFoundError:
+        raise ValueError("--latest for runtime images requires skopeo; install it or use --image-tag") from None
+    except (KeyError, TypeError, json.JSONDecodeError):
+        raise ValueError(f"Cannot list runtime image tags for {reference}") from None
+    if not isinstance(tags, list):
+        raise ValueError(f"Cannot list runtime image tags for {reference}")
+    channel = branch.replace("/", "-")
+    candidates = [(match.group("stamp"), tag) for tag in tags
+                  if isinstance(tag, str) and (match := BUILD_TAG.fullmatch(tag)) and match.group("branch") == channel]
+    if not candidates:
+        raise ValueError(f"No timestamped {branch} runtime image in {reference}; use --image-tag")
+    return max(candidates)[1]
+
+
 def prepare(args):
     directory = Path(args.state)
     saved = get("secret", STATE_NAME, args.namespace)
@@ -154,7 +188,8 @@ def prepare(args):
     profile = read(args.profile) if args.profile else old
     if profile is None:
         return
-    validate(profile, args.version, args.releases)
+    chart_versions = dict(item.split("=", 1) for item in getattr(args, "chart_versions", []))
+    validate(profile, args.version, args.releases, chart_versions)
     if old:
         validate(old, old.get("platformVersion"), args.releases)
         if old["name"] != profile["name"] or set(old["releases"]) - set(profile["releases"]):
@@ -162,6 +197,23 @@ def prepare(args):
         declarations = {item["name"]: item for item in profile.get("secrets", [])}
         if any(declarations.get(item["name"]) != item for item in old.get("secrets", [])):
             raise ValueError("Runtime key ownership changed; retain the existing key contract instead of replacing keys")
+    # Old delivery profiles may contain a package-time image tag. It is not a
+    # lasting version selection: only this install's flags may override a Chart.
+    profile = copy.deepcopy(profile)
+    image_tag = getattr(args, "image_tag", "")
+    latest_branch = getattr(args, "latest_branch", "")
+    selected_tags = {}
+    for release, entry in profile["releases"].items():
+        image = entry["values"].get("image")
+        if image is None:
+            continue
+        image.pop("tag", None)
+        if image_tag:
+            selected_tags[release] = image_tag
+        elif latest_branch:
+            selected_tags[release] = newest_image_tag(image, latest_branch)
+            if not selected_tags[release].startswith(f"{profile['platformVersion']}-"):
+                raise ValueError(f"Runtime image {release} tag {selected_tags[release]} does not match platform version {profile['platformVersion']}")
     if saved:
         write(directory / "previous-state.json", saved)
     write(directory / "profile.json", profile)
@@ -208,6 +260,8 @@ def prepare(args):
         observed[release] = copy.deepcopy(active)
         desired = copy.deepcopy(entry["values"])
         desired["namespace"] = args.namespace
+        if release in selected_tags:
+            desired["image"]["tag"] = selected_tags[release]
         for field in entry.get("valueEnv", {}):
             if field in entry.get("exclusiveValues", []):
                 continue
@@ -351,6 +405,9 @@ def main():
             command.add_argument("--profile", default="")
             command.add_argument("--version", required=True)
             command.add_argument("--releases", nargs="+", required=True)
+            command.add_argument("--chart-version", action="append", dest="chart_versions", default=[])
+            command.add_argument("--latest-branch", default="")
+            command.add_argument("--image-tag", default="")
         if name in ("render", "patch-env"):
             command.add_argument("--release", required=True)
         if name == "render":

@@ -135,6 +135,7 @@ usage() {
     echo "                                pass a host to pin, 'off' to disable. Requires root + containerd certs.d config_path."
     echo "  --version=dev | --latest      Follow newest builds for the checked-out main or release/X.Y.Z branch"
     echo "                                (default falls back to this only when no release manifest exists)."
+    echo "  --image-tag=TAG              Pin image tags for this install"
     echo "  --access_address=<addr>       OpenBKN access address: host, host:port, or scheme://host:port/path"
     echo "                                Example: --access_address=10.0.0.5 or --access_address=https://openbkn.example.com:443"
     echo "  --api_server_address=<ip>     Kubernetes API server advertise address (must be a local interface IP)"
