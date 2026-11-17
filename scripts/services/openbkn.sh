@@ -188,7 +188,6 @@ parse_openbkn_args() {
     done
     if [[ -n "${CORE_IMAGE_TAG}" ]]; then
         [[ "${CORE_IMAGE_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { log_error 'Invalid --image-tag'; return 1; }
-        CORE_SET_VALUES+=("image.tag=${CORE_IMAGE_TAG}")
     fi
 }
 
