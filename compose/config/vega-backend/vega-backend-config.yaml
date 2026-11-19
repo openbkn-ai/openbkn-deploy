@@ -1,0 +1,88 @@
+server:
+  runMode: release
+  httpPort: 13014
+  language: zh-CN
+  readTimeOut: 600
+  writeTimeOut: 600
+log:
+  logLevel: info
+  developMode: false
+  maxAge: 100
+  maxBackups: 20
+  maxSize: 100
+query:
+  cursorMaxSessions: 1000
+  cursorMaxSessionsPerAccount: 100
+otel:
+  service_name: "vega-backend"
+  environment: "production"
+  otlp_endpoint: "otelcol-contrib:4318"
+  trace:
+    enabled: false
+    sampling_rate: 1.0
+  log:
+    enabled: false
+    level: "info"
+catalogHealthCheck:
+  workerEnabled: true
+  timeout: 30s
+  cronExpr: "0 * * * *"
+indexCleanup:
+  workerEnabled: true
+  interval: 1h
+  protectionPeriod: 24h
+  maxDeletesPerRun: 100
+  dryRun: true
+taskWorker:
+  semanticWorkerCount: 1
+  discoverWorkerCount: 1
+  batchWorkerCount: 1
+  streamingWorkerCount: 1
+depServices:
+  class-443:
+    ingressClass: class-443
+  rds:
+    host: mariadb
+    port: 3306
+    user: root
+    # 保留空串：运行时由 VEGA_DB_PASSWORD env 覆盖；删除该键会 panic
+    password: ""
+    type: MariaDB
+  mq:
+    mqType: kafka
+    mqHost: kafka
+    mqPort: 19092
+    protocol: sasl_plaintext
+    tenant: default
+    auth:
+      username: admin
+      # 与 .env 的 KAFKA_SASL_PASSWORD（默认 openbkn-kafka）一致
+      password: openbkn-kafka
+      mechanism: PLAIN
+  opensearch:
+    host: opensearch
+    port: 9200
+    protocol: http
+    user: admin
+    # 该字段没有 env 覆盖入口，必须与 OPENSEARCH_PASSWORD 保持一致
+    password: OpenBKN_Admin123!
+  hydra-admin:
+    host: hydra
+    port: 4445
+    protocol: http
+  kafka-connect:
+    host: kafka-connect
+    port: 8083
+    protocol: http
+  mf-model-manager:
+    host: mf-model-manager
+    port: 9898
+    protocol: http
+  mf-model-api:
+    host: mf-model-api
+    port: 9898
+    protocol: http
+  bkn-agent:
+    host: bkn-agent
+    port: 30800
+    protocol: http

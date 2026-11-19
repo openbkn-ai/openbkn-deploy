@@ -1,0 +1,63 @@
+project:
+  language: zh-CN
+  host: "0.0.0.0"
+  port: 30779
+  sandbox_port: 30780
+  logger_level: 1
+  name: "agent-retrieval"
+  pod_id: "POD_ID"
+  machine_id: ""
+  debug: false
+concept_search_config:
+  concept_recall_size: 100
+  knn_k: 300
+  schema_read_timeout_ms: 5000
+instance_search_config:
+  min_reranker_score: 0
+  min_object_type_score_ratio: 0
+oauth:
+  public_host: "hydra"
+  public_port: 4444
+  public_protocol: "http"
+  admin_host: "hydra"
+  admin_port: 4445
+  admin_protocol: "http"
+  admin_prefix: "/admin"
+bkn_backend:
+  private_protocol: "http"
+  private_host: "bkn-backend"
+  private_port: 13014
+ontology_query:
+  private_protocol: "http"
+  private_host: "ontology-query"
+  private_port: 13018
+vega:
+  private_protocol: "http"
+  private_host: "vega-backend"
+  private_port: 13014
+operator_integration:
+  private_protocol: "http"
+  private_host: "agent-operator-integration"
+  private_port: 9000
+bkn_safe:
+  private_protocol: "http"
+  private_host: "bkn-safe"
+  private_port: 3000
+auth:
+  resource_filter_chunk_size: 200
+permission_request:
+  # 没有 Studio，关闭结果里的权限申请链接
+  disabled: true
+  path_template: "/studio/knowledge-network/workspace/{kn_id}/object-types/{ot_id}/detail?requestPermission={scope_code}"
+redis:
+  connect_type: "standalone"
+  enable_ssl: false
+  secret_name: ""
+  ca_name: ""
+  cert_name: ""
+  key_name: ""
+  pool_size: 10
+mf_model_api:
+  private_protocol: "http"
+  private_host: "mf-model-api"
+  private_port: 9898

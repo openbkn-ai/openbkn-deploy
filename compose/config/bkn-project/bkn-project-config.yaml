@@ -1,0 +1,47 @@
+server:
+  runMode: release
+  httpPort: 13016
+  language: zh-CN
+  readTimeOut: 600
+  writeTimeOut: 600
+log:
+  logLevel: info
+  developMode: false
+  maxAge: 100
+  maxBackups: 20
+  maxSize: 100
+otel:
+  service_name: "bkn-project"
+  environment: "production"
+  otlp_endpoint: "otelcol-contrib:4318"
+  trace:
+    enabled: false
+    sampling_rate: 1.0
+  log:
+    enabled: false
+    level: "info"
+gitStore:
+  # 一 lineage 一个 bare repo：/data/git/<lineage_id>.git
+  rootDir: /data/git
+depServices:
+  class-443:
+    ingressClass: class-443
+  rds:
+    host: mariadb
+    port: 3306
+    user: root
+    # 与 .env 的 MARIADB_ROOT_PASSWORD 一致
+    password: openbkn
+    type: MariaDB
+  hydra-admin:
+    host: hydra
+    port: 4445
+    protocol: http
+  bkn-backend:
+    host: bkn-backend
+    port: 13014
+    protocol: http
+  agent-operator-integration:
+    host: agent-operator-integration
+    port: 9000
+    protocol: http
