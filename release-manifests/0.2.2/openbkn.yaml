@@ -58,6 +58,3 @@ releases:
   bkn-sample-studio:
     chart: bkn-sample-studio
     version: 0.2.2
-  bkn-project:
-    chart: bkn-project
-    version: 0.2.2
