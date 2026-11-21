@@ -1500,6 +1500,11 @@ OPENSEARCH_MEMORY_REQUEST="${OPENSEARCH_MEMORY_REQUEST:-}"
 OPENSEARCH_PROTOCOL="${OPENSEARCH_PROTOCOL:-http}" # http (default) or https (requires enabling security)
 OPENSEARCH_DISABLE_SECURITY="${OPENSEARCH_DISABLE_SECURITY:-}"
 OPENSEARCH_SINGLE_NODE="${OPENSEARCH_SINGLE_NODE:-true}"
+# Shard ceiling of the bundled single-node OpenSearch (written to opensearch.yml).
+# OpenSearch defaults to 1000; each knowledge-base project keeps one index per
+# object, relation and evidence type (about 15-20), so 3000 leaves room for
+# about 140 such projects next to the platform's own indices.
+OPENSEARCH_MAX_SHARDS_PER_NODE="${OPENSEARCH_MAX_SHARDS_PER_NODE:-3000}"
 OPENSEARCH_SNAPSHOT_ENABLED="${OPENSEARCH_SNAPSHOT_ENABLED:-true}"
 OPENSEARCH_SNAPSHOT_HOST_PATH="${OPENSEARCH_SNAPSHOT_HOST_PATH:-/mnt/openbkn-snapshots}"
 OPENSEARCH_HELM_ATOMIC="${OPENSEARCH_HELM_ATOMIC:-false}"

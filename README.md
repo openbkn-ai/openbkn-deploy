@@ -294,6 +294,24 @@ OPENBKN_CORE_REQ_CPU=200m OPENBKN_CORE_REQ_MEM=512Mi \
 > - In k3s mode, lightweight resource defaults are applied (CPU request 100m, memory request 128Mi); override with the variables above
 > - Settings apply uniformly to all bkn-core releases
 
+### OpenSearch shard limit
+
+The bundled OpenSearch runs on a single node. OpenSearch's own default allows 1000 open shards per node; once that is reached, no new index can be created and features that create one fail (for example confirming a knowledge-base model). The installer sets `cluster.max_shards_per_node` in `opensearch.yml` from `OPENSEARCH_MAX_SHARDS_PER_NODE` (default `3000`):
+
+```bash
+OPENSEARCH_MAX_SHARDS_PER_NODE=5000 sudo bash ./deploy.sh opensearch install
+```
+
+> **Capacity**:
+> - Each knowledge-base project keeps one index per object, relation and evidence type, roughly 15-20 indices, and each index currently takes one shard. The default of 3000 therefore leaves room for about 140 such projects next to the platform's own indices.
+> - Every open shard uses OpenSearch heap. When you raise the limit well above the default, raise memory too with `deploy.sh opensearch set-memory <size>`.
+> - Fresh installs write the setting. When the installer reconciles an existing release it adds the setting only if `opensearch.yml` has none; a value already set is never replaced. An existing release that needs no reconciliation is left unchanged; raise its limit at runtime without a restart:
+>
+>   ```bash
+>   kubectl -n resource exec opensearch-cluster-master-0 -- curl -s -XPUT localhost:9200/_cluster/settings \
+>     -H 'Content-Type: application/json' -d '{"persistent":{"cluster.max_shards_per_node":3000}}'
+>   ```
+
 ## 📋 Prerequisites
 
 ### System requirements
