@@ -282,6 +282,24 @@ OPENBKN_CORE_REQ_CPU=200m OPENBKN_CORE_REQ_MEM=512Mi \
 > - k3s 模式下默认会设置轻量级资源配置（CPU 请求 100m，内存请求 128Mi），可通过上述环境变量覆盖
 > - 设置会统一应用到所有 bkn-core 的 release
 
+### OpenSearch 分片上限
+
+随平台安装的 OpenSearch 为单节点。OpenSearch 自身默认每个节点最多 1000 个打开的分片；达到上限后无法再创建索引，依赖新建索引的功能会失败（例如确认知识库模型）。安装脚本按 `OPENSEARCH_MAX_SHARDS_PER_NODE`（默认 `3000`）在 `opensearch.yml` 中写入 `cluster.max_shards_per_node`：
+
+```bash
+OPENSEARCH_MAX_SHARDS_PER_NODE=5000 sudo bash ./deploy.sh opensearch install
+```
+
+> **容量说明**：
+> - 每个知识库项目为每种对象、关系和证据类型各保留一个索引，约 15-20 个；目前每个索引占一个分片。因此默认的 3000 在平台自身索引之外，约可容纳 140 个这样的项目。
+> - 每个打开的分片都会占用 OpenSearch 堆内存。上限调到远高于默认值时，请同时用 `deploy.sh opensearch set-memory <size>` 调大内存。
+> - 全新安装会写入该设置。安装脚本校正已有 release 时，仅在 `opensearch.yml` 尚未设置时补上，已设置的值不会被覆盖。无需校正的已有 release 保持不变，可在运行时直接调高（无需重启）：
+>
+>   ```bash
+>   kubectl -n resource exec opensearch-cluster-master-0 -- curl -s -XPUT localhost:9200/_cluster/settings \
+>     -H 'Content-Type: application/json' -d '{"persistent":{"cluster.max_shards_per_node":3000}}'
+>   ```
+
 ## 📋 Prerequisites
 
 ### 系统要求

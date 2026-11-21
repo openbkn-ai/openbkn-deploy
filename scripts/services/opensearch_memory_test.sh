@@ -114,6 +114,14 @@ install_opensearch
 [[ "${UPGRADE_CALL}" == *'--wait --timeout=900s'* ]] || fail "limit reconciliation should wait for Helm readiness"
 
 UPGRADE_CALL=""
+ERROR_LOG=""
+OPENSEARCH_MAX_SHARDS_PER_NODE=many
+if install_opensearch; then fail "a non-numeric shard ceiling should stop the install"; fi
+[[ "${ERROR_LOG}" == *'OPENSEARCH_MAX_SHARDS_PER_NODE must be a positive integer'* ]] || fail "invalid shard ceiling should be explained"
+[[ -z "${UPGRADE_CALL}" ]] || fail "invalid shard ceiling should not upgrade"
+OPENSEARCH_MAX_SHARDS_PER_NODE=3000
+
+UPGRADE_CALL=""
 bkn_helm_release_has_resource_limits() { return 1; }
 install_opensearch
 [[ -z "${UPGRADE_CALL}" ]] || fail "existing release without limits should not be upgraded"

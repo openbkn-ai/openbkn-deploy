@@ -248,6 +248,15 @@ _opensearch_configure_snapshots() {
     return "${ec}"
 }
 
+# Write the shard ceiling into opensearch.yml unless one is already set, so a
+# value chosen earlier by an operator is never overwritten.
+_opensearch_ensure_shard_limit() {
+    local os_yml="$1"
+    grep -q 'max_shards_per_node' "${os_yml}" && return 0
+    [[ -z "$(tail -c 1 "${os_yml}")" ]] || printf '\n' >>"${os_yml}"
+    printf 'cluster.max_shards_per_node: %s\n' "${OPENSEARCH_MAX_SHARDS_PER_NODE}" >>"${os_yml}"
+}
+
 install_opensearch() {
     log_info "Installing OpenSearch via Helm..."
 
@@ -370,6 +379,11 @@ install_opensearch() {
         fi
     fi
 
+    if [[ ! "${OPENSEARCH_MAX_SHARDS_PER_NODE}" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "OPENSEARCH_MAX_SHARDS_PER_NODE must be a positive integer: ${OPENSEARCH_MAX_SHARDS_PER_NODE}"
+        return 1
+    fi
+
     local tmp_os_yml
     tmp_os_yml="$(mktemp)"
     cat >"${tmp_os_yml}" <<EOF
@@ -468,6 +482,8 @@ EOF
         helm_args+=(-f "${snapshot_values}")
         log_info "Snapshot storage configuration checked; missing settings will be added."
     fi
+    # After the snapshot merge, which may rewrite opensearch.yml from the release.
+    _opensearch_ensure_shard_limit "${tmp_os_yml}"
     bkn_helm_uninstall_if_not_deployed "${OPENSEARCH_RELEASE_NAME}" "${OPENSEARCH_NAMESPACE}"
 
     local helm_ec=0

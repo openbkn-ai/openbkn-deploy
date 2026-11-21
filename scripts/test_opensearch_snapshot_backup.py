@@ -139,6 +139,7 @@ else:
   index=args.index('--set-file')
   config=open(args[index+1].split('=',1)[1]).read()
   assert 'path.repo: ["/usr/share/opensearch/snapshots"]' in config
+  assert 'cluster.max_shards_per_node: 3000' in config
 json.dump({'passed':True},open(sys.argv[1],'w'))
 CHECK
 }
@@ -164,6 +165,10 @@ if [[ "$MODE" == existing ]]; then enable_opensearch_snapshots; else install_ope
             ('limits', {**original, 'resources': {'requests': {'memory': '2Gi'}, 'limits': {'memory': '3Gi'}}},
              0, True, 0, 1),
             ('limits-complete', {**configured, 'resources': {'requests': {'memory': '2Gi'}, 'limits': {'memory': '3Gi'}}},
+             0, True, 0, 1),
+            ('limits-shards-set', {**original, 'config': {'opensearch.yml': original['config']['opensearch.yml']
+                                                            + 'cluster.max_shards_per_node: 5000\n'},
+                                   'resources': {'requests': {'memory': '2Gi'}, 'limits': {'memory': '3Gi'}}},
              0, True, 0, 1),
             ('conflict', {**original, 'config': {'opensearch.yml': 'path.repo: ["/another/path"]\n'}},
              1, True, 1, 0),
@@ -206,9 +211,11 @@ import json,sys
 args=sys.argv[3:]
 base=json.load(open(sys.argv[2]))
 # Read every overlay in actual Helm order; arrays are replaced, not appended.
+# Values files apply first; --set-file overrides them wherever it appears.
 values={**base} if '--reuse-values' in args else {}
 for index,arg in enumerate(args[:-1]):
  if arg=='-f': values.update(json.load(open(args[index+1])))
+for index,arg in enumerate(args[:-1]):
  if arg=='--set-file':
   key,path=args[index+1].split('=',1)
   if key=='config.opensearch\\.yml':
@@ -235,6 +242,14 @@ install_opensearch
                         if key == 'extraInitContainers' and not limit_status:
                             expected['resources'].pop('limits')
                         self.assertEqual(actual[key][0], expected)
+                    config = actual['config']['opensearch.yml']
+                    if mode == 'limits-shards-set':
+                        # A shard ceiling the operator already set is kept as is.
+                        self.assertIn('cluster.max_shards_per_node: 5000', config)
+                        self.assertEqual(config.count('max_shards_per_node'), 1)
+                    elif not limit_status:
+                        # Reconciled releases gain the ceiling they were missing.
+                        self.assertIn('cluster.max_shards_per_node: 3000', config)
                     expected_path = '/backup/retained' if mode == 'limits-complete' else '/backup/test-snapshots'
                     self.assertEqual(actual['extraVolumes'][-1]['hostPath']['path'], expected_path)
                     self.assertEqual(actual['resources']['requests']['memory'], '2Gi')
