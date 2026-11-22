@@ -8,6 +8,7 @@ import base64
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -93,6 +94,19 @@ class RuntimeProfileTest(unittest.TestCase):
     def prepare(self):
         runtime.prepare(self.args)
         return runtime.read(self.root / "provider.values.json")
+
+    def test_managed_addon_reuses_pull_secret_or_creates_it_from_registry_auth(self):
+        name = "pull-secret"
+        registry = "registry.example"
+        image = {"registry": f"{registry}/provider", "repository": "addon"}
+        config = self.root / "auth.json"
+        runtime.write(config, {"auths": {registry: {"auth": "example"}, "other.example": {"auth": "omit"}}})
+        with patch.dict(os.environ, {"REGISTRY_AUTH_FILE": str(config)}):
+            path = runtime.addon_pull_auth("isolated", image, [{"name": name}], self.root)
+            path_again = runtime.addon_pull_auth("isolated", image, [{"name": name}], self.root)
+        self.assertEqual(runtime.read(path), {"auths": {registry: {"auth": "example"}}})
+        self.assertEqual(path, path_again)
+        self.assertEqual(sum(args[:2] == ["kubectl", "create"] for args, _ in self.cluster.calls), 1)
 
     def test_community_install_without_provider_does_not_generate_runtime_keys(self):
         self.args.profile = ""

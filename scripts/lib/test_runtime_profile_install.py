@@ -25,6 +25,8 @@ state=json.loads(path.read_text());args=sys.argv[1:];tool=pathlib.Path(sys.argv[
 if tool=='kubectl' and args[0]=='get':
     value=state['objects'].get(args[1]+'|'+args[2])
     if value: print(json.dumps(value))
+elif tool=='kubectl' and args[0]=='exec':
+    print(json.dumps(state.get('license', {'state':'valid','edition':'community'})))
 elif tool=='kubectl' and args[0] in ('create','replace') and args[1:]==['-f','-']:
     value=json.load(sys.stdin);state['revision']+=1;value['metadata']['resourceVersion']=str(state['revision'])
     state['objects'][value['kind'].lower()+'|'+value['metadata']['name']]=value
@@ -56,7 +58,11 @@ elif tool=='helm' and args[:2]==['upgrade','--install']:
     release=args[2];files=[args[i+1] for i,x in enumerate(args) if x=='-f']
     values=json.loads(pathlib.Path(next(p for p in files if p.endswith('.values.json'))).read_text())
     state['values'][release]=values;state['writes'].append('helm upgrade '+release)
-    entry=json.loads(os.environ['RUNTIME_TEST_PROFILE_JSON'])['releases'][release]
+    profile=json.loads(os.environ['RUNTIME_TEST_PROFILE_JSON'])
+    entry=profile['releases'].get(release, {})
+    if release in profile.get('addons', {}):
+        state['addon_chart']=args[3]
+        state['addon_args']=args
     workload=entry.get('workload')
     if workload:
         env=list(values.get('extraEnv',[]))
@@ -181,6 +187,40 @@ data:
 
     def load(self):
         return json.loads(self.state.read_text())
+
+    def test_enterprise_addon_is_reconciled_by_ordinary_install_after_activation(self):
+        name = "managed-example"
+        self.profile["addons"] = {name: {"chart": f"oci://registry.example/charts/{name}",
+                                        "chartVersion": "0.2.2", "minEdition": "enterprise",
+                                        "values": {"image": {"registry": "registry.example/private",
+                                                             "repository": name}}}}
+        subprocess.run([self.helm, "package", str(self.fixture_chart(name)),
+                        "--destination", str(self.charts)], check=True, capture_output=True)
+        self.input.write_text(json.dumps(self.profile))
+        for edition in ("community", "professional", "enterprise"):
+            state = self.load()
+            state["license"] = {"state": "valid", "edition": edition}
+            self.state.write_text(json.dumps(state))
+            result = self.install(provided=edition == "community")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(name in self.load()["values"], edition == "enterprise")
+        state = self.load()
+        self.assertTrue(state["addon_chart"].endswith(f"{name}-0.2.2.tgz"))
+        self.assertIn("image.registry=registry.example/private", state["addon_args"])
+        self.assertIn("--reset-then-reuse-values", state["addon_args"])
+        tag = "0.2.2-main.20261117120000.sha2222222"
+        updated = self.install(provided=False, image_tag=tag)
+        self.assertEqual(updated.returncode, 0, updated.stderr)
+        self.assertEqual(self.load()["values"][name]["image"]["tag"], tag)
+        stable = self.install(provided=False)
+        self.assertEqual(stable.returncode, 0, stable.stderr)
+        self.assertEqual(self.load()["values"][name]["image"]["tag"], "0.2.2")
+        latest = self.install(provided=False, manifest_version="main", latest_branch="main")
+        self.assertEqual(latest.returncode, 0, latest.stderr)
+        state = self.load()
+        self.assertEqual(state["values"][name]["image"]["tag"], tag)
+        self.assertEqual(state["addon_chart"], f"oci://registry.example/charts/{name}")
+        self.assertIn(tag, state["addon_args"])
 
     def test_ordinary_local_and_repository_installs_preserve_keys_and_reconcile_same_version(self):
         for mode in ("local", "repo"):
