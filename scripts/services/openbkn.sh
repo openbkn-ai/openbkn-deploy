@@ -2305,6 +2305,7 @@ _install_openbkn_impl() {
     if [[ -f "${_OPENBKN_RUNTIME_DIR:-}/profile.json" ]]; then
         local runtime_release runtime_version
         while IFS= read -r runtime_release; do
+            [[ -n "${runtime_release}" ]] || continue
             runtime_version="$(_openbkn_resolve_release_version "${runtime_release}")"
             if [[ "${use_local}" == true ]]; then
                 _install_openbkn_release_local "${runtime_release}" "${charts_dir}" "${namespace}" --runtime-prepare-only || return 1
@@ -2339,6 +2340,18 @@ _install_openbkn_impl() {
             _install_openbkn_release_repo "${release_name}" "${namespace}" "${HELM_CHART_REPO_NAME}" "${release_version}" || return 1
         fi
     done
+
+    if [[ -f "${_OPENBKN_RUNTIME_DIR:-}/profile.json" ]]; then
+        local -a runtime_addon_args=()
+        if [[ "${OFFLINE_MODE:-false}" == "true" ]]; then
+            runtime_addon_args+=(--offline-registry "${OFFLINE_REGISTRY}")
+        fi
+        python3 "${SCRIPT_DIR}/scripts/lib/runtime_profile.py" install-addons \
+            --state "${_OPENBKN_RUNTIME_DIR}" --namespace "${namespace}" --config "${CONFIG_YAML_PATH}" \
+            --profile "${CORE_RUNTIME_PROFILE:-}" --charts-dir "${charts_dir}" \
+            --latest-branch "${CORE_LATEST_SELECTED_BRANCH}" --image-tag "${CORE_IMAGE_TAG}" \
+            --timeout "${CORE_HELM_TIMEOUT:-900s}" "${runtime_addon_args[@]}" || return 1
+    fi
 
     log_info "BKN Foundry services installation completed."
 

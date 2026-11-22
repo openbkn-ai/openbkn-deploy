@@ -8,6 +8,7 @@ import argparse
 import base64
 import copy
 import json
+import os
 from pathlib import Path
 import re
 import secrets
@@ -18,11 +19,13 @@ STATE_NAME = "openbkn-runtime-profile"
 API = "deploy.openbkn.ai/runtime-profile/v1"
 NAME = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\Z")
 MISSING = object()
+EDITIONS = ("community", "professional", "enterprise", "industry")
+IMAGE_COORDINATE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]*")
 BUILD_TAG = re.compile(r"(?P<version>\d+\.\d+\.\d+)-(?P<branch>[a-z0-9.-]+)\.(?P<stamp>\d{14})\.sha[0-9a-f]+\Z")
 
 
-def run(args, payload=None):
-    result = subprocess.run(args, input=payload, capture_output=True, text=True, timeout=180)
+def run(args, payload=None, timeout=180):
+    result = subprocess.run(args, input=payload, capture_output=True, text=True, timeout=timeout)
     if result.returncode:
         # Helm/Kubernetes diagnostics can include rendered credentials.
         raise ValueError(f"{args[0]} {args[1]} failed; inspect the resource without logging credentials")
@@ -68,10 +71,34 @@ def validate(profile, version, releases, chart_versions=None):
     if not isinstance(profile, dict) or profile.get("apiVersion") != API:
         raise ValueError("Unsupported runtime profile")
     entries = profile.get("releases")
-    if not isinstance(entries, dict) or not entries or set(entries) - set(releases):
+    addons = profile.get("addons", {})
+    if not isinstance(entries, dict) or set(entries) - set(releases):
         raise ValueError("Runtime profile requires releases absent from the platform manifest")
+    if not isinstance(addons, dict) or (not entries and not addons) or set(addons) & set(releases):
+        raise ValueError("Runtime add-ons must be distinct from platform releases")
+    for name, addon in addons.items():
+        if (not NAME.fullmatch(name) or not isinstance(addon, dict)
+                or not re.fullmatch(r"oci://[A-Za-z0-9][A-Za-z0-9./:_-]*", addon.get("chart", ""))
+                or addon["chart"].rsplit("/", 1)[-1] != name
+                or not re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+(?:-[A-Za-z0-9.-]+)?", addon.get("chartVersion", ""))
+                or addon.get("minEdition") not in EDITIONS
+                or not isinstance(addon.get("values"), dict)):
+            raise ValueError("Invalid runtime add-on declaration")
+        image = addon["values"].get("image")
+        if not isinstance(image, dict) or set(image) != {"registry", "repository"} or any(
+            not isinstance(value, str) or not IMAGE_COORDINATE.fullmatch(value)
+            for value in image.values()
+        ):
+            raise ValueError("Runtime add-ons require unpinned image registry and repository")
+        pull_secrets = addon["values"].get("imagePullSecrets", [])
+        if not isinstance(pull_secrets, list) or any(
+            not isinstance(item, dict) or set(item) != {"name"}
+            or not isinstance(item["name"], str) or not NAME.fullmatch(item["name"])
+            for item in pull_secrets
+        ):
+            raise ValueError("Invalid runtime add-on pull Secret references")
     actual = profile.get("platformVersion")
-    if version == "main" and chart_versions:
+    if version == "main" and chart_versions and entries:
         image_releases = {name for name, entry in entries.items()
                           if isinstance(entry, dict) and isinstance(entry.get("values"), dict)
                           and entry["values"].get("image")}
@@ -81,7 +108,7 @@ def validate(profile, version, releases, chart_versions=None):
         if mismatched:
             detail = ", ".join(f"{name}={target or 'missing'}" for name, target in mismatched.items())
             raise ValueError(f"Runtime profile platform version {actual} does not match target Chart versions ({detail}); provide the matching delivery profile")
-    elif actual != version:
+    elif (version != "main" or entries) and actual != version:
         raise ValueError(f"Runtime profile platform version {actual} does not match target version {version}; provide the matching delivery profile")
     if not NAME.fullmatch(profile.get("name", "")):
         raise ValueError("Invalid runtime profile name")
@@ -159,14 +186,15 @@ def validate_secret(resource, spec):
         raise ValueError(f"Secret {spec['name']} keys must differ; restore the existing Secret")
 
 
-def newest_image_tag(image, branch):
+def newest_image_tag(image, branch, auth_file=None):
     registry = image.get("registry", "")
     repository = image.get("repository", "")
     if not registry or not repository:
         raise ValueError("Runtime image registry and repository are required for --latest")
     reference = f"{registry}/{repository}"
     try:
-        tags = json.loads(run(["skopeo", "list-tags", f"docker://{reference}"]))["Tags"]
+        auth_args = ["--authfile", str(auth_file)] if auth_file else []
+        tags = json.loads(run(["skopeo", "list-tags", *auth_args, f"docker://{reference}"]))["Tags"]
     except FileNotFoundError:
         raise ValueError("--latest for runtime images requires skopeo; install it or use --image-tag") from None
     except (KeyError, TypeError, json.JSONDecodeError):
@@ -194,7 +222,8 @@ def prepare(args):
     validate(profile, args.version, args.releases, chart_versions)
     if old:
         validate(old, old.get("platformVersion"), args.releases)
-        if old["name"] != profile["name"] or set(old["releases"]) - set(profile["releases"]):
+        if (old["name"] != profile["name"] or set(old["releases"]) - set(profile["releases"])
+                or set(old.get("addons", {})) - set(profile.get("addons", {}))):
             raise ValueError("Another runtime profile already owns installed releases; refusing to discard its configuration")
         declarations = {item["name"]: item for item in profile.get("secrets", [])}
         if any(declarations.get(item["name"]) != item for item in old.get("secrets", [])):
@@ -349,6 +378,93 @@ def apply(args):
     run(["kubectl", "replace" if current else "create", "-f", "-"], json.dumps(state))
 
 
+def addon_pull_auth(namespace, image, pull_secrets, directory):
+    if not pull_secrets:
+        return None
+    registry = image["registry"].split("/", 1)[0]
+    for item in pull_secrets:
+        name = item["name"]
+        resource = get("secret", name, namespace)
+        if not resource:
+            continue
+        data = resource.get("data", {})
+        if ".dockerconfigjson" in data:
+            config = json.loads(base64.b64decode(data[".dockerconfigjson"], validate=True))
+            if registry in config.get("auths", {}):
+                path = directory / f"{name}.registry.json"
+                write(path, {"auths": {registry: config["auths"][registry]}})
+                return path
+    auth_file = os.environ.get("REGISTRY_AUTH_FILE")
+    config = read(auth_file) if auth_file else {}
+    credentials = config.get("auths", {}).get(registry)
+    name = pull_secrets[0]["name"]
+    if not credentials or get("secret", name, namespace):
+        raise ValueError(f"Runtime add-on image access requires {name} with credentials for {registry}")
+    path = directory / f"{name}.registry.json"
+    write(path, {"auths": {registry: credentials}})
+    resource = {"apiVersion": "v1", "kind": "Secret",
+                "metadata": {"name": name, "namespace": namespace}, "type": "kubernetes.io/dockerconfigjson",
+                "data": {".dockerconfigjson": base64.b64encode(path.read_bytes()).decode()}}
+    run(["kubectl", "create", "-f", "-"], json.dumps(resource))
+    return path
+
+
+def install_addons(args):
+    directory = Path(args.state)
+    if not (directory / "profile.json").is_file():
+        return
+    profile = read(directory / "profile.json")
+    addons = profile.get("addons", {})
+    if not addons:
+        return
+    raw = run(["kubectl", "exec", "-n", args.namespace, "deploy/bkn-safe", "--",
+               "curl", "-fsS", "--max-time", "10", "http://127.0.0.1:3000/api/safe/v1/internal/license/status"])
+    license_status = json.loads(raw)
+    if not isinstance(license_status, dict) or not isinstance(license_status.get("state"), str):
+        raise ValueError("Cannot determine the platform license state for runtime add-ons")
+    edition = license_status.get("edition")
+    valid = license_status["state"] == "valid"
+    for name, addon in addons.items():
+        if not valid or edition not in EDITIONS or EDITIONS.index(edition) < EDITIONS.index(addon["minEdition"]):
+            print(f"Skipping {name}: requires an active {addon['minEdition']} license")
+            continue
+        values = copy.deepcopy(addon["values"])
+        version = addon["chartVersion"]
+        image = values["image"]
+        auth_file = None
+        if not args.offline_registry:
+            auth_file = addon_pull_auth(args.namespace, image, values.get("imagePullSecrets", []), directory)
+        if args.image_tag:
+            image["tag"] = args.image_tag
+        elif args.latest_branch:
+            tag = newest_image_tag(image, args.latest_branch, auth_file)
+            if not tag.startswith(f"{profile['platformVersion']}-"):
+                raise ValueError(f"Runtime add-on {name} image tag does not match platform version")
+            image["tag"] = tag
+            version = tag
+        else:
+            image["tag"] = version
+        if args.offline_registry:
+            image["registry"] = f"{args.offline_registry}/{image['registry'].rsplit('/', 1)[-1]}"
+            values["imagePullSecrets"] = []
+        chart_name = f"{name}-{version}.tgz"
+        roots = [Path(args.charts_dir)] if args.charts_dir else []
+        if args.profile:
+            roots.append(Path(args.profile).resolve().parent / "charts")
+        local_chart = next((root / chart_name for root in roots if (root / chart_name).is_file()), None)
+        if args.offline_registry and not local_chart:
+            raise ValueError(f"Offline runtime add-on requires {chart_name} in the supplied charts directory or delivery bundle")
+        chart = [str(local_chart)] if local_chart else [addon["chart"], "--version", version]
+        values_file = directory / f"{name}.addon.values.json"
+        write(values_file, values)
+        extra = [item for key, value in image.items() for item in ("--set-string", f"image.{key}={value}")]
+        command = ["helm", "upgrade", "--install", name, *chart, "--namespace", args.namespace,
+                   "--reset-then-reuse-values", "-f", args.config, "-f", str(values_file),
+                   *extra, "--wait", "--timeout", args.timeout]
+        print(f"Installing runtime add-on {name} (Chart {version})", flush=True)
+        run(command, timeout=3600)
+
+
 def helm_options(arguments):
     # The caller supplies the exact planned upgrade arguments. Only readiness
     # flags absent from `helm template` are dropped for the client-only render.
@@ -399,7 +515,7 @@ def patch_env(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("prepare", "apply", "render", "patch-env"):
+    for name in ("prepare", "apply", "render", "patch-env", "install-addons"):
         command = commands.add_parser(name)
         command.add_argument("--state", required=True)
         command.add_argument("--namespace", default="openbkn")
@@ -410,6 +526,14 @@ def main():
             command.add_argument("--chart-version", action="append", dest="chart_versions", default=[])
             command.add_argument("--latest-branch", default="")
             command.add_argument("--image-tag", default="")
+        if name == "install-addons":
+            command.add_argument("--config", required=True)
+            command.add_argument("--charts-dir", default="")
+            command.add_argument("--profile", default="")
+            command.add_argument("--latest-branch", default="")
+            command.add_argument("--image-tag", default="")
+            command.add_argument("--offline-registry", default="")
+            command.add_argument("--timeout", default="900s")
         if name in ("render", "patch-env"):
             command.add_argument("--release", required=True)
         if name == "render":
@@ -418,7 +542,7 @@ def main():
     if hasattr(args, "helm_args") and args.helm_args[:1] == ["--"]:
         args.helm_args = args.helm_args[1:]
     try:
-        {"prepare": prepare, "apply": apply, "render": render, "patch-env": patch_env}[args.command](args)
+        {"prepare": prepare, "apply": apply, "render": render, "patch-env": patch_env, "install-addons": install_addons}[args.command](args)
     except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired):
         # Deliberately do not include exception payloads: JSON/parser/transport
         # errors may contain key material. Known validation messages are safe.
