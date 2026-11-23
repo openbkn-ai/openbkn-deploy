@@ -962,10 +962,16 @@ _openbkn_helm_upgrade_release() {
         fi
         if [[ ! -s "${gateway_dir}/base-url" ]] || [[ -z "$(cat "${gateway_dir}/base-url")" ]]; then
             # Discovery runs at installation time, never inside an executor Pod.
-            if ! kubectl get services --all-namespaces \
+            # Controller Pods show whether it uses hostNetwork; then the egress
+            # rule needs node addresses, because Pod selectors never match it.
+            # Without node read access, discovery fails only when they are needed.
+            kubectl get nodes -o json >"${gateway_dir}/nodes.json" 2>/dev/null ||
+                printf '{}\n' >"${gateway_dir}/nodes.json"
+            if ! kubectl get services,pods --all-namespaces \
                 -l app.kubernetes.io/name=ingress-nginx,app.kubernetes.io/component=controller \
                 -o json >"${gateway_dir}/services.json" ||
-                ! python3 "${gateway_helper}" discover <"${gateway_dir}/services.json" >"${gateway_dir}/defaults.json"; then
+                ! python3 "${gateway_helper}" discover "${gateway_dir}/nodes.json" \
+                    <"${gateway_dir}/services.json" >"${gateway_dir}/defaults.json"; then
                 rm -rf "${gateway_dir}"
                 log_error "Cannot discover Sandbox REST gateway; configure controlPlane.env.BKN_BASE_URL explicitly"
                 return 1
