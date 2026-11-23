@@ -962,12 +962,21 @@ _openbkn_helm_upgrade_release() {
         fi
         if [[ ! -s "${gateway_dir}/base-url" ]] || [[ -z "$(cat "${gateway_dir}/base-url")" ]]; then
             # Discovery runs at installation time, never inside an executor Pod.
-            if ! kubectl get services --all-namespaces \
-                -l app.kubernetes.io/name=ingress-nginx,app.kubernetes.io/component=controller \
+            # Controller Pods show whether it uses hostNetwork; then the egress
+            # rule needs node addresses, because Pod selectors never match it.
+            # Both reads are optional: the helper reports what it could not read
+            # and fails only when a hostNetwork controller needs node addresses.
+            local gateway_labels=app.kubernetes.io/name=ingress-nginx,app.kubernetes.io/component=controller
+            kubectl get nodes -o json >"${gateway_dir}/nodes.json" 2>/dev/null ||
+                printf '{}\n' >"${gateway_dir}/nodes.json"
+            kubectl get pods --all-namespaces -l "${gateway_labels}" -o json >"${gateway_dir}/pods.json" 2>/dev/null ||
+                printf '{}\n' >"${gateway_dir}/pods.json"
+            if ! kubectl get services --all-namespaces -l "${gateway_labels}" \
                 -o json >"${gateway_dir}/services.json" ||
-                ! python3 "${gateway_helper}" discover <"${gateway_dir}/services.json" >"${gateway_dir}/defaults.json"; then
+                ! python3 "${gateway_helper}" discover "${gateway_dir}/nodes.json" "${gateway_dir}/pods.json" \
+                    <"${gateway_dir}/services.json" >"${gateway_dir}/defaults.json"; then
                 rm -rf "${gateway_dir}"
-                log_error "Cannot discover Sandbox REST gateway; configure controlPlane.env.BKN_BASE_URL explicitly"
+                log_error "Cannot discover Sandbox REST gateway; set controlPlane.env.BKN_BASE_URL and configure networkPolicy.gateway explicitly"
                 return 1
             fi
             # Discovery is only a default; both preserved and current operator values win.

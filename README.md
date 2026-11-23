@@ -744,8 +744,26 @@ discovery permissions. Missing or ambiguous controllers stop before rollout.
 For a custom origin, configure `networkPolicy.gateway` or `additionalEgress` as
 needed; discovery is not required when the explicit origin is valid.
 
+The installer runs ingress-nginx with `hostNetwork: true` by default. Such a
+controller answers on node addresses, and the kube-router policy controller
+built into k3s never selects hostNetwork Pods by label, so a selector-only rule
+leaves executors with `Connection refused`. Discovery therefore also reads the
+controller Pods and nodes: for a hostNetwork controller it adds every node
+InternalIP to `networkPolicy.gateway.ipBlocks` and uses the numeric container
+port. Only that port is opened on the nodes. Rerun the installer after adding
+or readdressing nodes; saved node addresses are rediscovered, while explicit
+operator `ipBlocks` are preserved. Reading Pods and nodes is optional: without
+them discovery keeps the Pod-network rule, and only a hostNetwork controller
+without readable node addresses stops the installation. A saved operator
+override of `networkPolicy.gateway.port` that names a port (for example `http`)
+is kept and then rejected by the Chart together with `ipBlocks`; replace it with
+the controller's numeric container port. To skip discovery, set both
+`controlPlane.env.BKN_BASE_URL` and `networkPolicy.gateway`: an explicit origin
+alone leaves the gateway egress rule disabled.
+
 This requires the matching Foundry sandbox Chart with `controlPlane.gateway`
-support. Existing pooled executors need a controlled refresh with workspace
+and `networkPolicy.gateway.ipBlocks` support; an older Chart ignores the node
+addresses and keeps the selector-only rule. Existing pooled executors need a controlled refresh with workspace
 preservation after configuration rollout. The installer does not restart them
 merely by changing a ConfigMap.
 

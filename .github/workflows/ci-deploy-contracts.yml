@@ -34,6 +34,8 @@ jobs:
           bash scripts/services/openbkn_helm_upgrade_test.sh
       - name: Runtime delivery profiles and persistent keys
         run: python3 -m unittest discover -s scripts/lib -p 'test_runtime_profile*.py'
+      - name: Sandbox REST gateway discovery
+        run: python3 -m unittest discover -s scripts/lib -p 'test_sandbox_gateway.py'
 
   permission-transition:
     runs-on: ubuntu-latest
