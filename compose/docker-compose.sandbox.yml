@@ -1,0 +1,81 @@
+# OpenBKN Foundry — 可选沙箱栈
+#
+# 用法：
+#   docker compose --profile sandbox -f docker-compose.yml -f docker-compose.sandbox.yml up -d
+#
+# 说明：
+#   - sandbox-control-plane 通过挂载宿主 Docker socket 创建执行器容器，
+#     执行器 NetworkMode 在代码里硬编码为 sandbox_network，因此该网络必须存在
+#     （已在主 compose 定义）。
+#   - 执行器镜像需预先可拉取：${IMAGE_REGISTRY}/sandbox-template-python-basic:${OPENBKN_VERSION}
+#   - 挂载 docker.sock 等同于把宿主 Docker 控制权交给该容器，仅限本地/开发环境。
+#   - Linux 上若 socket 权限不足，可用 group_add 追加宿主 docker 组 GID：
+#     DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) docker compose ... up -d
+
+name: openbkn
+
+services:
+  sandbox-control-plane:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/sandbox-control-plane:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-sandbox-control-plane
+    restart: unless-stopped
+    profiles: ["sandbox"]
+    environment:
+      TZ: Asia/Shanghai
+      LANG: en_US.UTF-8
+      ENVIRONMENT: production
+      DEBUG: "false"
+      # 走 DB_* 而非 DATABASE_URL：RDS 变量优先，连接串由代码拼装
+      DB_TYPE: MYSQL
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_USER: root
+      DB_PASSWORD: ${MARIADB_ROOT_PASSWORD:-openbkn}
+      DB_DATABASE: sandbox
+      DB_CHARSET: utf8mb4
+      # 未设置 KUBERNETES_SERVICE_HOST 时自动进入 Local Docker 模式
+      DOCKER_HOST: unix:///var/run/docker.sock
+      # 执行器回调地址：executor 与 control-plane 同在 sandbox_network
+      CONTROL_PLANE_URL: http://sandbox-control-plane:8000
+      # 执行器内的 sandbox_sdk.bkn 通过网关访问平台
+      BKN_BASE_URL: http://gateway:8080
+      BKN_SANDBOX_MCP_URL: http://gateway:8080/api/agent-retrieval/v1/mcp/
+      DEFAULT_TEMPLATE_IMAGE_REGISTRY: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}
+      DEFAULT_TEMPLATE_IMAGE_REPOSITORY: sandbox-template-python-basic
+      DEFAULT_MULTI_LANGUAGE_TEMPLATE_IMAGE_REPOSITORY: sandbox-template-multi-language
+      DEFAULT_TIMEOUT: "300"
+      MAX_TIMEOUT: "3600"
+      DEFAULT_CPU: "1"
+      DEFAULT_MEMORY: 512Mi
+      DEFAULT_DISK: 1Gi
+      IDLE_THRESHOLD_MINUTES: "30"
+      MAX_LIFETIME_HOURS: "24"
+      CLEANUP_INTERVAL_SECONDS: "60"
+      DISABLE_BWRAP: "true"
+      PYTHONUNBUFFERED: "1"
+      # 执行器工作区 S3 挂载
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      S3_BUCKET: sandbox-workspace
+      S3_REGION: us-east-1
+    expose:
+      - "8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      data-migrator:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/v1/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - openbkn
+      - sandbox_network

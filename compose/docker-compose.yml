@@ -1,0 +1,1022 @@
+# OpenBKN Foundry — docker compose 主栈
+#
+# 启动：cp .env.example .env && docker compose up -d
+# 可选 BKN Trace：docker compose -f docker-compose.yml -f docker-compose.trace.yml up -d
+#
+# 约定：
+#   - 服务名与 k8s Service 名一致，chart 里写死的服务间地址可直接复用。
+#   - 业务服务不映射宿主端口，统一经 gateway 的 PUBLIC_BASE_URL 访问。
+#   - 中间件只绑定 127.0.0.1 的调试端口，避免对外暴露。
+
+name: openbkn
+
+x-common-env: &common-env
+  TZ: Asia/Shanghai
+  LANG: en_US.UTF-8
+
+x-restart: &restart unless-stopped
+
+services:
+  # ── 网关（等价 Ingress）──────────────────────────────────────────────────
+  gateway:
+    image: nginx:1.27-alpine
+    container_name: openbkn-gateway
+    restart: *restart
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      bkn-safe:
+        condition: service_started
+      hydra:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks:
+      - openbkn
+      # sandbox 执行器经此网络访问网关（网络在 base 中定义，非 sandbox 模式下空闲）
+      - sandbox_network
+
+  # ── 中间件 ───────────────────────────────────────────────────────────────
+  mariadb:
+    image: mariadb:11.4
+    container_name: openbkn-mariadb
+    restart: *restart
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-openbkn}
+      MARIADB_AUTO_UPGRADE: "1"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max-connections=1000
+      - --innodb-buffer-pool-size=512M
+    ports:
+      - "127.0.0.1:${MARIADB_HOST_PORT:-13306}:3306"
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+    networks:
+      - openbkn
+
+  postgres:
+    # hydra 只支持 PostgreSQL / MySQL / CockroachDB，且其迁移使用 MariaDB 不支持的
+    # CAST AS JSON，因此 hydra 单独用 PG（与 chart 的 bundledDeps 一致）。
+    image: postgres:16
+    container_name: openbkn-postgres
+    restart: *restart
+    environment:
+      POSTGRES_USER: hydra
+      POSTGRES_PASSWORD: ${HYDRA_POSTGRES_PASSWORD:-hydra}
+      POSTGRES_DB: hydra
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-15432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hydra -d hydra"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - openbkn
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: openbkn-redis
+    restart: *restart
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-16379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - openbkn
+
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    container_name: openbkn-opensearch
+    restart: *restart
+    environment:
+      discovery.type: single-node
+      # 本地栈关闭安全插件；服务侧仍会发送 basic auth，插件关闭后会被忽略。
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: ${OPENSEARCH_JAVA_OPTS:--Xms512m -Xmx512m}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "127.0.0.1:${OPENSEARCH_HOST_PORT:-19200}:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 40s
+    networks:
+      - openbkn
+
+  kafka:
+    # 单节点 KRaft。
+    # 9092 = PLAINTEXT（容器内调试/无凭据客户端）
+    # 19092 = SASL_PLAINTEXT/PLAIN（bkn-backend、vega-backend、kafka-connect 使用，
+    #          与 chart 默认的 sasl_plaintext 配置对齐）
+    image: apache/kafka:3.9.0
+    container_name: openbkn-kafka
+    restart: *restart
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,SASL_PLAINTEXT://:19092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,SASL_PLAINTEXT://kafka:19092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT"
+      KAFKA_SASL_ENABLED_MECHANISMS: "PLAIN"
+      KAFKA_LISTENER_NAME_SASL_PLAINTEXT_PLAIN_SASL_JAAS_CONFIG: >-
+        org.apache.kafka.common.security.plain.PlainLoginModule required
+        username="admin" password="${KAFKA_SASL_PASSWORD:-openbkn-kafka}"
+        user_admin="${KAFKA_SASL_PASSWORD:-openbkn-kafka}";
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_NUM_PARTITIONS: "3"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: "openbkn-kraft-cluster-001"
+    ports:
+      - "127.0.0.1:${KAFKA_HOST_PORT:-19092}:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server 127.0.0.1:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    networks:
+      - openbkn
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: openbkn-minio
+    restart: *restart
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "127.0.0.1:${MINIO_HOST_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - openbkn
+      # sandbox 执行器通过 s3fs 直接访问 MinIO，执行器硬编码使用 sandbox_network
+      - sandbox_network
+
+  minio-init:
+    # 预建桶：oss-gateway 写入与 sandbox S3 工作区都要求桶已存在
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    container_name: openbkn-minio-init
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
+          echo "waiting for minio ..."
+          sleep 2
+        done
+        mc mb --ignore-existing local/openbkn
+        mc mb --ignore-existing local/sandbox-workspace
+        echo "buckets ready"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    networks:
+      - openbkn
+
+  # ── 数据库迁移（一次性）───────────────────────────────────────────────────
+  data-migrator:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/core-data-migrator:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-data-migrator
+    restart: "no"
+    working_dir: /app
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        python3 /scripts/render-secret-config.py \
+          /templates/secret-config.yaml.tmpl /etc/data-migrator/secret-config.yaml && \
+        exec python3 server/data-migrator.py migrate \
+          --config /app/config.yaml \
+          --secret-config /etc/data-migrator/secret-config.yaml
+    environment:
+      <<: *common-env
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_HOST_READ: mariadb
+      DB_PORT_READ: "3306"
+      DB_USER: root
+      DB_PASSWORD: ${MARIADB_ROOT_PASSWORD:-openbkn}
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCH_PORT: "9200"
+      OPENSEARCH_PROTOCOL: http
+      OPENSEARCH_USER: admin
+      OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD:-OpenBKN_Admin123!}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ""
+    volumes:
+      # 镜像已内置 /app/repos（migrations 快照）。要改用本地 migrations（例如
+      # bkn-foundry 仓库的 migrations/）时，取消注释并改成实际路径：
+      # - ../migrations:/app/repos:ro
+      - ./config/data-migrator:/templates:ro
+      - ./init/render-secret-config.py:/scripts/render-secret-config.py:ro
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - openbkn
+
+  # ── 认证：hydra + bkn-safe ───────────────────────────────────────────────
+  hydra-migrate:
+    image: oryd/hydra:v26.2.0
+    container_name: openbkn-hydra-migrate
+    restart: "no"
+    command: ["migrate", "sql", "-e", "--yes"]
+    environment:
+      DSN: postgres://hydra:${HYDRA_POSTGRES_PASSWORD:-hydra}@postgres:5432/hydra?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - openbkn
+
+  hydra:
+    image: oryd/hydra:v26.2.0
+    container_name: openbkn-hydra
+    restart: *restart
+    command: ["serve", "all", "--dev"]
+    environment:
+      DSN: postgres://hydra:${HYDRA_POSTGRES_PASSWORD:-hydra}@postgres:5432/hydra?sslmode=disable
+      URLS_SELF_ISSUER: ${PUBLIC_BASE_URL:-http://localhost:8080}
+      # 相对路径：保留浏览器实际访问的 origin
+      URLS_LOGIN: /login
+      URLS_CONSENT: /consent
+      URLS_DEVICE_VERIFICATION: ${PUBLIC_BASE_URL:-http://localhost:8080}/device
+      URLS_DEVICE_SUCCESS: ${PUBLIC_BASE_URL:-http://localhost:8080}/device/success
+      SECRETS_SYSTEM: ${HYDRA_SECRETS_SYSTEM:-change-me-please-48-characters-minimum-0123456789}
+      OAUTH2_EXPOSE_INTERNAL_ERRORS: "true"
+      SERVE_COOKIES_SAME_SITE_MODE: Lax
+      LOG_LEVEL: info
+    expose:
+      - "4444"
+      - "4445"
+    depends_on:
+      hydra-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "hydra", "health", "--endpoint", "http://127.0.0.1:4445/health/alive"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks:
+      - openbkn
+
+  bkn-safe:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/bkn-safe:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-bkn-safe
+    restart: *restart
+    environment:
+      <<: *common-env
+      SAFE_HTTP_ADDR: ":3000"
+      SAFE_SEED_ON_START: "true"
+      SAFE_DB_TYPE: MySQL
+      SAFE_DB_HOST: mariadb
+      SAFE_DB_PORT: "3306"
+      SAFE_DB_USER: root
+      SAFE_DB_PASSWORD: ${MARIADB_ROOT_PASSWORD:-openbkn}
+      SAFE_DB_NAME: safe
+      SAFE_DB_MAX_OPEN_CONNS: "50"
+      SAFE_DB_CONN_MAX_IDLE_TIME: 2m
+      SAFE_DB_CONN_MAX_LIFETIME: 30m
+      SAFE_AUTHZ_POLICY_REFRESH_INTERVAL: 10m
+      SAFE_BKN_BACKEND_BASE_URL: http://bkn-backend:13014
+      SAFE_BKN_BACKEND_TIMEOUT: 3s
+      SAFE_BKN_AGENT_BASE_URL: http://bkn-agent:30800
+      SAFE_BKN_AGENT_TIMEOUT: 3s
+      SAFE_EXECUTION_FACTORY_BASE_URL: http://agent-operator-integration:9000
+      SAFE_EXECUTION_FACTORY_TIMEOUT: 3s
+      SAFE_VEGA_BACKEND_BASE_URL: http://vega-backend:13014
+      SAFE_VEGA_BACKEND_TIMEOUT: 3s
+      SAFE_ONTOLOGY_QUERY_BASE_URL: http://ontology-query:13018
+      SAFE_ONTOLOGY_QUERY_TIMEOUT: 3s
+      SAFE_HYDRA_ADMIN_URL: http://hydra:4445
+      SAFE_HYDRA_PUBLIC_URL: http://hydra:4444
+      SAFE_HYDRA_BROWSER_PUBLIC_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+      SAFE_OAUTH_STUDIO_BASELINE_REDIRECT_URIS: '["${STUDIO_REDIRECT_URI:-http://localhost:8000/studio/callback}"]'
+      SAFE_OAUTH_DYNAMIC_REGISTRATION_ENABLED: "true"
+      SAFE_OAUTH_DYNAMIC_REGISTRATION_REDIRECT_ORIGINS: "[]"
+      SAFE_OAUTH_DYNAMIC_REGISTRATION_RATE_PER_MINUTE: "10"
+      SAFE_LDAP_URL: ""
+      SAFE_LDAP_BIND_DN: ""
+      SAFE_LDAP_BIND_PASSWORD: ""
+      SAFE_LDAP_BASE_DN: ""
+      SAFE_LDAP_USER_FILTER: "(uid=%s)"
+      # 本地部署默认离线（不激活许可证）
+      SAFE_LICENSE_SERVER_URL: ""
+      SAFE_LICENSE_CA_FILE: ""
+      SAFE_LICENSE_INSECURE_SKIP_VERIFY: "false"
+      OPENBKN_INSTANCE_ID: ${OPENBKN_INSTANCE_ID:-}
+      BKN_SAFE_INITIAL_PASSWORD: ${BKN_SAFE_INITIAL_PASSWORD:-111111}
+      GIN_MODE: release
+    expose:
+      - "3000"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      hydra:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/health/alive"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - openbkn
+
+  seed-clients:
+    # 复用 bkn-safe 镜像（自带 curl），幂等注册 OAuth 登录入口客户端
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/bkn-safe:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-seed-clients
+    restart: "no"
+    entrypoint: ["/bin/sh", "/scripts/seed-clients.sh"]
+    environment:
+      ADMIN: http://hydra:4445
+      WEB_REDIRECTS_JSON: '["${STUDIO_REDIRECT_URI:-http://localhost:8000/studio/callback}"]'
+      WEB_LOGOUTS_JSON: '["http://localhost:8000/studio"]'
+      CLI_REDIRECT: ${CLI_REDIRECT_URI:-http://127.0.0.1:9010/callback}
+      CI_SECRET: ""
+    volumes:
+      - ./init/seed-clients.sh:/scripts/seed-clients.sh:ro
+    depends_on:
+      hydra:
+        condition: service_healthy
+    networks:
+      - openbkn
+
+  # ── 业务服务（不映射宿主端口，经 gateway 暴露）──────────────────────────
+  bkn-backend:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/bkn-backend:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-bkn-backend
+    restart: *restart
+    environment:
+      <<: *common-env
+      BKN_SAFE_URL: http://bkn-safe:3000
+      BKN_SAFE_BASE_URL: http://bkn-safe:3000
+      DB_TYPE: MariaDB
+      MQ_TYPE: kafka
+      DM_SVC_PATH: /opt/bkn-backend/config
+      KN_CHILD_RESOURCE_FILTER_CHUNK_SIZE: "0"
+      POD_NAME: bkn-backend
+    expose:
+      - "13014"
+    volumes:
+      - ./config/bkn-backend:/opt/bkn-backend/config:ro
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      data-migrator:
+        condition: service_completed_successfully
+      opensearch:
+        condition: service_started
+      kafka:
+        condition: service_started
+      hydra:
+        condition: service_started
+      bkn-safe:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/13014; printf \"GET /api/bkn-backend/v1/health HTTP/1.0\\r\\n\\r\\n\" >&3; head -n1 <&3 | grep -q \" 200 \"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    networks:
+      - openbkn
+
+  bkn-project:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/bkn-project:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-bkn-project
+    restart: *restart
+    environment:
+      <<: *common-env
+      DB_TYPE: MariaDB
+      DM_SVC_PATH: /opt/bkn-project/config
+      POD_NAME: bkn-project
+    expose:
+      - "13016"
+    volumes:
+      - ./config/bkn-project:/opt/bkn-project/config:ro
+      - bkn-project-git:/data/git
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      data-migrator:
+        condition: service_completed_successfully
+      bkn-backend:
+        condition: service_started
+      hydra:
+        condition: service_started
+      agent-operator-integration:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/13016; printf \"GET /api/bkn-project/v1/ready HTTP/1.0\\r\\n\\r\\n\" >&3; head -n1 <&3 | grep -q \" 200 \"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    networks:
+      - openbkn
+
+  ontology-query:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/ontology-query:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-ontology-query
+    restart: *restart
+    environment:
+      <<: *common-env
+      DB_TYPE: MARIADB
+      DM_SVC_PATH: /opt/ontology-query/config
+      ACTION_EXECUTION_MAX_OBJECTS: "10000"
+      ACTION_EXECUTION_DUPLICATE_WINDOW_SECONDS: "60"
+      BKN_SAFE_URL: http://bkn-safe:3000
+      BKN_SAFE_BASE_URL: http://bkn-safe:3000
+      POD_NAME: ontology-query
+      # 单副本可省略；多副本时必须固定同值，否则加密游标跨实例不可用
+      BKN_QUERY_CURSOR_KEY: ${BKN_QUERY_CURSOR_KEY:-}
+    expose:
+      - "13018"
+    volumes:
+      - ./config/ontology-query:/opt/ontology-query/config:ro
+    depends_on:
+      data-migrator:
+        condition: service_completed_successfully
+      opensearch:
+        condition: service_started
+      bkn-backend:
+        condition: service_started
+      vega-backend:
+        condition: service_started
+      agent-operator-integration:
+        condition: service_started
+      mf-model-manager:
+        condition: service_started
+      mf-model-api:
+        condition: service_started
+      hydra:
+        condition: service_started
+      bkn-safe:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/13018; printf \"GET /api/ontology-query/v1/health HTTP/1.0\\r\\n\\r\\n\" >&3; head -n1 <&3 | grep -q \" 200 \"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    networks:
+      - openbkn
+
+  vega-backend:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/vega-backend:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-vega-backend
+    restart: *restart
+    environment:
+      <<: *common-env
+      BKN_SAFE_URL: http://bkn-safe:3000
+      DB_TYPE: MariaDB
+      MQ_TYPE: kafka
+      DM_SVC_PATH: /opt/vega-backend/config
+      # 配置里 password 留空，运行时用该变量覆盖
+      VEGA_DB_PASSWORD: ${MARIADB_ROOT_PASSWORD:-openbkn}
+      POD_NAME: vega-backend
+    expose:
+      - "13014"
+    volumes:
+      - ./config/vega-backend:/opt/vega-backend/config:ro
+      - vega-backend-logs:/opt/vega-backend/logs
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      data-migrator:
+        condition: service_completed_successfully
+      opensearch:
+        condition: service_started
+      kafka:
+        condition: service_started
+      kafka-connect:
+        condition: service_started
+      mf-model-manager:
+        condition: service_started
+      mf-model-api:
+        condition: service_started
+      bkn-safe:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/13014; printf \"GET /api/vega-backend/v1/readyz HTTP/1.0\\r\\n\\r\\n\" >&3; head -n1 <&3 | grep -q \" 200 \"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    networks:
+      - openbkn
+
+  kafka-connect:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/kafka-connect:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-kafka-connect
+    restart: *restart
+    environment:
+      <<: *common-env
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx2G"
+      POD_NAME: kafka-connect
+    expose:
+      - "8083"
+    volumes:
+      - ./config/kafka-connect/kafka-connect.properties:/opt/kafka-connect/kafka-connect.properties:ro
+    depends_on:
+      kafka:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8083/ >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    networks:
+      - openbkn
+
+  mf-model-api:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/mf-model-api:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-mf-model-api
+    restart: *restart
+    environment:
+      <<: *common-env
+      DEVICE_CODE: ""
+      DIRECTORY_PROVIDER: bkn-safe
+      BKN_SAFE_URL: http://bkn-safe:3000
+      RDSHOST: mariadb
+      RDSPORT: "3306"
+      RDSUSER: root
+      RDSPASS: ${MARIADB_ROOT_PASSWORD:-openbkn}
+      DB_TYPE: MYSQL
+      RDSDBNAME: openbkn
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCHREAD: opensearch-read
+      OPENSEARCHWRITE: opensearch-write
+      OPENSEARCH_PORT: "9200"
+      OPENSEARCH_USER: admin
+      OPENSEARCH_PASS: ${OPENSEARCH_PASSWORD:-OpenBKN_Admin123!}
+      REDISCLUSTERMODE: standalone
+      REDISUSER: ""
+      REDISPASS: ""
+      REDISHOST: redis
+      REDISPORT: "6379"
+      # 代码里读写连接分别读 REDISREAD*/REDISWRITE*，默认值是不可达的固定 IP
+      REDISREADHOST: redis
+      REDISREADPORT: "6379"
+      REDISREADUSER: ""
+      REDISREADPASS: ""
+      REDISWRITEHOST: redis
+      REDISWRITEPORT: "6379"
+      REDISWRITEUSER: ""
+      REDISWRITEPASS: ""
+      # 客户端强制 SASL_PLAINTEXT/PLAIN，只能连 19092
+      KAFKAHOST: kafka
+      KAFKAPORT: "19092"
+      KAFKAUSER: admin
+      KAFKAPASS: ${KAFKA_SASL_PASSWORD:-openbkn-kafka}
+      METERING_BACKEND: redis
+      TEXTVECTORMAPPING: "{}"
+      VLMVECTORMAPPING: "{}"
+      TEXTRERANKERMAPPING: "{}"
+      DM_SVC_PATH: /tmp/rds_conf/
+      OAUTHPUBLICHOST: hydra
+      OAUTHPUBLICPORT: "4444"
+      OAUTHADMINHOST: hydra
+      OAUTHADMINPORT: "4445"
+      USERMANAGEMENTPUBLICHOST: user-management-public
+      USERMANAGEMENTPUBLICPORT: "30980"
+      USERMANAGEMENTPRIVATEHOST: user-management-private
+      USERMANAGEMENTPRIVATEPORT: "30980"
+      # base 栈没有 collector；启用 trace 栈后再打开
+      LOG_ENABLED: "false"
+      TRACE_ENABLED: "false"
+      METRIC_ENABLED: "false"
+      LOG_EXPORTER: otlp_http
+      TRACE_PROVIDER: otlp_http
+      METRIC_PROVIDER: console
+      LOG_LOAD_INTERNAL: "10"
+      LOG_LOAD_MAX_LOG: "1000"
+      TRACE_MAX_QUEUE_SIZE: "2048"
+      TRACE_MAX_EXPORT_BATCH_SIZE: "512"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol-contrib:4318
+      METRIC_INTERVAL_SECOND: "60"
+    expose:
+      - "9898"
+    volumes:
+      - ./config/mf-model-api/dm_svc.conf:/tmp/rds_conf/dm_svc.conf:ro
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      data-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      bkn-safe:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:9898/api/v1/health/alive', timeout=5)\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    networks:
+      - openbkn
+
+  mf-model-manager:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/mf-model-manager:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-mf-model-manager
+    restart: *restart
+    environment:
+      <<: *common-env
+      DEVICE_CODE: ""
+      DIRECTORY_PROVIDER: bkn-safe
+      BKN_SAFE_URL: http://bkn-safe:3000
+      RDSHOST: mariadb
+      RDSPORT: "3306"
+      RDSUSER: root
+      RDSPASS: ${MARIADB_ROOT_PASSWORD:-openbkn}
+      DB_TYPE: MYSQL
+      RDSDBNAME: openbkn
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCHREAD: opensearch-read
+      OPENSEARCHWRITE: opensearch-write
+      OPENSEARCH_PORT: "9200"
+      OPENSEARCH_USER: admin
+      OPENSEARCH_PASS: ${OPENSEARCH_PASSWORD:-OpenBKN_Admin123!}
+      REDISCLUSTERMODE: standalone
+      REDISUSER: ""
+      REDISPASS: ""
+      REDISHOST: redis
+      REDISPORT: "6379"
+      # 代码里读写连接分别读 REDISREAD*/REDISWRITE*，默认值是不可达的固定 IP
+      REDISREADHOST: redis
+      REDISREADPORT: "6379"
+      REDISREADUSER: ""
+      REDISREADPASS: ""
+      REDISWRITEHOST: redis
+      REDISWRITEPORT: "6379"
+      REDISWRITEUSER: ""
+      REDISWRITEPASS: ""
+      # 客户端强制 SASL_PLAINTEXT/PLAIN，只能连 19092
+      KAFKAHOST: kafka
+      KAFKAPORT: "19092"
+      KAFKAUSER: admin
+      KAFKAPASS: ${KAFKA_SASL_PASSWORD:-openbkn-kafka}
+      METERING_BACKEND: redis
+      TEXTVECTORMAPPING: "{}"
+      VLMVECTORMAPPING: "{}"
+      TEXTRERANKERMAPPING: "{}"
+      DM_SVC_PATH: /tmp/rds_conf/
+      OAUTHPUBLICHOST: hydra
+      OAUTHPUBLICPORT: "4444"
+      OAUTHADMINHOST: hydra
+      OAUTHADMINPORT: "4445"
+      USERMANAGEMENTPUBLICHOST: user-management-public
+      USERMANAGEMENTPUBLICPORT: "30980"
+      USERMANAGEMENTPRIVATEHOST: user-management-private
+      USERMANAGEMENTPRIVATEPORT: "30980"
+      LOG_ENABLED: "false"
+      TRACE_ENABLED: "false"
+      METRIC_ENABLED: "false"
+      LOG_EXPORTER: console
+      TRACE_PROVIDER: console
+      METRIC_PROVIDER: console
+      LOG_LOAD_INTERNAL: "10"
+      LOG_LOAD_MAX_LOG: "1000"
+      TRACE_MAX_QUEUE_SIZE: "50000"
+      METRIC_INTERVAL_SECOND: "60"
+    expose:
+      - "9898"
+    volumes:
+      - ./config/mf-model-manager/dm_svc.conf:/tmp/rds_conf/dm_svc.conf:ro
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      data-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      bkn-safe:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:9898/api/v1/health/alive', timeout=5)\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+    networks:
+      - openbkn
+
+  oss-gateway-backend:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/oss-gateway-backend:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-oss-gateway-backend
+    restart: *restart
+    environment:
+      <<: *common-env
+      DEVICE_CODE: ""
+      ENVIRONMENT: production
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol-contrib:4318
+      LOG_ENABLED: "false"
+      TRACE_ENABLED: "false"
+      METRIC_ENABLED: "false"
+      LOG_EXPORTER: http
+      TRACE_PROVIDER: http
+      METRIC_PROVIDER: http
+      LOG_LOAD_INTERNAL: "10"
+      LOG_LOAD_MAX_LOG: "1000"
+      TRACE_MAX_QUEUE_SIZE: "50000"
+      METRIC_INTERVAL_SECOND: "60"
+      RDSHOST: mariadb
+      RDSPORT: "3306"
+      RDSUSER: root
+      RDSPASS: ${MARIADB_ROOT_PASSWORD:-openbkn}
+      DB_TYPE: MYSQL
+      RDSDBNAME: openbkn
+      # 与 chart 一致；用于解开库中已加密的 access key
+      CRYPTO_AES_KEY: ${OSS_GATEWAY_AES_KEY:-k8WVs8pfQae0LhUgevDvPXiYPqYZ8HRM}
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCHREAD: opensearch-read
+      OPENSEARCHWRITE: opensearch-write
+      OPENSEARCH_PORT: "9200"
+      OPENSEARCH_USER: admin
+      OPENSEARCH_PASS: ${OPENSEARCH_PASSWORD:-OpenBKN_Admin123!}
+      REDISCLUSTERMODE: standalone
+      REDISUSER: ""
+      REDISPASS: ""
+      REDISHOST: redis
+      REDISPORT: "6379"
+      REDIS_DB: "2"
+      KAFKAHOST: kafka
+      KAFKAPORT: "9092"
+      KAFKAUSER: ""
+      KAFKAPASS: ""
+      DM_SVC_PATH: /tmp/rds_conf/
+      OAUTHPUBLICHOST: hydra
+      OAUTHPUBLICPORT: "4444"
+      OAUTHADMINHOST: hydra
+      OAUTHADMINPORT: "4445"
+    expose:
+      - "8080"
+    volumes:
+      - ./config/oss-gateway-backend/dm_svc.conf:/tmp/rds_conf/dm_svc.conf:ro
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      data-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health/ready >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - openbkn
+
+  seed-storage:
+    # 在 oss-gateway 中登记默认存储，供 operator 上传技能/文件时解析 storage_id
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/bkn-safe:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-seed-storage
+    restart: "no"
+    entrypoint: ["/bin/sh", "/scripts/seed-storage.sh"]
+    environment:
+      OSS_GATEWAY: http://oss-gateway-backend:8080
+      ENDPOINT: ${OSS_PUBLIC_ENDPOINT:-http://localhost:9000}
+      INTERNAL_ENDPOINT: http://minio:9000
+      BUCKET: openbkn
+      ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - ./init/seed-storage.sh:/scripts/seed-storage.sh:ro
+    depends_on:
+      oss-gateway-backend:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks:
+      - openbkn
+
+  agent-operator-integration:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/agent-operator-integration:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-agent-operator-integration
+    restart: *restart
+    environment:
+      <<: *common-env
+      BKN_SAFE_URL: http://bkn-safe:3000
+      SKILL_INTERNAL_READ_AUTHZ: shadow
+      LOGOUT: stdout
+      DB_TYPE: mysql
+    expose:
+      - "9000"
+    volumes:
+      - ./config/agent-operator-integration/agent-operator-integration.yaml:/sysvol/config/agent-operator-integration.yaml:ro
+      - ./config/agent-operator-integration/mq_config.yaml:/sysvol/config/mq_config.yaml:ro
+      - ./config/agent-operator-integration/observability.yaml:/sysvol/config/observability.yaml:ro
+      - ./config/agent-operator-integration/agent-operator-integration-secret.yaml:/sysvol/secret/agent-operator-integration-secret.yaml:ro
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      data-migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      kafka:
+        condition: service_started
+      bkn-safe:
+        condition: service_started
+      hydra:
+        condition: service_started
+      vega-backend:
+        condition: service_started
+      mf-model-api:
+        condition: service_started
+      mf-model-manager:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000; printf \"GET /health/ready HTTP/1.0\\r\\n\\r\\n\" >&3; head -n1 <&3 | grep -q \" 200 \"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    networks:
+      - openbkn
+
+  agent-retrieval:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/agent-retrieval:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-agent-retrieval
+    restart: *restart
+    environment:
+      <<: *common-env
+      LOGOUT: stdout
+      LC_ALL: en_US.UTF-8
+      EXECUTE_SKILL_ENABLED: "false"
+      MCP_METRIC_APP_HTML_URL: ""
+      DB_TYPE: mysql
+      CONTEXT_LOADER_RESOURCE_FILTER_CHUNK_SIZE: "200"
+      PTC_SANDBOX_MCP_URL: http://agent-retrieval:30780/api/agent-retrieval/v1/mcp/
+      BKN_TRACE_CORE_URL: http://agent-observability:8081
+      BKN_TRACE_INTERACTION_FINISH_TIMEOUT_MS: "5000"
+      BKN_TRACE_DURABLE_ANSWER_ENABLED: "false"
+      BKN_TRACE_ARTIFACT_ENDPOINT: http://agent-observability:8080/api/agent-observability/v1/evidence/artifacts
+      BKN_TRACE_ARTIFACT_TOKEN: ${TRACE_EVIDENCE_INGEST_TOKEN:-change-me-trace-evidence-token}
+      BKN_TRACE_EVIDENCE_PUBLISHER_ENABLED: "false"
+      POD_ID: agent-retrieval
+    expose:
+      - "30779"
+      - "30780"
+    volumes:
+      - ./config/agent-retrieval/agent-retrieval.yaml:/sysvol/config/agent-retrieval.yaml:ro
+      - ./config/agent-retrieval/observability.yaml:/sysvol/config/observability.yaml:ro
+      - ./config/agent-retrieval/agent-retrieval-secret.yaml:/sysvol/secret/agent-retrieval-secret.yaml:ro
+    depends_on:
+      bkn-backend:
+        condition: service_started
+      ontology-query:
+        condition: service_started
+      vega-backend:
+        condition: service_started
+      agent-operator-integration:
+        condition: service_started
+      bkn-safe:
+        condition: service_started
+      hydra:
+        condition: service_started
+      mf-model-api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/30779; printf \"GET /health/ready HTTP/1.0\\r\\n\\r\\n\" >&3; head -n1 <&3 | grep -q \" 200 \"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - openbkn
+      # 沙箱执行器通过 sandbox_network 回连 30780
+      - sandbox_network
+
+  bkn-agent:
+    image: ${IMAGE_REGISTRY:-ghcr.io/openbkn-ai}/bkn-agent:${OPENBKN_VERSION:-0.2.1}
+    container_name: openbkn-bkn-agent
+    restart: *restart
+    # 单副本硬约束：进程内保存 one-shot 任务与并发闸门，禁止 --scale
+    environment:
+      <<: *common-env
+      BKN_AGENT_PORT: "30800"
+      RDSHOST: mariadb
+      RDSPORT: "3306"
+      RDSDBNAME: openbkn
+      RDSUSER: root
+      RDSPASS: ${MARIADB_ROOT_PASSWORD:-openbkn}
+      HYDRA_ADMIN_BASE: http://hydra:4445
+      BKN_SAFE_BASE: http://bkn-safe:3000/api/safe/v1
+      MF_MODEL_API_PRIVATE_BASE: http://mf-model-api:9898/api/private/mf-model-api/v1
+      OPERATOR_INTEGRATION_BASE: http://agent-operator-integration:9000/api/agent-operator-integration
+      CONTEXT_LOADER_MCP_URL: http://agent-retrieval:30779/api/agent-retrieval/v1/mcp/
+      BKN_AGENT_DEFAULT_MODEL: ""
+      CHECKPOINTER_BACKEND: mysql
+      CHECKPOINTER_ALLOW_RUNTIME_DDL: "false"
+      BKN_PROVENANCE_BOOTSTRAP_TOKEN: ${BKN_AGENT_PROVENANCE_TOKEN:-change-me-bkn-agent-provenance-token}
+      # base 栈没有 collector，先关闭；启用 trace 栈后再打开
+      OTEL_ENABLED: "false"
+      OTEL_LOGS_ENABLED: "false"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol-contrib:4318
+      BKN_TRACE_ARTIFACT_INGEST_URL: http://agent-observability:8080/api/agent-observability/v1/evidence/artifacts
+      BKN_TRACE_ARTIFACT_INGEST_TOKEN: ${TRACE_EVIDENCE_INGEST_TOKEN:-change-me-trace-evidence-token}
+      # producer 硬编码 SASL_PLAINTEXT/PLAIN，PLAINTEXT broker 下必须关闭
+      BKN_TRACE_EVIDENCE_PUBLISHER_ENABLED: "false"
+    expose:
+      - "30800"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      data-migrator:
+        condition: service_completed_successfully
+      hydra:
+        condition: service_started
+      bkn-safe:
+        condition: service_started
+      mf-model-api:
+        condition: service_started
+      agent-operator-integration:
+        condition: service_started
+      agent-retrieval:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:30800/api/v1/health', timeout=5)\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - openbkn
+
+networks:
+  openbkn:
+    name: openbkn
+    driver: bridge
+  # sandbox 执行器的 NetworkMode 在代码里硬编码为 sandbox_network，名字不可改
+  sandbox_network:
+    name: sandbox_network
+    driver: bridge
+
+volumes:
+  mariadb-data:
+  postgres-data:
+  redis-data:
+  opensearch-data:
+  kafka-data:
+  minio-data:
+  bkn-project-git:
+  vega-backend-logs:

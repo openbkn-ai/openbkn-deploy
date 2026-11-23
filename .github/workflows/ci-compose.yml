@@ -1,0 +1,84 @@
+name: Compose stack
+
+# Static contract for the single-host docker compose stack under compose/.
+# No images are pulled: `docker compose config` only parses, interpolates and
+# validates the service graph, so this job stays fast and network-free.
+
+on:
+  pull_request:
+    paths:
+      - 'compose/**'
+      - '.github/workflows/ci-compose.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'compose/**'
+      - '.github/workflows/ci-compose.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  static-contract:
+    name: Static contract
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: compose
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell and Python syntax
+        run: |
+          bash -n init/seed-clients.sh
+          bash -n init/seed-storage.sh
+          python3 -m py_compile init/render-secret-config.py
+
+      - name: Compose parses with every overlay
+        run: |
+          cp .env.example .env
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.trace.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.sandbox.yml --profile sandbox config -q
+
+      - name: Every bind mount source exists
+        run: |
+          cp .env.example .env
+          docker compose -f docker-compose.yml \
+            -f docker-compose.trace.yml \
+            -f docker-compose.sandbox.yml \
+            --profile sandbox config --format json > /tmp/stack.json
+          python3 - <<'PY'
+          import json, os, sys
+
+          stack = json.load(open('/tmp/stack.json'))
+          missing = []
+          for name, svc in stack.get('services', {}).items():
+              for vol in svc.get('volumes', []) or []:
+                  if vol.get('type') != 'bind':
+                      continue
+                  src = vol.get('source', '')
+                  if not os.path.exists(src):
+                      missing.append(f'{name}: {src}')
+          print(f'services: {len(stack.get("services", {}))}')
+          if missing:
+              print('missing bind mount sources:')
+              print('\n'.join(missing))
+              sys.exit(1)
+          print('all bind mount sources exist')
+          PY
+
+      - name: Gateway config sanity
+        run: |
+          python3 - <<'PY'
+          import sys
+
+          text = open('gateway/nginx.conf', encoding='utf-8').read()
+          if text.count('{') != text.count('}'):
+              sys.exit('unbalanced braces in gateway/nginx.conf')
+          proxies = [l for l in text.splitlines() if 'proxy_pass' in l]
+          broken = [l for l in proxies if not l.strip().endswith(';')]
+          if broken:
+              sys.exit(f'proxy_pass without semicolon: {broken}')
+          print(f'{len(proxies)} proxy_pass directives, braces balanced')
+          PY

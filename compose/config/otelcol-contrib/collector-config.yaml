@@ -1,0 +1,84 @@
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  basicauth/client:
+    client_auth:
+      username: ${env:OPENSEARCH_AUTH_USERNAME}
+      password: ${env:OPENSEARCH_AUTH_PASSWORD}
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  filter/log-principal:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'attributes["actor_id"] == nil'
+        - 'attributes["actor_id"] == ""'
+        - 'attributes["actor_id"] == "anonymous"'
+        - 'attributes["actor_id"] == "anonymous-user"'
+  batch:
+    timeout: 1s
+    send_batch_size: 512
+    send_batch_max_size: 1024
+  traceadmission:
+    policy_url: ${env:TRACE_ADMISSION_POLICY_URL}
+    configuration_url: ${env:TRACE_ADMISSION_CONFIGURATION_URL}
+    heartbeat_url: ${env:TRACE_ADMISSION_HEARTBEAT_URL}
+    ack_url_base: ${env:TRACE_ADMISSION_ACK_URL_BASE}
+    workload_identity: ${env:TRACE_ADMISSION_WORKLOAD_IDENTITY}
+    poll_interval: ${env:TRACE_ADMISSION_POLL_INTERVAL}
+    http_timeout: ${env:TRACE_ADMISSION_HTTP_TIMEOUT}
+
+exporters:
+  opensearch:
+    http:
+      endpoint: http://opensearch:9200
+      tls:
+        insecure: true
+      auth:
+        authenticator: basicauth/client
+    bulk_action: create
+    dataset: default
+    namespace: namespace
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 512
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 10s
+      max_elapsed_time: 5m
+    mapping:
+      mode: ss4o
+
+service:
+  extensions: [health_check, basicauth/client]
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, traceadmission, batch]
+      exporters: [opensearch]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/log-principal, batch]
+      exporters: [opensearch]
