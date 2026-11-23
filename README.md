@@ -752,7 +752,14 @@ controller Pods and nodes: for a hostNetwork controller it adds every node
 InternalIP to `networkPolicy.gateway.ipBlocks` and uses the numeric container
 port. Only that port is opened on the nodes. Rerun the installer after adding
 or readdressing nodes; saved node addresses are rediscovered, while explicit
-operator `ipBlocks` are preserved.
+operator `ipBlocks` are preserved. Reading Pods and nodes is optional: without
+them discovery keeps the Pod-network rule, and only a hostNetwork controller
+without readable node addresses stops the installation. A saved operator
+override of `networkPolicy.gateway.port` that names a port (for example `http`)
+is kept and then rejected by the Chart together with `ipBlocks`; replace it with
+the controller's numeric container port. To skip discovery, set both
+`controlPlane.env.BKN_BASE_URL` and `networkPolicy.gateway`: an explicit origin
+alone leaves the gateway egress rule disabled.
 
 This requires the matching Foundry sandbox Chart with `controlPlane.gateway`
 and `networkPolicy.gateway.ipBlocks` support; an older Chart ignores the node

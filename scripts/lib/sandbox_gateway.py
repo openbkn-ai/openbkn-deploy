@@ -55,6 +55,14 @@ def base_url(render):
     raise ValueError("Sandbox ConfigMap BKN_BASE_URL is missing from Helm rendering")
 
 
+# Discovery reruns whenever BKN_BASE_URL is empty, and an explicit origin skips
+# it entirely, so a manual fix always needs both settings.
+REMEDY = (
+    "set controlPlane.env.BKN_BASE_URL and configure networkPolicy.gateway "
+    "explicitly (a hostNetwork gateway needs ipBlocks and a numeric port)"
+)
+
+
 def _controller_pods(items, namespace, selector):
     """Return the live Pods behind the discovered Service."""
     pods = []
@@ -62,7 +70,7 @@ def _controller_pods(items, namespace, selector):
         metadata = item.get("metadata", {})
         labels = metadata.get("labels") or {}
         if (
-            item.get("kind") != "Pod"
+            item.get("kind", "Pod") != "Pod"
             or metadata.get("namespace") != namespace
             or any(labels.get(key) != value for key, value in selector.items())
             or item.get("status", {}).get("phase") in ("Succeeded", "Failed")
@@ -84,41 +92,37 @@ def _container_port(pods, target_port):
                     numbers.add(int(port["containerPort"]))
     if len(numbers) != 1:
         raise ValueError(
-            "Cannot resolve the hostNetwork gateway target port {}; configure "
-            "networkPolicy.gateway explicitly".format(target_port)
+            "Cannot resolve the hostNetwork gateway target port {}; {}".format(target_port, REMEDY)
         )
     return numbers.pop()
 
 
 def _node_ip_blocks(nodes):
     """Every node InternalIP, so a rescheduled controller stays reachable."""
+    if "items" not in (nodes or {}):
+        raise ValueError("Cannot read cluster nodes for the hostNetwork gateway; " + REMEDY)
     networks = set()
-    for node in (nodes or {}).get("items", []):
+    for node in nodes["items"]:
         for address in node.get("status", {}).get("addresses", []):
             if address.get("type") == "InternalIP":
                 networks.add(ipaddress.ip_network(address["address"]))
     if not networks:
-        raise ValueError(
-            "A hostNetwork gateway needs node InternalIP addresses; configure "
-            "networkPolicy.gateway.ipBlocks explicitly"
-        )
+        raise ValueError("Cluster nodes report no InternalIP for the hostNetwork gateway; " + REMEDY)
     ordered = sorted(networks, key=lambda network: (network.version, network))
     return [{"cidr": str(network)} for network in ordered]
 
 
-def discover(services, nodes=None):
+def discover(services, nodes=None, pods=None):
     """Discover one ingress controller using its Service port, selector and target port.
 
-    The input list may also carry the controller Pods. A hostNetwork controller
-    answers on node addresses, and NetworkPolicy implementations such as the
-    kube-router built into k3s never select hostNetwork Pods by label, so the
-    rule then also lists node addresses on the numeric port.
+    A hostNetwork controller answers on node addresses, and NetworkPolicy
+    implementations such as the kube-router built into k3s never select
+    hostNetwork Pods by label, so the rule then also lists node addresses on the
+    numeric port. Without readable Pods the rule assumes Pod networking, as
+    before; without readable nodes only a hostNetwork controller fails.
     """
-    items = services.get("items", [])
     candidates = []
-    for service in items:
-        if service.get("kind", "Service") != "Service":
-            continue
+    for service in services.get("items", []):
         spec = service.get("spec", {})
         for port in spec.get("ports", []):
             if port.get("name") != "http" or port.get("protocol", "TCP") != "TCP":
@@ -127,10 +131,7 @@ def discover(services, nodes=None):
                 continue
             candidates.append((service, port))
     if len(candidates) != 1:
-        raise ValueError(
-            "Expected one HTTP ingress controller Service; configure "
-            "controlPlane.env.BKN_BASE_URL and networkPolicy.gateway explicitly"
-        )
+        raise ValueError("Expected one HTTP ingress controller Service; " + REMEDY)
     service, port = candidates[0]
     metadata, selector = service["metadata"], service["spec"]["selector"]
     target_port = port.get("targetPort", port["port"])
@@ -141,15 +142,21 @@ def discover(services, nodes=None):
         "port": target_port,
         "ipBlocks": [],
     }
-    pods = _controller_pods(items, metadata["namespace"], selector)
-    if not pods:
+    if "items" not in (pods or {}):
+        print(
+            "Sandbox gateway: cannot read controller Pods; the egress rule assumes "
+            "Pod networking, which a hostNetwork controller never matches",
+            file=sys.stderr,
+        )
+    controllers = _controller_pods((pods or {}).get("items", []), metadata["namespace"], selector)
+    if "items" in (pods or {}) and not controllers:
         print(
             "Sandbox gateway: no running controller Pod found; the egress rule "
             "assumes Pod networking",
             file=sys.stderr,
         )
-    if any(pod.get("spec", {}).get("hostNetwork") for pod in pods):
-        policy["port"] = _container_port(pods, target_port)
+    if any(pod.get("spec", {}).get("hostNetwork") for pod in controllers):
+        policy["port"] = _container_port(controllers, target_port)
         policy["ipBlocks"] = _node_ip_blocks(nodes)
     return {
         "controlPlane": {
@@ -170,11 +177,12 @@ def main():
     if action == "preserve":
         json.dump(preserve(value), sys.stdout)
     elif action == "discover":
-        nodes = None
-        if len(sys.argv) > 2:
-            with open(sys.argv[2], encoding="utf-8") as handle:
-                nodes = json.load(handle)
-        json.dump(discover(value, nodes), sys.stdout)
+        # Optional files: nodes, then controller Pods; each may hold {} when unreadable.
+        documents = []
+        for path in sys.argv[2:4]:
+            with open(path, encoding="utf-8") as handle:
+                documents.append(json.load(handle))
+        json.dump(discover(value, *documents), sys.stdout)
     elif action == "base-url":
         print(base_url(value))
     elif action == "validate":

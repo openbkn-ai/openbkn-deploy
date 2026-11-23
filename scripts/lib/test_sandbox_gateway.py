@@ -68,7 +68,7 @@ class SandboxGatewayTests(unittest.TestCase):
         return result["networkPolicy"]["gateway"]
 
     def test_pod_network_gateway_keeps_selector_and_named_port(self):
-        result = discover({"items": [self.service(), self.pod(host_network=False)]})
+        result = discover({"items": [self.service()]}, None, {"items": [self.pod(host_network=False)]})
         self.assertEqual(self.gateway(result)["port"], "web")
         self.assertEqual(self.gateway(result)["ipBlocks"], [])
         self.assertEqual(self.gateway(result), result["controlPlane"]["gateway"]["networkPolicy"])
@@ -80,7 +80,7 @@ class SandboxGatewayTests(unittest.TestCase):
             [("InternalIP", "192.0.2.11"), ("Hostname", "node-b"), ("ExternalIP", "198.51.100.7")],
             [("InternalIP", "192.0.2.10"), ("InternalIP", "2001:db8::10")],
         )
-        result = discover({"items": [self.service(), self.pod()]}, nodes)
+        result = discover({"items": [self.service()]}, nodes, {"items": [self.pod()]})
         policy = self.gateway(result)
         self.assertEqual(policy["port"], 80)
         self.assertEqual(
@@ -91,39 +91,55 @@ class SandboxGatewayTests(unittest.TestCase):
         self.assertEqual(result["controlPlane"]["gateway"]["baseURL"], "http://edge.gateway.svc:8080")
 
     def test_finished_and_unrelated_pods_do_not_decide_the_mode(self):
-        items = [
-            self.service(),
+        pods = [
             self.pod(phase="Succeeded"),
             self.pod(namespace="other"),
             self.pod(app="other"),
             self.pod(host_network=False),
         ]
-        self.assertEqual(self.gateway(discover({"items": items}))["ipBlocks"], [])
+        result = discover({"items": [self.service()]}, None, {"items": pods})
+        self.assertEqual(self.gateway(result)["ipBlocks"], [])
+
+    def test_unreadable_pods_and_nodes_keep_pod_network_discovery(self):
+        # Reading Pods and nodes is optional, so installs that worked before still do.
+        result = discover({"items": [self.service()]}, {}, {})
+        self.assertEqual(self.gateway(result)["port"], "web")
+        self.assertEqual(self.gateway(result)["ipBlocks"], [])
 
     def test_host_network_gateway_without_node_addresses_fails(self):
-        with self.assertRaisesRegex(ValueError, "node InternalIP"):
-            discover({"items": [self.service(), self.pod()]})
-        with self.assertRaisesRegex(ValueError, "node InternalIP"):
-            discover({"items": [self.service(), self.pod()]}, self.nodes([("Hostname", "node-a")]))
+        pods = {"items": [self.pod()]}
+        with self.assertRaisesRegex(ValueError, "Cannot read cluster nodes"):
+            discover({"items": [self.service()]}, {}, pods)
+        with self.assertRaisesRegex(ValueError, "no InternalIP"):
+            discover({"items": [self.service()]}, self.nodes([("Hostname", "node-a")]), pods)
+
+    def test_failures_name_both_settings_a_manual_fix_needs(self):
+        # An explicit origin skips discovery, so the gateway rule must be set with it.
+        for services, nodes in (({"items": []}, None), ({"items": [self.service()]}, {})):
+            with self.assertRaises(ValueError) as caught:
+                discover(services, nodes, {"items": [self.pod()]})
+            self.assertIn("controlPlane.env.BKN_BASE_URL", str(caught.exception))
+            self.assertIn("networkPolicy.gateway", str(caught.exception))
 
     def test_unresolvable_host_network_target_port_fails(self):
         pod = self.pod()
         pod["spec"]["containers"][0]["ports"][0]["name"] = "other"
         with self.assertRaisesRegex(ValueError, "target port web"):
-            discover({"items": [self.service(), pod]}, self.nodes([("InternalIP", "192.0.2.10")]))
+            discover({"items": [self.service()]}, self.nodes([("InternalIP", "192.0.2.10")]), {"items": [pod]})
 
     def test_numeric_target_port_needs_no_container_lookup(self):
         service = self.service()
         service["spec"]["ports"][0]["targetPort"] = 8443
         pod = self.pod()
         pod["spec"]["containers"] = []
-        result = discover({"items": [service, pod]}, self.nodes([("InternalIP", "192.0.2.10")]))
+        result = discover({"items": [service]}, self.nodes([("InternalIP", "192.0.2.10")]), {"items": [pod]})
         self.assertEqual(self.gateway(result)["port"], 8443)
 
     def test_changed_node_addresses_are_rediscovered(self):
         import json
 
-        old = discover({"items": [self.service(), self.pod()]}, self.nodes([("InternalIP", "192.0.2.10")]))
+        nodes = self.nodes([("InternalIP", "192.0.2.10")])
+        old = discover({"items": [self.service()]}, nodes, {"items": [self.pod()]})
         self.assertEqual(preserve(json.loads(json.dumps(old))), {})
         # Values saved by an installer without hostNetwork support are system defaults too.
         legacy = json.loads(json.dumps(discover({"items": [self.service()]})))
@@ -134,7 +150,7 @@ class SandboxGatewayTests(unittest.TestCase):
     def test_operator_ip_blocks_survive_rediscovery(self):
         import json
 
-        old = json.loads(json.dumps(discover({"items": [self.service(), self.pod(host_network=False)]})))
+        old = json.loads(json.dumps(discover({"items": [self.service()]}, None, {"items": [self.pod(host_network=False)]})))
         old["networkPolicy"]["gateway"]["ipBlocks"] = [{"cidr": "192.0.2.50/32"}]
         self.assertEqual(preserve(old), {"networkPolicy": {"gateway": {"ipBlocks": [{"cidr": "192.0.2.50/32"}]}}})
 

@@ -14,15 +14,15 @@ installed=false
 old_values='{}'
 services='{"items":[{"metadata":{"name":"custom-gateway","namespace":"edge"},"spec":{"selector":{"app":"edge"},"ports":[{"name":"http","port":8080,"targetPort":"web","nodePort":32080}]}}]}'
 nodes='{"items":[{"status":{"addresses":[{"type":"InternalIP","address":"192.0.2.10"},{"type":"Hostname","address":"node-a"}]}}]}'
+pods='{"items":[]}'
 kubectl() {
     printf '%s\n' "$*" >>"${test_dir}/discovery-calls"
     [[ "${services}" != unavailable ]] || return 1
-    [[ "$1 $2 ${nodes}" != 'get nodes unavailable' ]] || return 1
-    if [[ "$1 $2" == 'get nodes' ]]; then
-        printf '%s' "${nodes}"
-    else
-        printf '%s' "${services}"
-    fi
+    case "$1 $2" in
+        'get nodes') [[ "${nodes}" != unavailable ]] || return 1; printf '%s' "${nodes}" ;;
+        'get pods') [[ "${pods}" != unavailable ]] || return 1; printf '%s' "${pods}" ;;
+        *) printf '%s' "${services}" ;;
+    esac
 }
 helm() {
     case "$1" in
@@ -48,7 +48,8 @@ assert 'BKN_SANDBOX_MCP_URL: "http://agent-retrieval:30780/' in r['manifest']
 PY
 # A hostNetwork controller answers on node addresses. kube-router never selects
 # it by Pod labels, so the rendered rule must list nodes on the numeric port.
-services='{"items":[{"kind":"Service","metadata":{"name":"ingress-nginx-controller","namespace":"ingress-nginx"},"spec":{"selector":{"app":"edge"},"ports":[{"name":"http","port":80,"targetPort":"http"}]}},{"kind":"Pod","metadata":{"namespace":"ingress-nginx","labels":{"app":"edge"}},"spec":{"hostNetwork":true,"containers":[{"ports":[{"name":"http","containerPort":80,"protocol":"TCP"}]}]},"status":{"phase":"Running"}}]}'
+services='{"items":[{"kind":"Service","metadata":{"name":"ingress-nginx-controller","namespace":"ingress-nginx"},"spec":{"selector":{"app":"edge"},"ports":[{"name":"http","port":80,"targetPort":"http"}]}}]}'
+pods='{"items":[{"kind":"Pod","metadata":{"namespace":"ingress-nginx","labels":{"app":"edge"}},"spec":{"hostNetwork":true,"containers":[{"ports":[{"name":"http","containerPort":80,"protocol":"TCP"}]}]},"status":{"phase":"Running"}}]}'
 _openbkn_helm_upgrade_release sandbox openbkn "${args[@]}"
 python3 - "${test_dir}/render.json" <<'PY'
 import json, sys
@@ -61,20 +62,28 @@ PY
 # Unreadable nodes stop only a hostNetwork controller; Pod networking needs none.
 saved_nodes="${nodes}"
 nodes=unavailable
-if _openbkn_helm_upgrade_release sandbox openbkn "${args[@]}" 2>/dev/null; then
+if _openbkn_helm_upgrade_release sandbox openbkn "${args[@]}" 2>"${test_dir}/stderr"; then
     echo 'hostNetwork gateway without node addresses must fail before rollout' >&2
     exit 1
 fi
-hostnetwork_services="${services}"
-services="${services//\"hostNetwork\":true/\"hostNetwork\":false}"
-_openbkn_helm_upgrade_release sandbox openbkn "${args[@]}"
-python3 - "${test_dir}/render.json" <<'PY'
+# The fix it suggests must name both settings: an explicit origin skips discovery.
+grep -q 'Cannot read cluster nodes.*controlPlane.env.BKN_BASE_URL.*networkPolicy.gateway' "${test_dir}/stderr"
+assert_pod_network_rule() {
+    python3 - "${test_dir}/render.json" <<'PY'
 import json, sys
 p = json.load(open(sys.argv[1]))['config']['networkPolicy']['gateway']
 assert p['port'] == 'http' and p['ipBlocks'] == [], p
 PY
+}
+pods="${pods//\"hostNetwork\":true/\"hostNetwork\":false}"
+_openbkn_helm_upgrade_release sandbox openbkn "${args[@]}"
+assert_pod_network_rule
+# Unreadable Pods keep the previous Pod-network rule instead of stopping installation.
+pods=unavailable
+_openbkn_helm_upgrade_release sandbox openbkn "${args[@]}" 2>/dev/null
+assert_pod_network_rule
 nodes="${saved_nodes}"
-services="${hostnetwork_services}"
+pods='{"items":[]}'
 # An explicit current or saved override needs no cluster-wide Service discovery.
 rm "${test_dir}/discovery-calls"
 services=unavailable
@@ -122,7 +131,7 @@ for bad_url in 'http://gateway/api/agent-retrieval/v1/mcp/' 'http://user:passwor
         exit 1
     fi
 done
-[[ "$(wc -l <"${test_dir}/upgrades")" -eq 8 ]]
+[[ "$(wc -l <"${test_dir}/upgrades")" -eq 9 ]]
 # Both charts render separate REST and MCP rules; a REST gateway never changes
 # the namespace selected for a cross-namespace MCP Service.
 for chart_name in sandbox sandbox_standalone; do
