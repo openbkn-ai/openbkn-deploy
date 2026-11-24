@@ -2162,11 +2162,18 @@ setup_dockerhub_mirror() {
     if [[ "${mirror_host}" == "auto" ]]; then
         local _candidates="${OPENBKN_DOCKERHUB_MIRROR_CANDIDATES:-docker.1panel.live docker.m.daocloud.io docker.1ms.run dockerproxy.net}"
         local _accept="application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json"
-        local _cand _picked="" _code
+        local _cand _picked="" _code _curl_exit
         for _cand in ${_candidates}; do
-            _code="$(curl -s -m 8 -o /dev/null -w '%{http_code}' -H "Accept: ${_accept}" \
-                "https://${_cand}/v2/oryd/hydra/manifests/v26.2.0?ns=docker.io" 2>/dev/null)"
-            log_info "dockerhub-mirror=auto: probe ${_cand} -> ${_code}"
+            # Probe failures are expected on restricted networks. Handle the
+            # status here so deploy.sh's set -e does not abort the installation.
+            if _code="$(curl -s -m 8 -o /dev/null -w '%{http_code}' -H "Accept: ${_accept}" \
+                "https://${_cand}/v2/oryd/hydra/manifests/v26.2.0?ns=docker.io" 2>/dev/null)"; then
+                log_info "dockerhub-mirror=auto: probe ${_cand} -> ${_code}"
+            else
+                _curl_exit=$?
+                log_warn "dockerhub-mirror=auto: probe ${_cand} failed (curl exit ${_curl_exit}, HTTP ${_code:-000}); trying next candidate."
+                continue
+            fi
             if [[ "${_code}" == "200" ]]; then _picked="${_cand}"; break; fi
         done
         if [[ -z "${_picked}" ]]; then
