@@ -1,3 +1,5 @@
+# shellcheck source=../lib/k8s_dependencies.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/k8s_dependencies.sh"
 
 # Detect package manager (prefer dnf, fallback to yum, then apt)
 detect_package_manager() {
@@ -981,7 +983,15 @@ EOF
     ARCH="amd64"
     
     log_info "Downloading crictl ${CRICTL_VERSION}..."
-    curl -L https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz | tar -C /usr/local/bin -xz
+    local archive
+    archive="$(mktemp)" || return 1
+    if ! k8s_dependency_download "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz" "${archive}"; then
+        rm -f "${archive}"
+        return 1
+    fi
+    tar -C /usr/local/bin -xzf "${archive}" || { rm -f "${archive}"; return 1; }
+    rm -f "${archive}"
+    crictl --version >/dev/null 2>&1 || { log_error "crictl version validation failed"; return 1; }
     
     # Create crictl configuration
     log_info "Creating crictl configuration file..."
@@ -995,154 +1005,17 @@ EOF
     log_info "crictl installed successfully"
 }
 
-# kubernetes-cni (RPM/apt) or containernetworking/plugins tarball provides
-# /opt/cni/bin/{loopback,bridge,...}. If only kubeadm/kubelet were pre-installed,
-# this directory is empty and kubelet fails with: failed to find plugin "loopback".
-_k8s_ensure_cni_bin_plugins() {
-    if [[ -x /opt/cni/bin/loopback ]]; then
-        return 0
-    fi
-
-    log_warn "Missing /opt/cni/bin/loopback — installing CNI plugins for kubelet pod sandbox"
-    detect_package_manager
-
-    if [[ "${PKG_MANAGER}" == "dnf" ]] || [[ "${PKG_MANAGER}" == "yum" ]]; then
-        log_info "Trying package kubernetes-cni..."
-        if [[ "${PKG_MANAGER}" == "dnf" ]]; then
-            dnf install -y --disableexcludes=kubernetes kubernetes-cni 2>/dev/null \
-                || dnf install -y kubernetes-cni \
-                || true
-        else
-            yum install -y --disableexcludes=kubernetes kubernetes-cni 2>/dev/null \
-                || yum install -y kubernetes-cni \
-                || true
-        fi
-    elif [[ "${PKG_MANAGER}" == "apt" ]]; then
-        ${PKG_MANAGER_INSTALL} kubernetes-cni 2>/dev/null || true
-    fi
-
-    if [[ -x /opt/cni/bin/loopback ]]; then
-        log_info "CNI plugins available under /opt/cni/bin"
-        return 0
-    fi
-
-    local v="${CNI_PLUGINS_VERSION:-v1.4.0}"
-    local arch=""
-    case "$(uname -m)" in
-        x86_64|amd64) arch="amd64" ;;
-        aarch64|arm64) arch="arm64" ;;
-        *)
-            log_error "No loopback CNI and unsupported arch for tarball fallback: $(uname -m)"
-            return 1
-            ;;
-    esac
-
-    local tgz="cni-plugins-linux-${arch}-${v}.tgz"
-    local url="https://github.com/containernetworking/plugins/releases/download/${v}/${tgz}"
-    log_info "Fetching ${tgz} into /opt/cni/bin..."
-    mkdir -p /opt/cni/bin
-    if curl -fsSL "${url}" | tar -C /opt/cni/bin -xzf -; then
-        chmod a+x /opt/cni/bin/* 2>/dev/null || true
-        if [[ -x /opt/cni/bin/loopback ]]; then
-            log_info "Installed CNI plugins from containernetworking/plugins ${v}"
-            return 0
-        fi
-    fi
-
-    log_error "Still no /opt/cni/bin/loopback. Install kubernetes-cni (RPM/apt) or unpack CNI plugins there, then restart kubelet."
-    return 1
-}
-
 # Install Kubernetes components (kubeadm, kubelet, kubectl)
 install_kubernetes() {
-    log_info "Installing Kubernetes components..."
-
-    # In offline mode, skip package installation - assume components are pre-installed
-    if [[ "${OFFLINE_MODE}" == "true" ]]; then
-        log_info "Offline mode: Skipping Kubernetes package installation"
-        log_info "Checking for pre-installed Kubernetes components..."
-
-        local missing_components=()
-        if ! command -v kubeadm &> /dev/null; then
-            missing_components+=("kubeadm")
-        fi
-        if ! command -v kubelet &> /dev/null; then
-            missing_components+=("kubelet")
-        fi
-        if ! command -v kubectl &> /dev/null; then
-            missing_components+=("kubectl")
-        fi
-
-        if [[ ${#missing_components[@]} -gt 0 ]]; then
-            log_error "Missing Kubernetes components: ${missing_components[*]}"
-            log_error "In offline mode, please pre-install these packages:"
-            log_error "  - kubeadm"
-            log_error "  - kubelet"
-            log_error "  - kubectl"
-            log_error "  - kubernetes-cni"
-            log_error ""
-            log_error "On RHEL/CentOS/Fedora: yum install -y kubeadm kubelet kubectl kubernetes-cni"
-            log_error "On Ubuntu/Debian: apt-get install -y kubeadm kubelet kubectl"
-            return 1
-        fi
-
-        log_info "✓ All Kubernetes components are pre-installed"
-        _k8s_ensure_cni_bin_plugins || return 1
-        return 0
-    fi
-
-    detect_package_manager
-
-    if [[ "${PKG_MANAGER}" == "dnf" ]] || [[ "${PKG_MANAGER}" == "yum" ]]; then
-        # Check if Kubernetes repo already exists
-        if [[ ! -f /etc/yum.repos.d/kubernetes.repo ]]; then
-            log_info "Configuring Kubernetes yum repo..."
-            cat > /etc/yum.repos.d/kubernetes.repo <<EOF
-[kubernetes]
-name=Kubernetes (Aliyun mirror)
-baseurl=${K8S_RPM_REPO_BASEURL}
-enabled=1
-gpgcheck=1
-gpgkey=${K8S_RPM_REPO_GPGKEY}
-EOF
-            ${PKG_MANAGER_UPDATE}
-        fi
-    fi
-
-    if ! command -v kubeadm &> /dev/null || ! command -v kubelet &> /dev/null || ! command -v kubectl &> /dev/null; then
-        if [[ "${PKG_MANAGER}" == "dnf" ]] || [[ "${PKG_MANAGER}" == "yum" ]]; then
-            # RHEL-family only; Ubuntu/Debian use the apt branch below (no --disableexcludes).
-            # pkgs.k8s.io kubernetes.repo often sets exclude=kubeadm kubelet kubectl — match preflight UX.
-            if [[ "${PKG_MANAGER}" == "dnf" ]]; then
-                dnf install -y --disableexcludes=kubernetes kubeadm kubelet kubectl kubernetes-cni
-                ${PKG_MANAGER_HOLD} kubeadm kubelet kubectl kubernetes-cni 2>/dev/null || true
-            else
-                yum install -y --disableexcludes=kubernetes kubeadm kubelet kubectl kubernetes-cni
-            fi
-        else
-            # For Ubuntu/Debian systems
-            curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
-            echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | \
-                tee /etc/apt/sources.list.d/kubernetes.list
-            
-            ${PKG_MANAGER_UPDATE}
-            ${PKG_MANAGER_INSTALL} kubeadm kubelet kubectl
-            ${PKG_MANAGER_HOLD} kubeadm kubelet kubectl
-        fi
-        
-        log_info "Kubernetes components installed"
-    else
-        log_info "Kubernetes components are already installed"
-    fi
-
+    log_info "Preparing Kubernetes components..."
+    k8s_dependency_install_bins || return 1
     _k8s_ensure_cni_bin_plugins || return 1
-    
-    # Install crictl (always install, even if K8s components already exist)
-    install_crictl
-    
-    # Enable kubelet service
-    systemctl daemon-reload
-    systemctl enable kubelet
+    if [[ "${OFFLINE_MODE:-false}" != true ]]; then
+        install_crictl || return 1
+        systemctl daemon-reload || return 1
+        systemctl enable kubelet || return 1
+    fi
+    log_info "Kubernetes components installed and verified"
 }
 
 # Disable SELinux
@@ -1227,9 +1100,9 @@ preinstall_all() {
     
     check_root
     detect_package_manager
-    install_containerd
-    install_kubernetes
-    install_helm
+    install_kubernetes || return 1
+    install_containerd || return 1
+    install_helm || return 1
     
     log_info "Pre-installation completed successfully"
 }

@@ -570,22 +570,22 @@ main() {
                 check_root
                 # Pre-install dependencies (containerd, k8s, helm) before k8s init
                 log_info "Pre-installing dependencies..."
-                detect_package_manager
-                install_containerd
-                install_kubernetes
-                install_helm
+                detect_package_manager || return 1
+                install_kubernetes || return 1
+                install_containerd || return 1
+                install_helm || return 1
                 
-                check_prerequisites
-                reconcile_openbkn_firewall api
-                init_k8s_master
-                allow_master_scheduling
-                install_cni
-                wait_for_dns
-                reconcile_openbkn_firewall internal
+                check_prerequisites || return 1
+                reconcile_openbkn_firewall api || return 1
+                init_k8s_master || return 1
+                allow_master_scheduling || return 1
+                install_cni || return 1
+                wait_for_dns || return 1
+                reconcile_openbkn_firewall internal || return 1
 
                 if [[ "${AUTO_INSTALL_LOCALPV}" == "true" ]]; then
                     if [[ -z "$(kubectl get storageclass --no-headers 2>/dev/null)" ]]; then
-                        install_localpv
+                        install_localpv || return 1
                     fi
                 fi
 
@@ -594,11 +594,11 @@ main() {
                         log_error "Helm is required to install ingress-nginx. Please run: $0 k8s install"
                         exit 1
                     fi
-                    install_ingress_nginx
+                    install_ingress_nginx || return 1
                 fi
 
                 if [[ "${AUTO_GENERATE_CONFIG}" == "true" ]]; then
-                    generate_config_yaml
+                    generate_config_yaml || return 1
                 fi
                 show_status
                 ;;
@@ -807,7 +807,7 @@ main() {
                 log_info "=========================================="
                 log_info "  Deploying Infrastructure (K8s + Data Services)"
                 log_info "=========================================="
-                main k8s install
+                main k8s install || return 1
                 main data-services install
                 show_status
                 log_info "Infrastructure deployment completed!"

@@ -1303,8 +1303,8 @@ else
 fi
 
 # Kubernetes yum repo (Aliyun mirror) for kubeadm/kubelet/kubectl/cri-tools
-K8S_RPM_REPO_BASEURL="${K8S_RPM_REPO_BASEURL:-https://mirrors.aliyun.com/kubernetes-new/core/stable/v1.28/rpm/}"
-K8S_RPM_REPO_GPGKEY="${K8S_RPM_REPO_GPGKEY:-https://mirrors.aliyun.com/kubernetes-new/core/stable/v1.28/rpm/repodata/repomd.xml.key}"
+K8S_RPM_REPO_BASEURL="${K8S_RPM_REPO_BASEURL:-https://mirrors.aliyun.com/kubernetes-new/core/stable/${PREFLIGHT_K8S_APT_MINOR:-v1.28}/rpm/}"
+K8S_RPM_REPO_GPGKEY="${K8S_RPM_REPO_GPGKEY:-${K8S_RPM_REPO_BASEURL%/}/repodata/repomd.xml.key}"
 
 # Flannel CNI Image Repository Configuration
 # In offline mode, use offline registry; otherwise use SWR mirror
@@ -1650,8 +1650,8 @@ ensure_k8s() {
     log_info "No running Kubernetes cluster detected. Installing K8s first..."
     check_root
     detect_package_manager || return 1
-    install_containerd || return 1
     install_kubernetes || return 1
+    install_containerd || return 1
     install_helm || return 1
 
     check_prerequisites || return 1
