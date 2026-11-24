@@ -534,6 +534,8 @@ cat /etc/containerd/config.toml
 
 ### Kubernetes apt / yum source missing or 404
 
+`deploy.sh openbkn install` automatically prepares Kubernetes dependencies when a new kubeadm cluster is needed; running preflight first is optional. Deploy and the targeted preflight fixes share repository migration, component installation/version checks, and CNI preparation. Existing usable components are reused without package upgrades. Downloads use bounded timeouts and retries; repository changes retain backups and are restored if refresh fails. Installation or version-lock failures stop deployment before cluster initialization. On RPM systems, a configured `K8S_RPM_REPO_BASEURL` / `K8S_RPM_REPO_GPGKEY` mirror is preserved; installing the versionlock plugin may be necessary.
+
 `preflight.sh --check-only` reports one of these in **strict mode** (default):
 
 ```text
@@ -552,7 +554,7 @@ sudo bash deploy/preflight.sh --fix -y
 
 `preflight --fix → k8s-pkgs-repo` covers **both** scenarios (legacy alias `k8s-apt-source` still works in `--fix-allow`):
 
-- Legacy `packages.cloud.google.com` source present → migrate it to `pkgs.k8s.io`.
+- Legacy `packages.cloud.google.com` or `apt.kubernetes.io` source present → migrate it to `pkgs.k8s.io`.
 - No K8s source configured at all → write `/etc/apt/sources.list.d/kubernetes.list` (or `/etc/yum.repos.d/kubernetes.repo`) pointing to `pkgs.k8s.io/core:/stable:/<vX.Y>/deb|rpm/`.
 
 Pin a specific minor with `PREFLIGHT_K8S_APT_MINOR=v1.28` (default: detected from installed `kubeadm`, falls back to `v1.28`).

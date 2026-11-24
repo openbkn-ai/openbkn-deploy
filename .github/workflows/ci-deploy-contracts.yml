@@ -6,6 +6,7 @@ on:
       - 'scripts/**'
       - 'conf/**'
       - 'deploy.sh'
+      - 'preflight.sh'
       - '.github/workflows/ci-deploy-contracts.yml'
   push:
     branches: [main]
@@ -13,6 +14,7 @@ on:
       - 'scripts/**'
       - 'conf/**'
       - 'deploy.sh'
+      - 'preflight.sh'
       - '.github/workflows/ci-deploy-contracts.yml'
 
 permissions:
@@ -24,6 +26,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
+      - name: Kubernetes dependency preparation regressions
+        run: |
+          bash -n deploy.sh preflight.sh scripts/lib/common.sh scripts/lib/k8s_dependencies.sh scripts/lib/preflight_checks.sh scripts/services/k8s.sh
+          python3 -m unittest scripts/lib/test_k8s_dependencies.py -v
+          bash scripts/lib/preflight_checks_test.sh
+          bash scripts/lib/preflight_hardware_test.sh
       - name: Kafka controller heap migration
         run: bash scripts/services/kafka_heap_test.sh
       - name: Manifest and observability configuration contracts

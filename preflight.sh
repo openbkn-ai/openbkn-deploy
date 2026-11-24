@@ -318,7 +318,10 @@ if [[ "${PREFLIGHT_OUTPUT_JSON}" != "true" ]]; then
             echo "    - Repair:   sudo bash ./deploy.sh openbkn install --force-upgrade"
         fi
     else
-        if [[ ${exit_code} -eq 0 ]]; then
+        if [[ ${exit_code} -eq 2 ]]; then
+            echo "  No blocking failures; review the warnings above.（无阻塞项，请查看警告。）"
+            echo "  No BKN Foundry releases detected. Proceed after reviewing those warnings."
+        elif [[ ${exit_code} -eq 0 ]]; then
             echo "  No BKN Foundry releases detected. Environment looks ready for a first-time install:"
             echo "    sudo bash ./deploy.sh openbkn install              # install the full stack"
             echo ""

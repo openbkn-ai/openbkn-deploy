@@ -481,6 +481,8 @@ cat /etc/containerd/config.toml
 
 ### Kubernetes apt / yum 源缺失或 404
 
+`deploy.sh openbkn install` 在需要新建 kubeadm 集群时自动准备 Kubernetes 依赖，无需先运行 preflight。部署入口与 preflight 定向修复共用换源、组件安装及版本验证、CNI 补齐逻辑；已有可用组件直接复用，不自动升级。下载设有超时和有限重试；换源保留备份，刷新失败时恢复原配置。安装或版本锁定失败会在集群初始化前停止部署。RPM 系统保留配置的 `K8S_RPM_REPO_BASEURL` / `K8S_RPM_REPO_GPGKEY` 镜像源，必要时会安装 versionlock 插件。
+
 `preflight.sh --check-only` 在**严格模式**（默认）下会报：
 
 ```text
@@ -499,7 +501,7 @@ sudo bash deploy/preflight.sh --fix -y
 
 `preflight --fix → k8s-pkgs-repo`（旧文档中的 `k8s-apt-source` 仍为 `--fix-allow` 别名）同时覆盖**两种**情况：
 
-- 检测到旧的 `packages.cloud.google.com` 源 → 自动迁移到 `pkgs.k8s.io`。
+- 检测到旧的 `packages.cloud.google.com` 或 `apt.kubernetes.io` 源 → 自动迁移到 `pkgs.k8s.io`。
 - 完全没配置 K8s 源 → 直接写入 `/etc/apt/sources.list.d/kubernetes.list`（或 `/etc/yum.repos.d/kubernetes.repo`），指向 `pkgs.k8s.io/core:/stable:/<vX.Y>/deb|rpm/`。
 
 可用 `PREFLIGHT_K8S_APT_MINOR=v1.28` 锁定特定 minor 版本（默认从已安装的 `kubeadm` 推断，回退 `v1.28`）。
