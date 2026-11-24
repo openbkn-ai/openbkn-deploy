@@ -2,6 +2,7 @@
 
 test:
 	bash scripts/lib/preflight_hardware_test.sh
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/services -p 'test_dockerhub_mirror.py' -v
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*backup.py' -q
 
 lint:
