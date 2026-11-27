@@ -1,0 +1,22 @@
+# Copyright openbkn.ai
+# Configure an existing object storage bucket through --commercial-values. Parsing engines are optional.
+image:
+  repository: kb-api-ee
+objectStorage:
+  endpoint: ''
+  publicEndpoint: ''
+  bucket: kb-ee
+  secure: false
+  region: ''
+  accessKey: ''
+  secretKey: ''
+config:
+  sourceAllowedCIDRs: ''
+parsing:
+  mineru:
+    apiUrl: ''
+    deploy:
+      enabled: false
+      device: cpu
+  libreoffice:
+    apiUrl: ''

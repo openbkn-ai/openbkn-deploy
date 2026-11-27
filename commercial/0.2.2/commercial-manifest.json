@@ -1,0 +1,126 @@
+{
+  "apiVersion": "deploy.openbkn.ai/commercial/v1",
+  "kind": "CommercialManifest",
+  "version": "0.2.2",
+  "platformVersion": "0.2.2",
+  "runtimeProfile": "runtime-profile.json",
+  "releases": {
+    "bkn-backend": {
+      "type": "override",
+      "chart": "bkn-backend",
+      "chartVersion": "0.2.2",
+      "image": {
+        "repository": "openbkn-ai-ee/bkn-backend-ee",
+        "tag": "0.2.2"
+      },
+      "valuesFiles": [
+        "values/bkn-backend.yaml",
+        "values/bkn-backend-eval.yaml"
+      ]
+    },
+    "ontology-query": {
+      "type": "override",
+      "chart": "ontology-query",
+      "chartVersion": "0.2.2",
+      "image": {
+        "repository": "openbkn-ai-ee/ontology-query-ee",
+        "tag": "0.2.2"
+      },
+      "valuesFiles": [
+        "values/ontology-query.yaml"
+      ]
+    },
+    "bkn-safe": {
+      "type": "override",
+      "chart": "bkn-safe",
+      "chartVersion": "0.2.2",
+      "image": {
+        "repository": "openbkn-ai-ee/bkn-safe-ee",
+        "tag": "0.2.2"
+      },
+      "valuesFiles": [
+        "values/bkn-safe.yaml"
+      ]
+    },
+    "vega-backend": {
+      "type": "override",
+      "chart": "vega-backend",
+      "chartVersion": "0.2.2",
+      "image": {
+        "repository": "openbkn-ai-ee/vega-backend-ee",
+        "tag": "0.2.2"
+      },
+      "valuesFiles": [
+        "values/vega-backend.yaml"
+      ]
+    },
+    "agent-observability": {
+      "type": "override",
+      "chart": "agent-observability",
+      "chartVersion": "0.2.2",
+      "image": {
+        "repository": "openbkn-ai-ee/agent-observability-ee",
+        "tag": "0.2.2"
+      },
+      "valuesFiles": [
+        "values/agent-observability.yaml"
+      ]
+    },
+    "bkn-studio": {
+      "type": "override",
+      "chart": "bkn-studio",
+      "chartVersion": "0.2.2",
+      "image": {
+        "repository": "openbkn-ai-ee/bkn-studio-ee",
+        "tag": "0.2.2"
+      },
+      "valuesFiles": [
+        "values/bkn-studio.yaml"
+      ]
+    },
+    "bkn-project": {
+      "type": "addon",
+      "chart": "bkn-project",
+      "chartVersion": "0.2.2",
+      "image": {
+        "repository": "openbkn-ai-ee/bkn-project-ee",
+        "tag": "0.2.2"
+      },
+      "valuesFiles": [
+        "values/bkn-project.yaml"
+      ]
+    },
+    "workshop": {
+      "type": "addon",
+      "chart": "workshop",
+      "chartVersion": "0.2.2",
+      "image": {
+        "repository": "openbkn-ai-ee/workshop-ee",
+        "tag": "0.2.2"
+      },
+      "valuesFiles": [
+        "values/workshop.yaml"
+      ],
+      "consumers": {
+        "bkn-safe": [
+          "values/bkn-safe-workshop.yaml"
+        ]
+      }
+    },
+    "bkn-governance": {
+      "type": "addon",
+      "chart": "bkn-governance",
+      "chartVersion": "0.2.2",
+      "image": {
+        "repository": "openbkn-ai-ee/bkn-governance-ee",
+        "tag": "0.2.2"
+      },
+      "valuesFiles": [
+        "values/bkn-governance.yaml"
+      ]
+    }
+  },
+  "suspendedReleases": [
+    "kb-api"
+  ]
+}

@@ -1,6 +1,8 @@
 """Focused regression tests for sandbox installer gateway ownership."""
 
 import unittest
+from unittest.mock import patch
+import builtins
 
 from sandbox_gateway import base_url, discover, preserve
 
@@ -42,6 +44,20 @@ class SandboxGatewayTests(unittest.TestCase):
     def test_invalid_origin_is_rejected_without_echoing_credentials(self):
         with self.assertRaisesRegex(ValueError, "without credentials or path"):
             base_url({"manifest": '  BKN_BASE_URL: "http://user:secret@gateway"\n'})
+
+    def test_post_rendered_yaml_scalar_formats(self):
+        for scalar in ("'http://gateway:8080'", '"http://gateway:8080"', 'http://gateway:8080'):
+            self.assertEqual(base_url({'manifest': '  BKN_BASE_URL: ' + scalar + '\n'}), 'http://gateway:8080')
+        self.assertEqual(base_url({'manifest': "  BKN_BASE_URL: ''\n"}), '')
+
+    def test_community_quoted_value_does_not_require_pyyaml(self):
+        original = builtins.__import__
+        def no_yaml(name, *args, **kwargs):
+            if name == 'yaml':
+                raise ImportError('PyYAML is absent')
+            return original(name, *args, **kwargs)
+        with patch('builtins.__import__', side_effect=no_yaml):
+            self.assertEqual(base_url({'manifest': '  BKN_BASE_URL: "http://gateway:8080"\n'}), 'http://gateway:8080')
 
     def pod(self, host_network=True, phase="Running", namespace="gateway", app="edge"):
         return {

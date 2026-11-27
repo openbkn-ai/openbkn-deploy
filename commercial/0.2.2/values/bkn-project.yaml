@@ -1,0 +1,7 @@
+# Copyright openbkn.ai
+# The Chart runs database migrations before starting the service; preserve an existing migration Secret.
+image:
+  repository: bkn-project-ee
+migration:
+  enabled: true
+  existingSecret: ''

@@ -209,6 +209,36 @@ def newest_image_tag(image, branch, auth_file=None):
     return max(candidates)[1]
 
 
+def commercial_values(current, desired, previous):
+    """Keep user overrides while updating defaults previously owned by this delivery."""
+    result = copy.deepcopy(current)
+    for key, value in desired.items():
+        old = previous.get(key, MISSING)
+        existing = current.get(key, MISSING)
+        if isinstance(value, dict) and isinstance(existing, dict):
+            result[key] = commercial_values(existing, value, old if isinstance(old, dict) else {})
+        elif existing is MISSING or existing == old:
+            result[key] = copy.deepcopy(value)
+    # Image selection is always owned by the locked delivery, never stale Helm values.
+    if 'image' in desired:
+        result['image'] = {**copy.deepcopy(current.get('image', {})), **copy.deepcopy(desired['image'])}
+    return result
+
+
+def commercial_overrides(values, overrides):
+    result = copy.deepcopy(values)
+    for key, value in overrides.items():
+        if key == 'extraEnv':
+            entries = envs(result.get(key, []))
+            entries.update(envs(value))
+            result[key] = list(entries.values())
+        elif isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = commercial_overrides(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
 def prepare(args):
     directory = Path(args.state)
     saved = get("secret", STATE_NAME, args.namespace)
@@ -218,11 +248,19 @@ def prepare(args):
         if getattr(args, "image_tag", ""):
             raise ValueError("--image-tag requires an enterprise runtime profile")
         return
+    commercial = getattr(args, 'commercial', False)
+    if profile.get('commercialDelivery') and not commercial:
+        raise ValueError('This installation requires --offline and the matching --commercial-manifest')
+    if commercial and not profile.get('commercialDelivery'):
+        raise ValueError('Commercial installation requires a compiled commercial delivery')
     chart_versions = dict(item.split("=", 1) for item in getattr(args, "chart_versions", []))
     validate(profile, args.version, args.releases, chart_versions)
     if old:
-        validate(old, old.get("platformVersion"), args.releases)
-        if (old["name"] != profile["name"] or set(old["releases"]) - set(profile["releases"])
+        suspended = set(profile.get('suspendedReleases', [])) if commercial and old.get('commercialDelivery') else set()
+        if suspended - {'kb-api'} or suspended & set(profile['releases']):
+            raise ValueError('Invalid suspended commercial releases')
+        validate(old, old.get("platformVersion"), list(set(args.releases) | suspended))
+        if (old["name"] != profile["name"] or set(old["releases"]) - set(profile["releases"]) - suspended
                 or set(old.get("addons", {})) - set(profile.get("addons", {}))):
             raise ValueError("Another runtime profile already owns installed releases; refusing to discard its configuration")
         declarations = {item["name"]: item for item in profile.get("secrets", [])}
@@ -238,7 +276,8 @@ def prepare(args):
         image = entry["values"].get("image")
         if image is None:
             continue
-        image.pop("tag", None)
+        if not commercial:
+            image.pop("tag", None)
         if image_tag:
             selected_tags[release] = image_tag
         elif latest_branch:
@@ -289,7 +328,11 @@ def prepare(args):
             if value not in (None, "") and not equivalent(value, previous.get(field)) and not equivalent(value, entry["values"].get(field)):
                 raise ValueError(f"{release} already has another extension provider; refusing to overwrite {field}")
         observed[release] = copy.deepcopy(active)
-        desired = copy.deepcopy(entry["values"])
+        desired = commercial_values(current, entry["values"], previous) if commercial else copy.deepcopy(entry["values"])
+        if commercial and 'image' not in entry['values'] and isinstance(desired.get('image'), dict):
+            desired['image']['registry'] = profile['offlineRegistry'] + '/openbkn-ai'
+        if commercial and 'extraEnv' in entry['values']:
+            desired['extraEnv'] = copy.deepcopy(entry['values']['extraEnv'])
         desired["namespace"] = args.namespace
         if release in selected_tags:
             desired["image"]["tag"] = selected_tags[release]
@@ -314,6 +357,18 @@ def prepare(args):
             active.pop(name, None)
         if "extraEnv" in desired:
             desired["extraEnv"] = list(active.values())
+        if commercial:
+            desired = commercial_overrides(desired, entry.get('environmentValues', {}))
+            pull_secret = profile.get('commercialPullSecret')
+            if pull_secret and entry.get('values', {}).get('image', {}).get('registry', '').endswith('/openbkn-ai-ee'):
+                existing_secrets = desired.setdefault('imagePullSecrets', [])
+                if not isinstance(existing_secrets, list):
+                    raise ValueError(f'{release} imagePullSecrets must be a list')
+                if not any(isinstance(item, dict) and item.get('name') == pull_secret for item in existing_secrets):
+                    existing_secrets.append({'name': pull_secret})
+            for field in entry.get('requiredValues', []):
+                if value_at(desired, field, None) in (None, ''):
+                    raise ValueError(f'Commercial release {release} requires {field}; provide --commercial-values or retain existing Helm configuration')
         write(directory / f"{release}.values.json", desired)
 
     pending = []
@@ -483,8 +538,55 @@ def helm_options(arguments):
 
 
 def render(args):
-    entry = read(Path(args.state) / "profile.json")["releases"][args.release]
+    profile = read(Path(args.state) / "profile.json")
+    entry = profile["releases"][args.release]
     manifest = run(["helm", "template", *helm_options(args.helm_args)])
+    if profile.get('commercialDelivery'):
+        import yaml
+        images = set()
+
+        def collect(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key in ('containers', 'initContainers', 'ephemeralContainers') and isinstance(item, list):
+                        images.update(container['image'] for container in item if isinstance(container, dict) and isinstance(container.get('image'), str))
+                        collect(item)
+                    else:
+                        collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        def check_pull_secret(value, default_hook=False):
+            if isinstance(value, dict):
+                containers = [container for key in ('containers', 'initContainers', 'ephemeralContainers')
+                              for container in value.get(key, []) if isinstance(container, dict)]
+                ee_prefix = profile['offlineRegistry'] + '/openbkn-ai-ee/'
+                if containers and any(str(c.get('image', '')).startswith(ee_prefix) for c in containers):
+                    secret = profile.get('commercialPullSecret')
+                    uses_default = value.get('serviceAccountName', 'default') == 'default'
+                    if secret and not (default_hook and uses_default) and not any(isinstance(item, dict) and item.get('name') == secret
+                                          for item in value.get('imagePullSecrets', [])):
+                        raise ValueError(f'{args.release} Chart does not attach the commercial image pull Secret to every EE workload')
+                for item in value.values():
+                    check_pull_secret(item, default_hook)
+            elif isinstance(value, list):
+                for item in value:
+                    check_pull_secret(item, default_hook)
+
+        for resource in yaml.safe_load_all(manifest):
+            collect(resource)
+            annotations = (resource or {}).get('metadata', {}).get('annotations', {})
+            check_pull_secret(resource, bool(annotations.get('helm.sh/hook')))
+        prefix = profile['offlineRegistry'] + '/'
+        if any(not image.startswith(prefix) for image in images):
+            raise ValueError(f'{args.release} renders images outside the offline registry; configure all dependencies through --commercial-values')
+        desired = entry.get('values', {}).get('image', {})
+        if all(key in desired for key in ('registry', 'repository', 'tag')):
+            expected = f"{desired['registry']}/{desired['repository']}:{desired['tag']}"
+            if expected not in images:
+                raise ValueError(f'{args.release} Chart does not render the locked delivery image')
+        write(Path(args.state) / f'{args.release}.images.json', sorted(images))
     if any(marker not in manifest for marker in entry.get("requiredManifestStrings", [])):
         raise ValueError(f"{args.release} Chart does not implement the required runtime configuration; update the platform Chart")
 
@@ -520,6 +622,7 @@ def main():
         command.add_argument("--state", required=True)
         command.add_argument("--namespace", default="openbkn")
         if name == "prepare":
+            command.add_argument("--commercial", action="store_true")
             command.add_argument("--profile", default="")
             command.add_argument("--version", required=True)
             command.add_argument("--releases", nargs="+", required=True)

@@ -30,11 +30,25 @@ def preserve(values):
 
 def base_url(render):
     """Read the actual rendered ConfigMap, including chart defaults and all overrides."""
-    # Helm's manifest is YAML, but each ConfigMap value is rendered as a quoted
-    # string. Inspect only our exact key, without loading or logging Secrets.
+    # Helm post-renderers may use YAML single quotes or unquoted scalars.
+    # Inspect only the exact key, without loading or logging Secrets.
     for line in render.get("manifest", "").splitlines():
         if line.startswith("  BKN_BASE_URL:"):
-            value = json.loads(line.split(":", 1)[1].strip())
+            try:
+                value = json.loads(line.split(":", 1)[1].strip())
+            except json.JSONDecodeError:
+                # The ordinary community Chart uses JSON-quoted strings and
+                # therefore does not need PyYAML. Commercial post-rendering may
+                # produce other YAML scalar formats.
+                import yaml
+                try:
+                    value = yaml.safe_load(line.split(":", 1)[1].strip())
+                except yaml.YAMLError:
+                    raise ValueError("Sandbox ConfigMap BKN_BASE_URL is invalid YAML") from None
+            if value is None:
+                value = ""
+            if not isinstance(value, str):
+                raise ValueError("Sandbox ConfigMap BKN_BASE_URL must be a string")
             if value:
                 parsed = urlsplit(value)
                 if (

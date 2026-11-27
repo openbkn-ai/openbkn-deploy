@@ -55,3 +55,14 @@ _install_openbkn_release_repo trace isolated repo 0.2.1
 grep -qx -- '--wait' "${work}/helm-args"
 grep -qx -- '--timeout=37s' "${work}/helm-args"
 echo 'PASS: repository path waits for readiness with the configured timeout'
+
+# A leftover commercial auth file must never modify a community install.
+_OPENBKN_COMMERCIAL_DIR="${work}"
+CORE_COMMERCIAL_MANIFEST=""
+: >"${work}/registry-auth.json"
+_install_openbkn_release_repo trace isolated repo 0.2.1
+if grep -qx -- '--post-renderer' "${work}/helm-args"; then
+    echo 'community install unexpectedly enabled commercial post-renderer' >&2
+    exit 1
+fi
+echo 'PASS: community install ignores commercial authentication artifacts'
