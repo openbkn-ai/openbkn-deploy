@@ -85,6 +85,15 @@ class RenderTests(unittest.TestCase):
         for target in (FIXTURE, Path(args[3])):
             self.assertFalse((target / "templates" / "openbkn-audit-values-probe.yaml").exists())
 
+    @unittest.skipUnless(shutil.which("helm"), "real Helm is required")
+    def test_values_probe_with_commercial_post_renderer(self):
+        renderer = Path(__file__).with_name('commercial_post_render.py')
+        args = ["upgrade", "--install", "agent-observability", str(FIXTURE),
+                "--post-renderer", str(renderer), "--set-string", "image.tag=test"]
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            helper.render(self.directory, "actual", args)
+        self.assertEqual(json.loads(output.getvalue())["config"]["image"]["tag"], "test")
+
     @unittest.skipUnless(os.environ.get("AUDIT_PRODUCT_CHART"), "set AUDIT_PRODUCT_CHART for the optional real Chart contract check")
     def test_real_product_chart_contract(self):
         from audit_consumer import NON_AUDIT_KEYS, defaults

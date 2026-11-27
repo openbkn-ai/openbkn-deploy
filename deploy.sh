@@ -73,6 +73,8 @@ usage() {
     echo "  openbkn status               Show OpenBKN services status"
     echo "  openbkn stop|start           Stop/restore business Deployments (keep data services running)"
     echo "                                Use --set to pass custom values to all charts"
+    echo "                                --commercial-values=<YAML> supplies per-release commercial environment values"
+    echo "                                --commercial-manifest=<JSON> installs a commercial delivery (requires --offline and --version_file or --latest)"
     echo "                                --runtime-profile=<JSON> installs a provider delivery profile; later upgrades reuse it"
     echo "  infra install                Install Kubernetes and platform data services"
     echo ""

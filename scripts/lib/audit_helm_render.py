@@ -76,6 +76,20 @@ def stage(directory, args):
 
 
 def render(directory, mode, args):
+    # This probe reads effective Helm values only. Post-renderers operate on
+    # manifests and can remove Helm's source markers needed by --show-only.
+    args = list(args)
+    filtered = []
+    i = 0
+    while i < len(args):
+        if args[i] in ('--post-renderer', '--post-renderer-args'):
+            i += 2
+        elif args[i].startswith(('--post-renderer=', '--post-renderer-args=')):
+            i += 1
+        else:
+            filtered.append(args[i])
+            i += 1
+    args = filtered
     if mode == "explicit":
         target = Path(directory) / "input-probe"
         target.mkdir(exist_ok=True)

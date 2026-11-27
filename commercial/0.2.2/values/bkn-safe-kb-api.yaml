@@ -1,0 +1,5 @@
+# Copyright openbkn.ai
+# Commercial Helm values. The delivery manifest owns image registry, repository and tag.
+extraEnv:
+- name: SAFE_KB_API_BASE_URL
+  value: http://kb-api:8001

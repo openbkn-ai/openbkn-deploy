@@ -12,6 +12,72 @@ MariaDB 与 OpenSearch 的单文件备份、跨环境恢复及首次快照目录
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE.txt)
 
+## 商业版离线安装
+
+商业版使用独立的 `--commercial-manifest` 入口；专业版和企业版安装相同的商业服务，功能由运行时 License 控制。现有社区安装、`--offline` 和 `--runtime-profile` 入口继续可用。新入口不接管旧 `openbkn-ee.sh` 安装环境。
+
+将全部镜像同步至内网仓库。Chart 优先使用 `--charts_dir` 指定的本地目录；省略时使用共享缓存。缺少的 Chart 会按清单锁定版本从清单指定的官方 Chart 源下载（0.2.2 默认使用 GHCR OCI），需要安装主机能访问该源。完全断网时须提前准备完整社区和商业 Chart；已存在但内容不匹配的包仍会报错。商业部署清单位于本仓库 `commercial/0.2.2/commercial-manifest.json`，锁定商业镜像和 Chart 版本，并引用同目录的 `values/` 和 `runtime-profile.json`；请保留目录结构。商业部署数据、生成、打包和安装脚本均由 `openbkn-deploy` 维护，不依赖旧 EE 部署目录。社区清单仍由社区发行物提供，两份清单的平台版本须一致。安装主机需要 Python 3 和 PyYAML。
+
+```bash
+sudo bash ./deploy.sh --offline=registry.example:5000 openbkn install \
+  --version_file=/opt/openbkn/community/openbkn.yaml \
+  --charts_dir=/opt/openbkn/charts \
+  --commercial-manifest=./commercial/0.2.2/commercial-manifest.json
+```
+
+开发测试可使用 `--latest`，根据当前检出的 `main` 或 `release/X.Y.Z` 分支解析社区及商业 Chart、商业镜像，并在安装前锁定和打印本次选择的版本：
+
+```bash
+sudo bash ./deploy.sh --offline=swr.cn-east-3.myhuaweicloud.com \
+  openbkn install --latest \
+  --commercial-manifest=./commercial/0.2.2/commercial-manifest.json
+```
+
+也可以在执行安装的用户环境中同时设置 `SWR_USER` 和 `SWR_PASSWORD`。安装器用临时认证文件查询镜像，并在目标命名空间创建 `openbkn-commercial-pull` Secret，为商业工作负载注入引用；Helm Hook 使用的默认 ServiceAccount 会追加该 Secret，保留已有引用。已有同名 Secret 内容不一致时停止，不会自动覆盖。凭据文件仅保存在安装临时目录，退出后清理。省略这两个变量时，继续使用已有 `skopeo login` 和用户自行配置的拉取凭据。使用 `sudo` 时需确保变量传入 root 环境。
+
+```bash
+export SWR_USER='仓库用户名'
+read -rsp '仓库登录密钥: ' SWR_PASSWORD; echo
+export SWR_PASSWORD
+sudo --preserve-env=SWR_USER,SWR_PASSWORD bash ./deploy.sh \
+  --offline=swr.cn-east-3.myhuaweicloud.com openbkn install --latest \
+  --commercial-manifest=./commercial/0.2.2/commercial-manifest.json
+unset SWR_PASSWORD
+```
+
+需要 Git 检出、`skopeo`、可访问清单对应的 GHCR Chart 仓库和 `--offline` 指定的镜像仓库。未提供环境变量时，私有仓库需先为**运行安装命令的用户**配置 `skopeo login` 凭据。商业 Chart 的版本线必须与商业清单的 platformVersion 一致，release 分支还须与该版本一致；镜像必须有匹配分支和 Chart 版本线的时间戳标签；缺失或无权查询时安装会停止。可选的 `--version_file` 用作组件组成模板，其版本由 `--latest` 重新解析。该模式用于开发测试，版本按组件分别选择，不能证明跨组件兼容性；完全离线交付使用固定清单。
+
+当前商业清单暂不安装或升级 `kb-api`，也不需要为它提供对象存储配置；集群中已有的知识库不会被卸载。`--commercial-values` 仍可按 release 名称提供其他商业组件的环境配置。
+
+商业清单是商业组件的版本来源，直接维护其 Chart 版本、镜像 tag、values 和消费者关系。需要制作 RC 或预览清单时，使用本仓库脚本生成独立交付目录（不读取旧 EE 清单或 Chart lock）：
+
+```bash
+python3 scripts/gen-commercial-manifest.py \
+  --manifest=commercial/0.2.2/commercial-manifest.json \
+  --out=/tmp/openbkn-commercial-preview \
+  --image-tag=bkn-backend=0.2.2-main.example
+```
+
+准备好全部本地 Chart 后，可打包安装器、商业清单及配置、配套社区清单和 Chart：
+
+```bash
+python3 scripts/pack-commercial.py \
+  --manifest=commercial/0.2.2/commercial-manifest.json \
+  --community=release-manifests/0.2.2/openbkn.yaml \
+  --charts-dir=/opt/openbkn/charts \
+  --out=/tmp/openbkn-commercial-0.2.2.tar.gz
+```
+
+打包只读取本地文件，不下载 Chart、不访问或同步镜像仓库；镜像应提前同步到内网仓库。将数据服务 Chart 一并放入 `--charts-dir`。压缩包根目录为 `openbkn-commercial/`，解压后安装参数使用 `--version_file=./community.yaml --charts_dir=./charts --commercial-manifest=./commercial/commercial-manifest.json`，并指定实际离线仓库和环境配置。
+
+知识库相关配置示例暂时保留在 `commercial/0.2.2/values/`，当前清单不会使用它们。不要把镜像坐标放入环境配置；版本以交付清单为准。
+
+镜像路径约定为 `<registry>/openbkn-ai/...`（社区）和 `<registry>/openbkn-ai-ee/...`（商业）。Chart 中跟随主镜像 registry 的第三方镜像也须同步至最终渲染的路径，例如 bkn-safe 的 postgres、Hydra 依赖可能位于商业命名空间。私有仓库使用事先准备的拉取凭据，可通过每个 release 的 `imagePullSecrets` 配置。独立指定镜像的子容器、hook 或可选解析服务也必须配置为内网地址。
+
+新入口在基础设施引导前检查全部应用 Chart 的文件及内部版本；应用 Helm 更新前渲染所有计划内 release，拒绝容器镜像指向内网仓库以外的地址。此检查不证明仓库中存在镜像、架构正确或凭据可用，仍须事先完成镜像同步和节点拉取验证。缺资源或配置时不会回退到公网；支持开发测试用 `--latest`；不能与 `--image-tag` 或 `--runtime-profile` 同时使用。
+
+后续重装或升级须再次提供对应版本的两份清单、Chart 和商业参数；安装器保留 Helm 用户配置、环境变量及持久密钥。商业配置默认值随交付更新，自定义值优先保留；本次显式提供的 `--commercial-values` 可更新已有自定义值。使用过的 Eval 密钥缺失或损坏时停止并要求恢复。安装部分失败可修复后重跑；不提供自动降级或数据库回滚。新入口只用于 `install`，不会扩展现有卸载命令。
+
 ## 企业能力的部署描述
 
 企业包通过 `--runtime-profile=<JSON>` 为社区安装器提供每个服务的配置、镜像坐标和持久密钥要求。安装器不内置企业工具定义，也不执行部署描述中的脚本。

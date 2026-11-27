@@ -1,0 +1,13 @@
+# Copyright openbkn.ai
+# Optional CPU MinerU tuning example; enable only when the image and resources have been prepared.
+parsing:
+  mineru:
+    deploy:
+      enabled: true
+      device: cpu
+      processingWindowSize: 8
+      maxConcurrentRequests: 1
+      pdfRenderThreads: 1
+worker:
+  heavy:
+    replicas: 1

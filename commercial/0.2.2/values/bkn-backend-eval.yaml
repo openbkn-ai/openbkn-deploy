@@ -1,0 +1,23 @@
+# Copyright openbkn.ai
+# Eval runtime configuration. Persistent keys are provisioned and retained by the installer.
+extraEnv:
+- name: OPENBKN_EVAL_ENABLED
+  value: 'true'
+- name: OPENBKN_EVAL_RESOURCE_API_ORIGIN
+  value: http://bkn-backend-svc:13014
+- name: OPENBKN_EVAL_CONTEXT_LOADER_MCP_URL
+  value: http://agent-retrieval:30779/api/agent-retrieval/v1/mcp/
+- name: OPENBKN_EVAL_TRACE_ORIGIN
+  value: http://agent-observability:8080
+- name: OPENBKN_EVAL_USER_OAUTH_TOKEN_URL
+  value: http://bkn-safe-hydra-public:4444/oauth2/token
+- name: OPENBKN_EVAL_GOLD_KEY_B64
+  valueFrom:
+    secretKeyRef:
+      name: bkn-eval-keys
+      key: gold-key
+- name: OPENBKN_EVAL_RUN_CREDENTIAL_KEY_B64
+  valueFrom:
+    secretKeyRef:
+      name: bkn-eval-keys
+      key: credential-key

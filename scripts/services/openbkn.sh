@@ -9,6 +9,8 @@ CORE_NAMESPACE_FROM_CLI="${CORE_NAMESPACE_FROM_CLI:-false}"
 CORE_LOCAL_CHARTS_DIR="${CORE_LOCAL_CHARTS_DIR:-}"
 CORE_VERSION_MANIFEST_FILE="${CORE_VERSION_MANIFEST_FILE:-}"
 CORE_RUNTIME_PROFILE="${CORE_RUNTIME_PROFILE:-}"
+CORE_COMMERCIAL_MANIFEST="${CORE_COMMERCIAL_MANIFEST:-}"
+CORE_COMMERCIAL_VALUES="${CORE_COMMERCIAL_VALUES:-}"
 CORE_IMAGE_TAG="${CORE_IMAGE_TAG:-}"
 CORE_LATEST_SELECTED_BRANCH=""
 
@@ -43,6 +45,7 @@ declare -a CORE_SQL_MODULES=(
 
 # Parse bkn-foundry command arguments
 parse_openbkn_args() {
+    local action="${1:-}"
     shift
 
     while [[ $# -gt 0 ]]; do
@@ -85,6 +88,25 @@ parse_openbkn_args() {
                 ;;
             --version_file)
                 CORE_VERSION_MANIFEST_FILE="$2"
+                shift 2
+                ;;
+            --commercial-values=*)
+                CORE_COMMERCIAL_VALUES="${1#*=}"
+                shift
+                ;;
+            --commercial-values)
+                [[ $# -ge 2 && -n "$2" ]] || return 1
+                CORE_COMMERCIAL_VALUES="$2"
+                shift 2
+                ;;
+            --commercial-manifest=*)
+                CORE_COMMERCIAL_MANIFEST="${1#*=}"
+                [[ -n "$CORE_COMMERCIAL_MANIFEST" ]] || return 1
+                shift
+                ;;
+            --commercial-manifest)
+                [[ $# -ge 2 && -n "$2" ]] || return 1
+                CORE_COMMERCIAL_MANIFEST="$2"
                 shift 2
                 ;;
             --runtime-profile=*)
@@ -186,6 +208,10 @@ parse_openbkn_args() {
                 ;;
         esac
     done
+    if [[ -n "${CORE_COMMERCIAL_MANIFEST:-}${CORE_COMMERCIAL_VALUES:-}" && "${action}" != install ]]; then
+        log_error '--commercial-manifest and --commercial-values are supported by openbkn install only.'
+        return 1
+    fi
     if [[ -n "${CORE_IMAGE_TAG}" ]]; then
         [[ "${CORE_IMAGE_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { log_error 'Invalid --image-tag'; return 1; }
     fi
@@ -1876,7 +1902,7 @@ _install_openbkn_release_local() {
     if [[ -z "${target_version}" ]]; then
         target_version="$(get_local_chart_version "${chart_tgz}")"
     fi
-    if [[ "${release_name}" != agent-observability && "${release_name}" != sandbox ]] && _openbkn_should_skip_upgrade "${release_name}" "${namespace}" "${chart_name}" "${target_version}"; then
+    if [[ -z "${CORE_COMMERCIAL_MANIFEST:-}" && "${release_name}" != agent-observability && "${release_name}" != sandbox ]] && _openbkn_should_skip_upgrade "${release_name}" "${namespace}" "${chart_name}" "${target_version}"; then
         return 0
     fi
 
@@ -1889,6 +1915,11 @@ _install_openbkn_release_local() {
         "--wait" "--timeout=600s"
     )
 
+    if [[ -n "${CORE_COMMERCIAL_MANIFEST:-}" && -n "${_OPENBKN_COMMERCIAL_DIR:-}" && -f "${_OPENBKN_COMMERCIAL_DIR}/registry-auth.json" ]]; then
+        export OPENBKN_COMMERCIAL_IMAGE_PREFIX="${OFFLINE_REGISTRY%/}/openbkn-ai-ee/"
+        export OPENBKN_COMMERCIAL_PULL_SECRET="openbkn-commercial-pull"
+        helm_args+=(--post-renderer "${SCRIPT_DIR}/scripts/lib/commercial_post_render.py")
+    fi
     if _openbkn_has_runtime_values "${release_name}"; then
         helm_args+=("-f" "${_OPENBKN_RUNTIME_DIR}/${release_name}.values.json")
     fi
@@ -1910,7 +1941,7 @@ _install_openbkn_release_local() {
         local runtime_image_key runtime_image_value
         while IFS=$'\t' read -r runtime_image_key runtime_image_value; do
             [[ -n "${runtime_image_key}" ]] || continue
-            [[ "${runtime_image_key}" != registry || "${OFFLINE_MODE:-false}" != true ]] || continue
+            [[ "${runtime_image_key}" != registry || "${OFFLINE_MODE:-false}" != true || -n "${CORE_COMMERCIAL_MANIFEST:-}" ]] || continue
             helm_args+=("--set-string" "image.${runtime_image_key}=${runtime_image_value}")
         done < <(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("image",{}); [print(k+"\t"+str(v[k])) for k in ("registry","repository","tag") if k in v]' "${_OPENBKN_RUNTIME_DIR}/${release_name}.values.json")
     fi
@@ -1944,7 +1975,7 @@ _install_openbkn_release_repo() {
         target_version=$(get_repo_chart_latest_version "${helm_repo_name}" "${chart_name}")
     fi
 
-    if [[ "${release_name}" != agent-observability && "${release_name}" != sandbox ]] && _openbkn_should_skip_upgrade "${release_name}" "${namespace}" "${chart_name}" "${target_version}"; then
+    if [[ -z "${CORE_COMMERCIAL_MANIFEST:-}" && "${release_name}" != agent-observability && "${release_name}" != sandbox ]] && _openbkn_should_skip_upgrade "${release_name}" "${namespace}" "${chart_name}" "${target_version}"; then
         return 0
     fi
 
@@ -1982,6 +2013,11 @@ _install_openbkn_release_repo() {
 
     helm_args+=("--devel")
 
+    if [[ -n "${CORE_COMMERCIAL_MANIFEST:-}" && -n "${_OPENBKN_COMMERCIAL_DIR:-}" && -f "${_OPENBKN_COMMERCIAL_DIR}/registry-auth.json" ]]; then
+        export OPENBKN_COMMERCIAL_IMAGE_PREFIX="${OFFLINE_REGISTRY%/}/openbkn-ai-ee/"
+        export OPENBKN_COMMERCIAL_PULL_SECRET="openbkn-commercial-pull"
+        helm_args+=(--post-renderer "${SCRIPT_DIR}/scripts/lib/commercial_post_render.py")
+    fi
     if _openbkn_has_runtime_values "${release_name}"; then
         helm_args+=("-f" "${_OPENBKN_RUNTIME_DIR}/${release_name}.values.json")
     fi
@@ -2003,7 +2039,7 @@ _install_openbkn_release_repo() {
         local runtime_image_key runtime_image_value
         while IFS=$'\t' read -r runtime_image_key runtime_image_value; do
             [[ -n "${runtime_image_key}" ]] || continue
-            [[ "${runtime_image_key}" != registry || "${OFFLINE_MODE:-false}" != true ]] || continue
+            [[ "${runtime_image_key}" != registry || "${OFFLINE_MODE:-false}" != true || -n "${CORE_COMMERCIAL_MANIFEST:-}" ]] || continue
             helm_args+=("--set-string" "image.${runtime_image_key}=${runtime_image_value}")
         done < <(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get("image",{}); [print(k+"\t"+str(v[k])) for k in ("registry","repository","tag") if k in v]' "${_OPENBKN_RUNTIME_DIR}/${release_name}.values.json")
     fi
@@ -2244,6 +2280,7 @@ install_openbkn() (
     # Confine traps and prepared AO arguments to this installation invocation.
     _OPENBKN_AUDIT_PLAN_DIR=""
     _OPENBKN_AUDIT_READY=false
+    _OPENBKN_COMMERCIAL_DIR=""
     trap '_openbkn_audit_cleanup; _openbkn_runtime_cleanup' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -2252,6 +2289,7 @@ install_openbkn() (
 
 _install_openbkn_impl() {
     log_info "Installing BKN Foundry services via Helm..."
+    _openbkn_prepare_commercial_manifest || return 1
     _openbkn_resolve_latest_manifest || return 1
    if [[ "${OFFLINE_MODE}" != "true" ]]; then
         setup_dockerhub_mirror "${CORE_DOCKERHUB_MIRROR}"
@@ -2329,6 +2367,10 @@ _install_openbkn_impl() {
                 _install_openbkn_release_repo "${runtime_release}" "${namespace}" "${HELM_CHART_REPO_NAME}" "${runtime_version}" --runtime-prepare-only || return 1
             fi
         done < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["releases"]))' "${_OPENBKN_RUNTIME_DIR}/profile.json")
+        if [[ -n "${CORE_COMMERCIAL_MANIFEST:-}" && -n "${_OPENBKN_COMMERCIAL_DIR:-}" && -f "${_OPENBKN_COMMERCIAL_DIR}/registry-auth.json" ]]; then
+            python3 "${SCRIPT_DIR}/scripts/lib/commercial_auth.py" --namespace "${namespace}" \
+                --auth-file "${_OPENBKN_COMMERCIAL_DIR}/registry-auth.json" || return 1
+        fi
         python3 "${SCRIPT_DIR}/scripts/lib/runtime_profile.py" apply --state "${_OPENBKN_RUNTIME_DIR}" --namespace "${namespace}" || return 1
     fi
 
@@ -2519,6 +2561,10 @@ uninstall_openbkn() {
 # Runtime delivery data belongs to its provider. The community installer only
 # knows the generic values, key-generation and rendered-configuration contract.
 _openbkn_runtime_cleanup() {
+    if [[ -n "${_OPENBKN_COMMERCIAL_DIR:-}" ]]; then
+        rm -rf "${_OPENBKN_COMMERCIAL_DIR}"
+        _OPENBKN_COMMERCIAL_DIR=""
+    fi
     if [[ -n "${_OPENBKN_RUNTIME_DIR:-}" ]]; then
         rm -rf "${_OPENBKN_RUNTIME_DIR}"
         _OPENBKN_RUNTIME_DIR=""
@@ -2541,8 +2587,79 @@ _openbkn_prepare_runtime_profile() {
     _OPENBKN_RUNTIME_DIR="$(mktemp -d)" || return 1
     chmod 700 "${_OPENBKN_RUNTIME_DIR}"
     version="$(_manifest_strip_quotes "$(_manifest_read_top_level_field "${CORE_VERSION_MANIFEST_FILE}" version)")"
+    local -a commercial_args=()
+    [[ -z "${CORE_COMMERCIAL_MANIFEST:-}" ]] || commercial_args+=(--commercial)
     python3 "${SCRIPT_DIR}/scripts/lib/runtime_profile.py" prepare \
         --state "${_OPENBKN_RUNTIME_DIR}" --namespace "${namespace}" \
         --profile "${CORE_RUNTIME_PROFILE:-}" --version "${version}" --releases "$@" \
-        "${chart_versions[@]}" --latest-branch "${CORE_LATEST_SELECTED_BRANCH}" --image-tag "${CORE_IMAGE_TAG}"
+        "${chart_versions[@]}" "${commercial_args[@]}" --latest-branch "${CORE_LATEST_SELECTED_BRANCH}" --image-tag "${CORE_IMAGE_TAG}"
+}
+
+# Compile only explicitly requested commercial deliveries; existing entry points stay unchanged.
+_openbkn_prepare_commercial_manifest() {
+    if [[ -z "${CORE_COMMERCIAL_MANIFEST:-}" ]]; then
+        [[ -z "${CORE_COMMERCIAL_VALUES:-}" ]] || { log_error '--commercial-values requires --commercial-manifest'; return 1; }
+        return 0
+    fi
+    if [[ "${OFFLINE_MODE:-false}" != true || -n "${CORE_RUNTIME_PROFILE:-}" || -n "${CORE_IMAGE_TAG:-}" ]]; then
+        log_error 'Commercial installation requires --offline and its locked manifest; do not combine --runtime-profile or --image-tag.'
+        return 1
+    fi
+    _OPENBKN_COMMERCIAL_DIR="$(mktemp -d)" || return 1
+    if [[ "${CORE_USE_LATEST_MANIFEST:-false}" == true || "${HELM_CHART_VERSION:-}" == dev ]]; then
+        local -a latest_template=()
+        if [[ -n "${CORE_VERSION_MANIFEST_FILE:-}" ]]; then
+            latest_template=(--community-template "${CORE_VERSION_MANIFEST_FILE}")
+        fi
+        log_info 'Commercial --latest: resolving Chart and image versions for the current branch.'
+        python3 "${SCRIPT_DIR}/scripts/lib/commercial_latest.py" --repo "${SCRIPT_DIR}" \
+            --manifest "${CORE_COMMERCIAL_MANIFEST}" --out "${_OPENBKN_COMMERCIAL_DIR}" \
+            --registry "${OFFLINE_REGISTRY}" "${latest_template[@]}" || return 1
+        CORE_COMMERCIAL_MANIFEST="${_OPENBKN_COMMERCIAL_DIR}/commercial/commercial-manifest.json"
+        CORE_VERSION_MANIFEST_FILE="${_OPENBKN_COMMERCIAL_DIR}/community.yaml"
+        CORE_USE_LATEST_MANIFEST=false
+        [[ "${HELM_CHART_VERSION:-}" != dev ]] || HELM_CHART_VERSION=""
+        CORE_LATEST_SELECTED_BRANCH=""
+    fi
+    if [[ ! -f "${CORE_VERSION_MANIFEST_FILE:-}" ]]; then
+        log_error 'Commercial installation requires an existing --version_file, or --latest.'
+        return 1
+    fi
+    CORE_LOCAL_CHARTS_DIR="$(_openbkn_download_charts_dir)" || return 1
+    # Validate the delivery before downloading; only absent locked Charts may fall back.
+    python3 "${SCRIPT_DIR}/scripts/lib/commercial_manifest.py" \
+        --manifest "${CORE_COMMERCIAL_MANIFEST}" --community "${CORE_VERSION_MANIFEST_FILE}" \
+        --charts "${CORE_LOCAL_CHARTS_DIR}" --registry "${OFFLINE_REGISTRY}" \
+        --values "${CORE_COMMERCIAL_VALUES:-}" --out "${_OPENBKN_COMMERCIAL_DIR}" \
+        --missing-charts "${_OPENBKN_COMMERCIAL_DIR}/missing-charts.tsv" || return 1
+    if [[ -s "${_OPENBKN_COMMERCIAL_DIR}/missing-charts.tsv" ]]; then
+        log_info "Local commercial/platform Charts are missing; downloading locked versions from the official/configured Chart source."
+        ensure_helm_available || return 1
+        parse_manifest_source "${CORE_VERSION_MANIFEST_FILE}"
+        ensure_chart_source "${HELM_CHART_REPO_NAME:-openbkn}" "${HELM_CHART_REPO_URL:-https://openbkn-ai.github.io/helm-repo/}" || return 1
+        local chart_name chart_version
+        while IFS=$'\t' read -r chart_name chart_version; do
+            if ! download_chart_to_cache "${CORE_LOCAL_CHARTS_DIR}" "${HELM_CHART_REPO_NAME:-openbkn}" "${chart_name}" "${chart_version}" false; then
+                log_error "Cannot download ${chart_name} ${chart_version}; provide this exact Chart in --charts_dir or check Chart source access."
+                return 1
+            fi
+        done < "${_OPENBKN_COMMERCIAL_DIR}/missing-charts.tsv"
+    fi
+    python3 "${SCRIPT_DIR}/scripts/lib/commercial_manifest.py" \
+        --manifest "${CORE_COMMERCIAL_MANIFEST}" --community "${CORE_VERSION_MANIFEST_FILE}" \
+        --charts "${CORE_LOCAL_CHARTS_DIR}" --registry "${OFFLINE_REGISTRY}" \
+        --values "${CORE_COMMERCIAL_VALUES:-}" --out "${_OPENBKN_COMMERCIAL_DIR}" || return 1
+    if [[ -f "${_OPENBKN_COMMERCIAL_DIR}/registry-auth.json" ]]; then
+        python3 - "${_OPENBKN_COMMERCIAL_DIR}/runtime.json" <<'PYCODE'
+import json, sys
+path = sys.argv[1]
+with open(path) as stream:
+    profile = json.load(stream)
+profile['commercialPullSecret'] = 'openbkn-commercial-pull'
+with open(path, 'w') as stream:
+    json.dump(profile, stream)
+PYCODE
+    fi
+    CORE_VERSION_MANIFEST_FILE="${_OPENBKN_COMMERCIAL_DIR}/platform.yaml"
+    CORE_RUNTIME_PROFILE="${_OPENBKN_COMMERCIAL_DIR}/runtime.json"
 }

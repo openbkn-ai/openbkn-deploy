@@ -1,0 +1,7 @@
+# Copyright openbkn.ai
+# Commercial Helm values. The delivery manifest owns image registry, repository and tag.
+runtime:
+  workshop:
+    ruleConcurrency: 3
+image:
+  repository: bkn-studio-ee

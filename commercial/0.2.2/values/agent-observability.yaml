@@ -1,0 +1,11 @@
+# Copyright openbkn.ai
+# Commercial Helm values. The delivery manifest owns image registry, repository and tag.
+image:
+  repository: agent-observability-ee
+enterpriseBusinessProvenance:
+  enabled: true
+  agentURL: http://bkn-agent:30800
+  agentID: business_provenance_optimizer
+  agentName: 业务溯源优化Agent
+  bootstrap:
+    enabled: false

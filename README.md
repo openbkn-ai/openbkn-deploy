@@ -12,6 +12,52 @@ For portable MariaDB and OpenSearch backups, restore commands, and initial snaps
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE.txt)
 
+## Commercial offline installation
+
+Use `--commercial-manifest` for commercial delivery. Professional and Enterprise install the same commercial services; licenses control features at runtime. Existing community, offline and runtime-profile entry points retain their behavior. This entry does not adopt legacy `openbkn-ee.sh` installations.
+
+Synchronize all required images into the internal registry. Charts use `--charts_dir` when supplied, or the shared cache otherwise. Missing archives are downloaded at their locked versions from the manifest Chart source (GHCR OCI for 0.2.2), requiring network access. For fully disconnected installation, prepare all community and commercial Charts locally. Existing invalid archives still fail validation. The canonical commercial manifest is `commercial/0.2.2/commercial-manifest.json` in this repository. Keep its adjacent `values/` and `runtime-profile.json` intact. Deployment data, generation, packaging and installation are owned by openbkn-deploy and do not read the retired EE deployment directory. Supply a matching community platform manifest separately. Python 3 and PyYAML are required.
+
+```bash
+sudo bash ./deploy.sh --offline=registry.example:5000 openbkn install \
+  --version_file=/opt/openbkn/community/openbkn.yaml \
+  --charts_dir=/opt/openbkn/charts \
+  --commercial-manifest=./commercial/0.2.2/commercial-manifest.json
+```
+
+The commercial manifest temporarily excludes `kb-api`; it will not be installed, upgraded or uninstalled, and KB storage values are not required. `--commercial-values` remains available for other releases.
+
+For commercial `--latest`, supplying both `SWR_USER` and `SWR_PASSWORD` lets the installer query the registry using a temporary auth file and create the dedicated `openbkn-commercial-pull` Secret. Commercial workloads receive the Secret reference; Helm hooks using the default ServiceAccount also require appending that reference to it. Existing ServiceAccount references are preserved, and a different existing Secret is never overwritten. Ensure sudo preserves these variables. Without them, use the existing skopeo login and configure Kubernetes pull credentials separately.
+
+For development and testing, use `openbkn install --latest --commercial-manifest=...` with `--offline=<registry>`. The checked-out `main` or `release/X.Y.Z` branch determines Chart and commercial image build selection. This requires Git, `skopeo`, GHCR access and access to the selected image registry; authenticate the user running the installer with `skopeo login` for private registries. Image tags must match the branch and the Chart version line. An optional `--version_file` supplies the release composition, with versions resolved again. Components are selected independently, so compatibility is not guaranteed. Use pinned manifests for disconnected deliveries.
+
+Maintain commercial Chart versions, image tags, values and consumers in the commercial manifest. To create a separate preview delivery, use this repository's generator:
+
+```bash
+python3 scripts/gen-commercial-manifest.py \
+  --manifest=commercial/0.2.2/commercial-manifest.json \
+  --out=/tmp/openbkn-commercial-preview \
+  --image-tag=bkn-backend=0.2.2-main.example
+```
+
+Package the installer, commercial assets, matching community manifest and prepared local Charts:
+
+```bash
+python3 scripts/pack-commercial.py \
+  --manifest=commercial/0.2.2/commercial-manifest.json \
+  --community=release-manifests/0.2.2/openbkn.yaml \
+  --charts-dir=/opt/openbkn/charts \
+  --out=/tmp/openbkn-commercial-0.2.2.tar.gz
+```
+
+Packaging reads local inputs only; it does not download Charts or synchronize images. Include data-service Charts in the supplied directory and prepare the internal registry separately. Extract the archive and enter `openbkn-commercial/`, then use `--version_file=./community.yaml --charts_dir=./charts --commercial-manifest=./commercial/commercial-manifest.json` with the actual offline registry and environment values.
+
+KB configuration examples remain in the repository but are not used by this manifest. Images are locked by the delivery, not environment values. Community images use `<registry>/openbkn-ai/...`; commercial images use `<registry>/openbkn-ai-ee/...`. Dependencies sharing a commercial Chart's main registry, including bkn-safe postgres/Hydra images, must also exist at their rendered paths. Configure any separately addressed sidecars, hooks and parsing engines for the internal registry. For authenticated registries, prepare pull Secrets and configure per-release `imagePullSecrets`.
+
+All application Chart archives and their embedded versions are checked before platform bootstrap. Every planned release is rendered before application upgrades, rejecting container images outside the offline registry. Rendering does not verify image availability, architecture or registry credentials; validate node pulls separately. No public fallback is allowed. Development/testing supports `--latest`; do not combine this entry with `--image-tag` or `--runtime-profile`.
+
+For reinstall or upgrade, supply matching new manifests, Charts and commercial arguments. Helm user settings, environment overrides and persistent keys are retained; custom settings take precedence over delivery defaults; explicitly supplied `--commercial-values` can update existing custom settings. Missing/corrupt previously used Eval keys stop installation. Failed partial installs can be retried after repair. Automatic downgrade/database rollback and legacy overlay adoption are out of scope. The new arguments apply to `install` only and do not extend existing uninstall behavior.
+
 ## Provider runtime delivery profiles
 
 An enterprise bundle supplies per-release values, image coordinates and persistent-key requirements through `--runtime-profile=<JSON>`. The community installer loads declarative data; it contains no enterprise tool definitions and runs no provider-supplied scripts.

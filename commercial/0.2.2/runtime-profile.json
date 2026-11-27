@@ -1,0 +1,104 @@
+{
+  "apiVersion": "deploy.openbkn.ai/runtime-profile/v1",
+  "name": "openbkn-eval",
+  "platformVersion": "0.2.2",
+  "releases": {
+    "agent-retrieval": {
+      "requiredManifestStrings": [
+        "BKN_SAFE_URL"
+      ],
+      "valueEnv": {
+        "licenseHub.url": "BKN_SAFE_URL"
+      },
+      "values": {
+        "licenseHub": {
+          "url": "http://bkn-safe:3000"
+        }
+      },
+      "workload": {
+        "container": "agent-retrieval",
+        "name": "agent-retrieval"
+      }
+    },
+    "bkn-backend": {
+      "removeEnv": [
+        "OPENBKN_EVAL_EXECUTION_VERIFIED",
+        "OPENBKN_EVAL_RUN_PLANS_ENABLED",
+        "OPENBKN_EVAL_EXTERNAL_AGENT_ENABLED",
+        "OPENBKN_EVAL_READ_ONLY_GRANTS_JSON",
+        "OPENBKN_EVAL_READ_ONLY_RESOURCE_GRANTS_JSON"
+      ],
+      "requiredManifestStrings": [
+        "OPENBKN_EVAL_ENABLED",
+        "OPENBKN_EVAL_RESOURCE_API_ORIGIN",
+        "OPENBKN_EVAL_CONTEXT_LOADER_MCP_URL",
+        "OPENBKN_EVAL_TRACE_ORIGIN",
+        "OPENBKN_EVAL_GOLD_KEY_B64",
+        "OPENBKN_EVAL_RUN_CREDENTIAL_KEY_B64",
+        "OPENBKN_EVAL_USER_OAUTH_TOKEN_URL",
+        "bkn-eval-keys"
+      ],
+      "values": {
+        "extraEnv": [
+          {
+            "name": "OPENBKN_EVAL_ENABLED",
+            "value": "true"
+          },
+          {
+            "name": "OPENBKN_EVAL_RESOURCE_API_ORIGIN",
+            "value": "http://bkn-backend-svc:13014"
+          },
+          {
+            "name": "OPENBKN_EVAL_CONTEXT_LOADER_MCP_URL",
+            "value": "http://agent-retrieval:30779/api/agent-retrieval/v1/mcp/"
+          },
+          {
+            "name": "OPENBKN_EVAL_TRACE_ORIGIN",
+            "value": "http://agent-observability:8080"
+          },
+          {
+            "name": "OPENBKN_EVAL_USER_OAUTH_TOKEN_URL",
+            "value": "http://bkn-safe-hydra-public:4444/oauth2/token"
+          },
+          {
+            "name": "OPENBKN_EVAL_GOLD_KEY_B64",
+            "valueFrom": {
+              "secretKeyRef": {
+                "key": "gold-key",
+                "name": "bkn-eval-keys"
+              }
+            }
+          },
+          {
+            "name": "OPENBKN_EVAL_RUN_CREDENTIAL_KEY_B64",
+            "valueFrom": {
+              "secretKeyRef": {
+                "key": "credential-key",
+                "name": "bkn-eval-keys"
+              }
+            }
+          }
+        ]
+      },
+      "workload": {
+        "container": "bkn-backend",
+        "name": "bkn-backend"
+      }
+    }
+  },
+  "secrets": [
+    {
+      "keys": {
+        "credential-key": {
+          "bytes": 32,
+          "encoding": "base64"
+        },
+        "gold-key": {
+          "bytes": 32,
+          "encoding": "base64"
+        }
+      },
+      "name": "bkn-eval-keys"
+    }
+  ]
+}
