@@ -18,12 +18,31 @@ mac_cluster_status() {
     fi
 }
 
+# kind copies the shell's proxy variables into the node's containerd. A proxy on
+# the Mac's loopback (127.0.0.1 / localhost / ::1) is unreachable from inside the
+# node and makes every image pull fail with "proxyconnect ... connection refused",
+# so those are left out of `kind create`. A real proxy host is kept: the node may
+# need it. Arg: name of an array to receive `-u VAR` pairs for env(1).
+mac_cluster_loopback_proxy_unsets() {
+    local __out="$1" var value
+    for var in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY; do
+        value="${!var:-}"
+        [[ -n "${value}" ]] || continue
+        if [[ "${value}" =~ ^([a-zA-Z0-9+.-]+://)?([^@/]*@)?(127\.[0-9.]+|localhost|\[::1\])(:[0-9]+)?(/.*)?$ ]]; then
+            mac_log_warn "Not passing ${var} to the kind node: it points at this Mac's loopback, which the node cannot reach."
+            eval "${__out}+=(-u \"\${var}\")"
+        fi
+    done
+}
+
 mac_cluster_up() {
     if kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"; then
         mac_log_info "Kind cluster '${KIND_CLUSTER_NAME}' already exists."
     else
         mac_log_info "Creating kind cluster '${KIND_CLUSTER_NAME}'..."
-        kind create cluster --name "${KIND_CLUSTER_NAME}" --config "${MAC_DEV_ROOT}/kind-config.yaml"
+        local -a kind_env=()
+        mac_cluster_loopback_proxy_unsets kind_env
+        env ${kind_env[@]+"${kind_env[@]}"} kind create cluster --name "${KIND_CLUSTER_NAME}" --config "${MAC_DEV_ROOT}/kind-config.yaml"
     fi
 
     if ! kubectl get ns ingress-nginx >/dev/null 2>&1; then

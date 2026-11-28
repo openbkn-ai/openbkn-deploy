@@ -19,6 +19,10 @@ cd openbkn-deploy   # 在此目录执行 bash ./dev/mac.sh ...（与 deploy.sh �
 
 从产品包解压时，解压目录须直接包含 **`deploy.sh`**，布局与上文一致即可。
 
+### Helm 3
+
+安装器需要 **Helm 3**。Homebrew 的 `helm` 现在是 Helm 4：`doctor` 会报失败，`openbkn install` 会在改动任何东西之前停止。另装 Helm 3：`brew install helm@3 && export PATH="$(brew --prefix helm@3)/bin:$PATH"`。
+
 ### 架构（Apple Silicon / arm64）
 
 **Apple Silicon** 上 kind 节点默认为 **linux/arm64**。镜像来自 [`dev/conf/mac-config.yaml`](conf/mac-config.yaml) 的 **`image.registry`**（由 [`mac-config.yaml.example`](conf/mac-config.yaml.example) 复制）；须 **arm64 可用**（多架构 manifest 或 arm64 标签）。仅 **amd64** 的镜像易导致 *exec format error*。Intel Mac 上节点多为 **amd64**（除非另行指定平台）。
@@ -71,7 +75,7 @@ docker stop $(docker ps -q --filter "label=io.x-k8s.kind.cluster=${CLUSTER}")
   - `--memory 12`（GB）实际分配 **11.66 GiB**（GB→GiB 换算损失），**低于 doctor 的 12 GiB 阈值**会报内存不足；建议直接 `--memory 14`。例：`colima start --cpu 10 --memory 14 --disk 60`。
   - **不要安装中途 resize**：Helm 部署完后停/起 VM 会触发下面的 Redis ACL bug。
 
-- **代理污染**（`cluster up` 之前）：kind 容器会继承宿主 `HTTP_PROXY` / `HTTPS_PROXY`。若代理地址是 `127.0.0.1:<port>` 或实际未启动，kind 节点拉镜像会报 `proxyconnect tcp: connect: connection refused`，宿主上 `curl http://localhost/...` 也会返 502（curl 走了死代理）。每次 `mac.sh` 之前先：
+- **代理污染**（`cluster up` 之前）：kind 容器会继承宿主 `HTTP_PROXY` / `HTTPS_PROXY`。若代理地址是 `127.0.0.1:<port>` 或实际未启动，kind 节点拉镜像会报 `proxyconnect tcp: connect: connection refused`，宿主上 `curl http://localhost/...` 也会返 502（curl 走了死代理）。`mac.sh cluster up` 建集群时不把指向本机回环（`127.0.0.1`、`localhost`、`::1`）的代理传给 kind，并给出提示；直接用 `kind create cluster` 建的集群不会这样处理。每次 `mac.sh` 之前仍先：
   ```bash
   unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
   ```

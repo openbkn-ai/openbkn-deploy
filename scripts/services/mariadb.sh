@@ -74,6 +74,32 @@ _mariadb_resolve_image_defaults() {
     fi
 }
 
+# The example configs ship `REPLACE_ME` for every secret. Treat it as unset so a
+# fresh MariaDB gets generated passwords (as Redis/Kafka/OpenSearch do). When
+# MariaDB data already exists the placeholder may be the live password, so it is
+# kept with a warning instead of being replaced by one the database never saw.
+_mariadb_data_exists() {
+    local ns="${MARIADB_NAMESPACE}"
+    helm status mariadb -n "${ns}" >/dev/null 2>&1 && return 0
+    kubectl -n "${ns}" get statefulset mariadb >/dev/null 2>&1 && return 0
+    [[ -n "$(kubectl -n "${ns}" get pvc -l app.kubernetes.io/instance=mariadb -o name 2>/dev/null)" ]] && return 0
+    kubectl -n "${ns}" get pvc data-mariadb-0 >/dev/null 2>&1
+}
+
+# Args: <rds field>. Prints the configured value, or nothing when it is unset.
+_mariadb_config_secret() {
+    local field="$1" value
+    value="$(config_yaml_dep_field rds "${field}")"
+    if [[ "${value}" == REPLACE_ME ]]; then
+        if _mariadb_data_exists; then
+            log_warn "depServices.rds.${field} is still the example placeholder and MariaDB data already exists; keeping it. Change this password." >&2
+        else
+            return 0
+        fi
+    fi
+    printf '%s' "${value}"
+}
+
 # Grant permissions to MariaDB user (always run for internal MariaDB)
 grant_mariadb_user_permissions() {
     local ns="${MARIADB_NAMESPACE}"
@@ -209,7 +235,7 @@ install_mariadb_helm() {
     fi
 
     # MariaDB password handling
-    local existing_pass=$(config_yaml_dep_field rds password)
+    local existing_pass=$(_mariadb_config_secret password)
     if [[ -n "${existing_pass}" ]]; then
         MARIADB_PASSWORD="${existing_pass}"
         log_info "Using existing MariaDB password from config.yaml"
@@ -221,7 +247,7 @@ install_mariadb_helm() {
         log_info "Generated random 10-character MariaDB password"
     fi
 
-    local existing_root_pass=$(config_yaml_dep_field rds root_password)
+    local existing_root_pass=$(_mariadb_config_secret root_password)
     if [[ -n "${existing_root_pass}" ]]; then
         MARIADB_ROOT_PASSWORD="${existing_root_pass}"
         log_info "Using existing MariaDB root password from config.yaml"
@@ -330,10 +356,10 @@ install_mariadb_helm() {
     log_info "MariaDB connection info:"
     log_info "  Host: mariadb.${ns}.svc.cluster.local"
     log_info "  Port: 3306"
-    log_info "  Root Password: ${MARIADB_ROOT_PASSWORD}"
     log_info "  Database: ${MARIADB_DATABASE}"
     log_info "  Username: ${MARIADB_USER}"
-    log_info "  Password: ${MARIADB_PASSWORD}"
+    # Never print the passwords: install logs are kept and shared.
+    log_info "  Passwords: depServices.rds.password / root_password in ${CONFIG_YAML_PATH} (and the MariaDB Secret in ${ns})"
 
     # Create additional databases and grant permissions
     setup_mariadb_databases
@@ -355,7 +381,7 @@ install_mariadb_official() {
     local ns="${MARIADB_NAMESPACE}"
 
     # MariaDB password handling
-    local existing_pass=$(config_yaml_dep_field rds password)
+    local existing_pass=$(_mariadb_config_secret password)
     if [[ -n "${existing_pass}" ]]; then
         MARIADB_PASSWORD="${existing_pass}"
         log_info "Using existing MariaDB password from config.yaml"
@@ -364,7 +390,7 @@ install_mariadb_official() {
         log_info "Generated random 10-character MariaDB password"
     fi
 
-    local existing_root_pass=$(config_yaml_dep_field rds root_password)
+    local existing_root_pass=$(_mariadb_config_secret root_password)
     if [[ -n "${existing_root_pass}" ]]; then
         MARIADB_ROOT_PASSWORD="${existing_root_pass}"
         log_info "Using existing MariaDB root password from config.yaml"
@@ -625,10 +651,10 @@ EOF
     log_info "MariaDB connection info:"
     log_info "  Host: mariadb.${ns}.svc.cluster.local"
     log_info "  Port: 3306"
-    log_info "  Root Password: ${MARIADB_ROOT_PASSWORD}"
     log_info "  Database: ${MARIADB_DATABASE}"
     log_info "  Username: ${MARIADB_USER}"
-    log_info "  Password: ${MARIADB_PASSWORD}"
+    # Never print the passwords: install logs are kept and shared.
+    log_info "  Passwords: depServices.rds.password / root_password in ${CONFIG_YAML_PATH} (and the MariaDB Secret in ${ns})"
 
     # Create additional databases and grant permissions
     setup_mariadb_databases
@@ -664,7 +690,7 @@ install_mariadb_bitnami() {
     fi
 
     # MariaDB password handling
-    local existing_pass=$(config_yaml_dep_field rds password)
+    local existing_pass=$(_mariadb_config_secret password)
     if [[ -n "${existing_pass}" ]]; then
         MARIADB_PASSWORD="${existing_pass}"
         log_info "Using existing MariaDB password from config.yaml"
@@ -673,7 +699,7 @@ install_mariadb_bitnami() {
         log_info "Generated random 10-character MariaDB password"
     fi
 
-    local existing_root_pass=$(config_yaml_dep_field rds root_password)
+    local existing_root_pass=$(_mariadb_config_secret root_password)
     if [[ -n "${existing_root_pass}" ]]; then
         MARIADB_ROOT_PASSWORD="${existing_root_pass}"
         log_info "Using existing MariaDB root password from config.yaml"
@@ -765,10 +791,10 @@ install_mariadb_bitnami() {
     log_info "MariaDB connection info:"
     log_info "  Host: mariadb.${ns}.svc.cluster.local"
     log_info "  Port: 3306"
-    log_info "  Root Password: ${MARIADB_ROOT_PASSWORD}"
     log_info "  Database: ${MARIADB_DATABASE}"
     log_info "  Username: ${MARIADB_USER}"
-    log_info "  Password: ${MARIADB_PASSWORD}"
+    # Never print the passwords: install logs are kept and shared.
+    log_info "  Passwords: depServices.rds.password / root_password in ${CONFIG_YAML_PATH} (and the MariaDB Secret in ${ns})"
 
     # Create additional databases and grant permissions
     setup_mariadb_databases

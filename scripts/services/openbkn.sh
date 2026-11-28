@@ -1016,6 +1016,19 @@ _openbkn_helm_upgrade_release() {
         fi
     fi
 
+    # onboard.sh records the default small model in the live ConfigMap; carry it
+    # into this upgrade at the lowest precedence instead of rendering it away.
+    local model_values=""
+    if [[ "${release_name}" == bkn-backend || "${release_name}" == ontology-query ]]; then
+        model_values="$(mktemp)"
+        kubectl get configmap "${release_name}-cm" -n "${namespace}" -o json 2>/dev/null |
+            python3 "${SCRIPT_DIR}/scripts/lib/model_defaults.py" >"${model_values}" || printf '{}\n' >"${model_values}"
+        if [[ "$(cat "${model_values}")" != "{}" ]]; then
+            log_info "Keeping the default small model chosen by onboard for ${release_name}"
+            helm_args=("${helm_args[@]:0:4}" -f "${model_values}" "${helm_args[@]:4}")
+        fi
+    fi
+
     if [[ "${release_name}" == agent-observability ]]; then
         local current_state
         if [[ "${_OPENBKN_AUDIT_READY:-false}" != true || "${_OPENBKN_AUDIT_NAMESPACE:-}" != "${namespace}" ]]; then
@@ -1040,6 +1053,12 @@ _openbkn_helm_upgrade_release() {
     # to remove.
     _openbkn_drop_literal_env_now_from_secret "${release_name}" "${namespace}"
 
+    local bkn_project_accounts=false
+    if [[ "${release_name}" == bkn-project ]] && _openbkn_bkn_project_accounts_managed; then
+        _openbkn_prepare_bkn_project_accounts "${namespace}" || return 1
+        bkn_project_accounts=true
+    fi
+
     local helm_log
     helm_log="$(mktemp)"
     helm "${helm_args[@]}" 2>&1 | tee "${helm_log}"
@@ -1052,6 +1071,10 @@ _openbkn_helm_upgrade_release() {
     fi
     rm -f "${helm_log}"
     [[ -z "${gateway_dir}" ]] || rm -rf "${gateway_dir}"
+    [[ -z "${model_values}" ]] || rm -f "${model_values}"
+    if [[ "${bkn_project_accounts}" == true ]] && ! _openbkn_narrow_bkn_project_service_account; then
+        helm_status=1
+    fi
 
     if [[ ${helm_status} -eq 0 ]]; then
         log_info "✓ ${release_name} installed successfully"
@@ -1459,6 +1482,141 @@ _openbkn_prepare_trace_profile() {
     _openbkn_prepare_trace_opensearch_secret "${namespace}"
 }
 
+# ── bkn-project database accounts ──────────────────────────────────────────
+# bkn-project ships with two accounts in mind (openbkn-ee bkn-project README,
+# "数据库迁移"): a migration account for its init container and a service account
+# limited to SELECT/INSERT/UPDATE/DELETE on its own t_bkn_project_* tables. Every
+# chart gets config.yaml's platform account, which would otherwise override the
+# chart default, so on the installer's own MariaDB both accounts are created here
+# and handed to the chart through Secrets the installer owns (not the chart's
+# bkn-project-db, which Helm deletes once existingSecret is set).
+#
+# MariaDB grants per table only on existing tables, and the tables appear while
+# the pod's init container migrates, right before the service starts. So the
+# service account holds database-wide SELECT/INSERT/UPDATE/DELETE only while its
+# release is installed; afterwards it is narrowed to the bkn-project tables.
+OPENBKN_BKN_PROJECT_DB="openbkn"
+OPENBKN_BKN_PROJECT_SERVICE_SECRET="bkn-project-db-service"
+OPENBKN_BKN_PROJECT_SERVICE_USER="bkn_project"
+OPENBKN_BKN_PROJECT_MIGRATION_SECRET="bkn-project-db-migration"
+OPENBKN_BKN_PROJECT_MIGRATION_USER="bkn_project_migrate"
+# Agent rows the migrations update (README: UPDATE on these four only).
+OPENBKN_BKN_PROJECT_AGENT_TABLES="t_agent t_agent_prompt t_agent_prompt_version t_agent_version"
+
+# True when the installer provisions bkn-project's accounts: its MariaDB is the
+# installer's, and the operator chose neither account Secret nor a database user.
+_openbkn_bkn_project_accounts_managed() {
+    is_rds_internal || return 1
+    local set_value
+    for set_value in "${CORE_SET_VALUES[@]-}"; do
+        case "${set_value}" in
+            depServices.rds.existingSecret=*|migration.existingSecret=*|depServices.rds.user=*) return 1 ;;
+        esac
+    done
+    local values="${_OPENBKN_RUNTIME_DIR:-}/bkn-project.values.json"
+    [[ -f "${values}" ]] || return 0
+    python3 - "${values}" "${OPENBKN_BKN_PROJECT_SERVICE_SECRET}" "${OPENBKN_BKN_PROJECT_MIGRATION_SECRET}" <<'PY'
+import json, sys
+values = json.load(open(sys.argv[1]))
+chosen = [((values.get("depServices") or {}).get("rds") or {}).get("existingSecret"),
+          (values.get("migration") or {}).get("existingSecret")]
+sys.exit(1 if any(name and name not in sys.argv[2:] for name in chosen) else 0)
+PY
+}
+
+# Run SQL from stdin as MariaDB root inside the MariaDB pod; the root password
+# never leaves the pod. Extra args go to the mariadb client.
+_openbkn_mariadb_root_sql() {
+    local ns="${MARIADB_NAMESPACE:-resource}" pod
+    pod="$(kubectl -n "${ns}" get pods -l app=mariadb --field-selector=status.phase=Running \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+    [[ -n "${pod}" ]] || { log_error "MariaDB pod not found in ${ns}"; return 1; }
+    kubectl -n "${ns}" exec -i "${pod}" -- sh -c 'MYSQL_PWD="${MARIADB_ROOT_PASSWORD}" exec mariadb -uroot "$@"' sh "$@"
+}
+
+# Prints the password kept in Secret <name>, creating it for <user> with a new
+# random password when absent. The value travels by stdin/env only.
+_openbkn_bkn_project_account_secret() {
+    local ns="$1" name="$2" user="$3" encoded password
+    encoded="$(kubectl get secret "${name}" -n "${ns}" -o jsonpath='{.data.password}' 2>/dev/null || true)"
+    if [[ -n "${encoded}" ]]; then
+        printf '%s' "${encoded}" | python3 -c 'import base64,sys; sys.stdout.write(base64.b64decode(sys.stdin.read()).decode())'
+        return
+    fi
+    password="$(generate_random_password 24)"
+    [[ -n "${password}" ]] || { log_error "Cannot generate a password for ${user}"; return 1; }
+    if ! SECRET_NAME="${name}" SECRET_NS="${ns}" SECRET_USER="${user}" SECRET_PASSWORD="${password}" python3 -c '
+import json, os
+print(json.dumps({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+    "metadata": {"name": os.environ["SECRET_NAME"], "namespace": os.environ["SECRET_NS"],
+                 "labels": {"app.kubernetes.io/managed-by": "openbkn-installer", "app.kubernetes.io/part-of": "bkn-project"}},
+    "stringData": {"user": os.environ["SECRET_USER"], "password": os.environ["SECRET_PASSWORD"]}}))' |
+        kubectl create -f - >/dev/null; then
+        log_error "Cannot create Secret ${name} in ${ns}"
+        return 1
+    fi
+    printf '%s' "${password}"
+}
+
+_openbkn_sql_quote() {
+    local value="${1//\\/\\\\}"
+    printf "'%s'" "${value//\'/\'\'}"
+}
+
+# Before the bkn-project release: both accounts, their Secrets, the migration
+# grants, and the install-window grant for the service account.
+_openbkn_prepare_bkn_project_accounts() {
+    local ns="$1" db="${OPENBKN_BKN_PROJECT_DB}" service_pw migration_pw agent_tables table sql
+    service_pw="$(_openbkn_bkn_project_account_secret "${ns}" "${OPENBKN_BKN_PROJECT_SERVICE_SECRET}" "${OPENBKN_BKN_PROJECT_SERVICE_USER}")" || return 1
+    migration_pw="$(_openbkn_bkn_project_account_secret "${ns}" "${OPENBKN_BKN_PROJECT_MIGRATION_SECRET}" "${OPENBKN_BKN_PROJECT_MIGRATION_USER}")" || return 1
+    agent_tables="$(printf "SELECT table_name FROM information_schema.tables WHERE table_schema = '%s' AND table_name IN ('%s');\n" \
+        "${db}" "$(printf '%s' "${OPENBKN_BKN_PROJECT_AGENT_TABLES}" | sed "s/ /','/g")" |
+        _openbkn_mariadb_root_sql -N -B)" || { log_error "Cannot read the Agent tables for bkn-project's migration account"; return 1; }
+    local user
+    sql=""
+    for user in "${OPENBKN_BKN_PROJECT_MIGRATION_USER}:${migration_pw}" "${OPENBKN_BKN_PROJECT_SERVICE_USER}:${service_pw}"; do
+        sql+="CREATE USER IF NOT EXISTS '${user%%:*}'@'%' IDENTIFIED BY $(_openbkn_sql_quote "${user#*:}");"$'\n'
+        sql+="ALTER USER '${user%%:*}'@'%' IDENTIFIED BY $(_openbkn_sql_quote "${user#*:}");"$'\n'
+    done
+    # ALTER as well: migration 0035 adds columns to a table an earlier migration
+    # created (checked on MariaDB 11.4 with bkn-project 0.2.2's migrate).
+    sql+="GRANT CREATE, ALTER, SELECT, INSERT ON \`${db}\`.* TO '${OPENBKN_BKN_PROJECT_MIGRATION_USER}'@'%';"$'\n'
+    for table in ${agent_tables}; do
+        sql+="GRANT UPDATE ON \`${db}\`.\`${table}\` TO '${OPENBKN_BKN_PROJECT_MIGRATION_USER}'@'%';"$'\n'
+    done
+    sql+="GRANT SELECT, INSERT, UPDATE, DELETE ON \`${db}\`.* TO '${OPENBKN_BKN_PROJECT_SERVICE_USER}'@'%';"$'\n'
+    if ! printf '%s' "${sql}" | _openbkn_mariadb_root_sql >/dev/null; then
+        log_error "Cannot create bkn-project's database accounts"
+        return 1
+    fi
+    log_info "bkn-project database accounts ready: ${OPENBKN_BKN_PROJECT_SERVICE_USER} (Secret ${OPENBKN_BKN_PROJECT_SERVICE_SECRET}), ${OPENBKN_BKN_PROJECT_MIGRATION_USER} (Secret ${OPENBKN_BKN_PROJECT_MIGRATION_SECRET})"
+}
+
+# After the bkn-project release (whatever its result): grant the service account
+# every t_bkn_project_* table the migration created, plus SELECT on the ledger,
+# then drop the install-window grant. The grants stay when this fails, so the
+# service keeps working and a re-run completes the narrowing.
+_openbkn_narrow_bkn_project_service_account() {
+    local db="${OPENBKN_BKN_PROJECT_DB}" user="${OPENBKN_BKN_PROJECT_SERVICE_USER}" tables table sql=""
+    tables="$(printf "SELECT table_name FROM information_schema.tables WHERE table_schema = '%s' AND table_name LIKE 't\\\\_bkn\\\\_project\\\\_%%';\n" "${db}" |
+        _openbkn_mariadb_root_sql -N -B)" || { log_error "Cannot list bkn-project tables"; return 1; }
+    for table in ${tables}; do
+        sql+="GRANT SELECT, INSERT, UPDATE, DELETE ON \`${db}\`.\`${table}\` TO '${user}'@'%';"$'\n'
+    done
+    sql+="GRANT SELECT ON \`${db}\`.\`ee_bkn_project_schema_migration\` TO '${user}'@'%';"$'\n'
+    if [[ -z "${tables}" ]] || ! printf '%s' "${sql}" | _openbkn_mariadb_root_sql >/dev/null; then
+        log_error "Cannot grant ${user} its bkn-project tables; it keeps database-wide access until a re-run succeeds"
+        return 1
+    fi
+    if ! printf "REVOKE SELECT, INSERT, UPDATE, DELETE ON \`%s\`.* FROM '%s'@'%%';\n" "${db}" "${user}" |
+        _openbkn_mariadb_root_sql >/dev/null 2>&1; then
+        # Error 1141: no database-wide grant left to revoke.
+        printf "SHOW GRANTS FOR '%s'@'%%';\n" "${user}" | _openbkn_mariadb_root_sql -N -B 2>/dev/null |
+            grep -q "ON \`${db}\`\.\* " && { log_error "Cannot narrow ${user} to its bkn-project tables"; return 1; }
+    fi
+    log_info "bkn-project service account ${user} limited to its $(printf '%s\n' ${tables} | wc -l | tr -d ' ') tables"
+}
+
 _secret_is_owned_by_release() {
     local secret_name="$1"
     local namespace="$2"
@@ -1626,6 +1784,13 @@ _openbkn_release_extra_sets() {
         sample_gateway="${sample_gateway//\\/\\\\}"
         sample_gateway="${sample_gateway//,/\\,}"
         CORE_RELEASE_EXTRA_SET_STRINGS+=("baseURL=${sample_gateway}")
+    elif [[ "${release_name}" == "bkn-project" ]]; then
+        # --set: above every -f (config.yaml's platform account included), below
+        # the operator's own --set values.
+        if _openbkn_bkn_project_accounts_managed; then
+            CORE_RELEASE_EXTRA_SET_STRINGS+=("depServices.rds.existingSecret=${OPENBKN_BKN_PROJECT_SERVICE_SECRET}")
+            CORE_RELEASE_EXTRA_SET_STRINGS+=("migration.existingSecret=${OPENBKN_BKN_PROJECT_MIGRATION_SECRET}")
+        fi
     elif [[ "${release_name}" == "bkn-safe" ]]; then
         _openbkn_safe_audit_profile_sets "${namespace}"
         local initial_pwd
@@ -2449,8 +2614,8 @@ _install_openbkn_impl() {
     fi
     # Platform account credentials (NOT database passwords): the console admin
     # initial password, which is also the initial password handed to users
-    # created without an explicit one. Highlighted — it is the one thing the
-    # operator must take away from this summary, but only on the first install.
+    # created without an explicit one. Shown only on the first install, and
+    # only as the place it is stored: install output ends up in shared logs.
     local _initial_pwd
     _initial_pwd="$(config_yaml_top_field bknSafe initialPassword)"
     if _openbkn_should_show_bkn_safe_initial_password "${bkn_safe_existed_before_install}" "${_initial_pwd}"; then
@@ -2458,11 +2623,10 @@ _install_openbkn_impl() {
         echo "  Console sign-in (a password change is forced on first login):"
         echo ""
         echo -e "    ${YELLOW}user:     admin${NC}"
-        echo -e "    ${YELLOW}password: ${_initial_pwd}${NC}"
+        echo -e "    ${YELLOW}password: bknSafe.initialPassword in ${CONFIG_YAML_PATH}${NC}"
         echo ""
         echo "  New users created without an explicit password start with this same"
         echo "  initial password (also returned once in the create response)."
-        echo "  Recorded as bknSafe.initialPassword in ${CONFIG_YAML_PATH}"
     fi
     echo ""
     echo "============================================"

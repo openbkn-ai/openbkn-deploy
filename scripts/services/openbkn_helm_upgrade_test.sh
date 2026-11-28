@@ -66,3 +66,30 @@ if grep -qx -- '--post-renderer' "${work}/helm-args"; then
     exit 1
 fi
 echo 'PASS: community install ignores commercial authentication artifacts'
+
+# The default small model onboard wrote into the live ConfigMap survives an
+# installer re-run, at lower precedence than the installer's own values files.
+SCRIPT_DIR="${ROOT}"
+kubectl() {
+    [[ "$*" == "get configmap bkn-backend-cm -n isolated -o json" ]] || { echo "unexpected kubectl $*" >&2; return 99; }
+    python3 -c 'import json; print(json.dumps({"data": {"bkn-backend-config.yaml":
+        "server:\n  defaultSmallModelEnabled: true\n  defaultSmallModelName: text-embedding-v4\n  httpPort: 13014\nlog:\n  logLevel: info\n"}}))'
+}
+helm() {
+    printf '%s\n' "$@" >"${work}/helm-args"
+    [[ "$5" != -f ]] || cp "$6" "${work}/model-values.json"
+}
+args=(upgrade --install bkn-backend chart --namespace isolated -f "${work}/config.yaml" --wait)
+_openbkn_helm_upgrade_release bkn-backend isolated "${args[@]}" >"${work}/output"
+# The preserved values come first, so config.yaml (and any --set) still override them.
+[[ "$(sed -n 5p "${work}/helm-args")" == -f && "$(sed -n 9,10p "${work}/helm-args" | tr '\n' ' ')" == "-f ${work}/config.yaml " ]]
+python3 - "${work}/model-values.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == {"config": {"server": {"defaultSmallModelName": "text-embedding-v4", "defaultSmallModelEnabled": True}}}
+PY
+# A Chart-rendered ConfigMap without an onboard choice adds nothing.
+kubectl() { python3 -c 'import json; print(json.dumps({"data": {"bkn-backend-config.yaml": "server:\n  defaultSmallModelName: \"\"\n  defaultSmallModelEnabled: false\n"}}))'; }
+_openbkn_helm_upgrade_release bkn-backend isolated "${args[@]}" >"${work}/output"
+printf '%s\n' "${args[@]}" >"${work}/expected"
+cmp "${work}/expected" "${work}/helm-args"
+echo 'PASS: onboard default small model is carried into upgrades at the lowest precedence'

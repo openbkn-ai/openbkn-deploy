@@ -77,7 +77,7 @@ MARIADB_IMAGES=(
 
 # Required images for Redis
 REDIS_IMAGES=(
-    "openbkn-ai/redis:1.11.2-main.20260718025853.shaf24e971"
+    "openbkn-ai/redis:1.11.2-20261016132300.sha81d5752"
 )
 
 # Required images for Kafka

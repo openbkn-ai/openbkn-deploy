@@ -184,7 +184,7 @@ install_redis_sentinel_local() {
     log_info "  Sentinel Host: redis-sentinel.${ns}.svc.cluster.local"
     log_info "  Sentinel Port: 26379"
     log_info "  Master Group: ${REDIS_MASTER_GROUP_NAME:-mymaster}"
-    log_info "  Password: ${redis_password}"
+    log_info "  Password: depServices.redis.connectInfo.password in ${CONFIG_YAML_PATH} (and the Redis Secret in ${ns})"
     log_info "  Replicas: ${REDIS_REPLICA_COUNT:-1}"
 
     if [[ "${fresh_install}" == "true" && "${AUTO_GENERATE_CONFIG}" == "true" ]]; then

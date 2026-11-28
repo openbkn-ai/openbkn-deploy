@@ -22,9 +22,21 @@ kubectl() {
             echo 'Forwarding from 127.0.0.1:23456 -> 8080' ;;
         (*'get pod'*) echo minio-test ;;
         (*printenv*) echo fake-credential ;;
-        (*'sh -c'*) [[ "${scenario}" != bucket-fail ]] ;;
         (*) return 99 ;;
     esac
+}
+# The bucket is created over the S3 API by s3_bucket.py; mock only that call.
+python3() {
+    if [[ "${1:-}" == */s3_bucket.py ]]; then
+        echo "s3_bucket $2 $3 key=${S3_ACCESS_KEY:-} secret-set=${S3_SECRET_KEY:+yes}" >>"${work}/calls"
+        if [[ "${scenario}" == bucket-fail ]]; then
+            echo 'bucket request failed: HTTP 403 AccessDenied' >&2
+            return 1
+        fi
+        echo created
+        return 0
+    fi
+    command python3 "$@"
 }
 curl() {
     echo "$*" >>"${work}/calls"
@@ -63,13 +75,19 @@ body = json.load(open(sys.argv[1]))
 assert body['endpoint'] == 'http://minio.custom.svc.cluster.local:9000'
 assert body['bucket_name'] == 'bkn-oss' and body['is_default'] is True
 PY
-        rg -q -- '--ignore-existing' "${work}/calls"
-        rg -q -- '--address=127.0.0.1.*:8080' "${work}/calls"
+        rg -q -- '--address=127.0.0.1.*svc/oss-gateway-backend :8080' "${work}/calls"
+        rg -q -- '--address=127.0.0.1.*svc/minio :9000' "${work}/calls"
+        rg -q -- '^s3_bucket http://127.0.0.1:23456 bkn-oss key=fake-credential secret-set=yes$' "${work}/calls"
+        # The bucket no longer depends on an `mc` client inside the MinIO image.
+        ! rg -q -- 'mc ' "${work}/calls"
     elif [[ "${scenario}" == existing || "${scenario}" == absent ]]; then
         ! rg -q 'initialization failed' "${work}/output"
         [[ ! -e "${work}/body" ]]
     else
         rg -q 'initialization failed; platform installation is not affected' "${work}/output"
+        if [[ "${scenario}" == bucket-fail ]]; then
+            rg -q "could not create MinIO bucket 'bkn-oss' \(bucket request failed: HTTP 403 AccessDenied\)" "${work}/output"
+        fi
         rg -q 'NAMESPACE=custom.*onboard.sh.*--skip-test-user' "${work}/output"
         if [[ "${scenario}" != post-fail && "${scenario}" != bad-response && "${scenario}" != check-fail ]]; then
             [[ ! -e "${work}/body" ]]

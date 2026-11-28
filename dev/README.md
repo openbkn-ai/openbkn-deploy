@@ -19,6 +19,10 @@ cd openbkn-deploy   # always run bash ./dev/mac.sh ... from this directory
 
 Same layout applies if your product tarball extracts to a **`bkn-core/`** root with a **`deploy/`** subdirectory.
 
+### Helm 3
+
+The installer needs **Helm 3**. Homebrew's `helm` formula is now Helm 4, which `doctor` reports as a failure and `openbkn install` refuses before changing anything. Install Helm 3 next to it: `brew install helm@3 && export PATH="$(brew --prefix helm@3)/bin:$PATH"`.
+
 ### Architecture (Apple Silicon / arm64)
 
 On **Apple Silicon** Macs, kind nodes are **linux/arm64** by default. Charts pull from `image.registry` in your [`dev/conf/mac-config.yaml`](conf/mac-config.yaml) (copy from [`mac-config.yaml.example`](conf/mac-config.yaml.example)); those images must be **arm64-capable** (multi-arch manifest or an arm64 tag). If a registry only ships **amd64**, pods often fail with *exec format error*. Intel Macs still get **amd64** kind nodes unless you force another platform.
@@ -72,7 +76,7 @@ See also: top-of-file comments in [`mac.sh`](mac.sh), `bash ./dev/mac.sh -h`.
   - `--memory 12` (GB) actually allocates **11.66 GiB** to the VM (GB→GiB conversion), which is **below the 12 GiB doctor threshold** — set `--memory 14` to clear it. Example: `colima start --cpu 10 --memory 14 --disk 60`.
   - **Avoid resizing mid-install.** Stopping/starting the VM after Helm releases are deployed has triggered the Redis ACL bug below.
 
-- **Proxy env pollution before `cluster up`**: kind containers inherit `HTTP_PROXY` / `HTTPS_PROXY` from your shell. If they point at `127.0.0.1:<port>` or at a proxy that is not actually running, image pulls inside the kind node fail with `proxyconnect tcp: connect: connection refused`, and `curl http://localhost/...` from the host returns 502 (curl goes through the dead proxy). Always run before any `mac.sh` step:
+- **Proxy env pollution before `cluster up`**: kind containers inherit `HTTP_PROXY` / `HTTPS_PROXY` from your shell. If they point at `127.0.0.1:<port>` or at a proxy that is not actually running, image pulls inside the kind node fail with `proxyconnect tcp: connect: connection refused`, and `curl http://localhost/...` from the host returns 502 (curl goes through the dead proxy). `mac.sh cluster up` leaves loopback proxies (`127.0.0.1`, `localhost`, `::1`) out of `kind create` and warns; a cluster created with plain `kind create cluster` does not. Still run before any `mac.sh` step:
   ```bash
   unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
   ```

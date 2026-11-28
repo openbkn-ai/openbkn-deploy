@@ -203,6 +203,33 @@ bkn_helm_uninstall_if_not_deployed() {
 # (older clients may parse templates as empty → Helm error "no objects visited").
 OPENBKN_HELM_MIN_SEMVER="${OPENBKN_HELM_MIN_SEMVER:-3.10.0}"
 
+# The installer is written against Helm 3. Helm 4 removed `helm list --all`,
+# accepts only plugins as post-renderers (the commercial path passes a script)
+# and applies new releases server-side, which conflicts with the installer's
+# kubectl patches. Stop before anything is installed instead of failing midway.
+bkn_helm_unsupported_message() {
+    local cur="$1"
+    printf 'Helm %s is not supported: the installer needs Helm 3 (%s or newer). ' "${cur}" "${OPENBKN_HELM_MIN_SEMVER}"
+    if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
+        printf 'Run: brew install helm@3 && export PATH="$(brew --prefix helm@3)/bin:$PATH"'
+    else
+        printf 'Run: sudo bash ./preflight.sh --fix (helm-v3), or put a Helm 3 binary first in PATH'
+    fi
+}
+
+# Returns 0 for a supported Helm client; prints the reason and returns 1 otherwise.
+# An absent or unparseable helm is left to the existing install/version checks.
+bkn_require_supported_helm() {
+    type -P helm >/dev/null 2>&1 || return 0
+    local cur
+    cur="$(bkn_helm_client_semver)"
+    [[ -n "${cur}" ]] || return 0
+    if [[ "${cur%%.*}" != 3 ]]; then
+        log_error "$(bkn_helm_unsupported_message "${cur}")"
+        return 1
+    fi
+}
+
 # The openbkn CLI's own floor, and the one npm enforces when resolving it. Kept
 # as a full version on purpose: comparing only the major number accepts 22.0.0,
 # where `npm i -g @openbkn/bkn-sdk` silently installs an older release instead
@@ -595,8 +622,19 @@ ensure_helm_available() {
             existing="$(helm version --short --client 2>/dev/null | awk -F': ' 'NR==1{print $2}' | awk '{print $1}' | cut -d'+' -f1 || true)"
         fi
         case "${existing}" in
-            v3.*|v4.*)
+            v3.*)
                 return 0
+                ;;
+            v4.*)
+                # Host bootstrap owns Helm on Linux and pins Helm 3 (as for v2);
+                # elsewhere (macOS, bring-your-own cluster) the operator's Helm stays.
+                if [[ "${OPENBKN_SKIP_PLATFORM_BOOTSTRAP:-false}" == "true" || "$(uname -s 2>/dev/null)" == Darwin ]]; then
+                    log_error "$(bkn_helm_unsupported_message "${existing#v}")"
+                    return 1
+                fi
+                log_warn "Helm ${existing} detected; this deploy requires Helm 3. Re-installing ${HELM_VERSION}..."
+                install_helm
+                return $?
                 ;;
             v2.*)
                 log_warn "Helm ${existing} detected; this deploy requires Helm v3+ (charts use --timeout duration syntax). Re-installing ${HELM_VERSION}..."
@@ -1387,7 +1425,9 @@ REDIS_ARCHITECTURE="${REDIS_ARCHITECTURE:-sentinel}"  # standalone or sentinel
 REDIS_IMAGE="${REDIS_IMAGE:-}"
 REDIS_IMAGE_REGISTRY="${REDIS_IMAGE_REGISTRY:-}"
 REDIS_IMAGE_REPOSITORY="${REDIS_IMAGE_REPOSITORY:-redis}"
-REDIS_IMAGE_TAG="${REDIS_IMAGE_TAG:-1.11.2-main.20260718025853.shaf24e971}"
+# Same images/redis sources as the earlier 1.11.2-main.20260718025853 build, whose
+# SWR copy lost its arm64 manifest; this tag is amd64+arm64 on both SWR and GHCR.
+REDIS_IMAGE_TAG="${REDIS_IMAGE_TAG:-1.11.2-20261016132300.sha81d5752}"
 REDIS_PERSISTENCE_ENABLED="${REDIS_PERSISTENCE_ENABLED:-true}"
 # Empty: pick cluster default StorageClass (e.g. kind "standard"); else local-path if that SC exists; else local-path.
 REDIS_STORAGE_CLASS="${REDIS_STORAGE_CLASS:-}"
