@@ -282,6 +282,7 @@ install_mariadb_helm() {
         --set mariadb.auth.username="${MARIADB_USER}"
         --set mariadb.auth.password="${MARIADB_PASSWORD}"
         --set mariadb.config.maxConnections="${MARIADB_MAX_CONNECTIONS}"
+        --set mariadb.config.maxAllowedPacket="${MARIADB_MAX_ALLOWED_PACKET}"
         --set mariadb.persistence.enabled="${persistence_enabled}"
     )
 
@@ -310,6 +311,7 @@ install_mariadb_helm() {
     log_info "  Namespace: ${ns}"
     log_info "  Image: ${image_without_tag}:${image_tag}"
     log_info "  Max Connections: ${MARIADB_MAX_CONNECTIONS}"
+    log_info "  Max Allowed Packet: ${MARIADB_MAX_ALLOWED_PACKET}"
     log_info "  Storage: ${persistence_enabled}"
 
     if [[ "${reuse_existing_values}" == "true" ]]; then
@@ -488,6 +490,7 @@ spec:
               containerPort: 3306
           args:
             - --max-connections=${MARIADB_MAX_CONNECTIONS}
+            - --max-allowed-packet=${MARIADB_MAX_ALLOWED_PACKET}
           env:
             - name: MARIADB_ROOT_PASSWORD
               valueFrom:
@@ -567,6 +570,7 @@ spec:
               containerPort: 3306
           args:
             - --max-connections=${MARIADB_MAX_CONNECTIONS}
+            - --max-allowed-packet=${MARIADB_MAX_ALLOWED_PACKET}
           env:
             - name: MARIADB_ROOT_PASSWORD
               valueFrom:
@@ -729,7 +733,7 @@ install_mariadb_bitnami() {
         --set auth.database="${MARIADB_DATABASE}"
         --set auth.username="${MARIADB_USER}"
         --set auth.password="${MARIADB_PASSWORD}"
-        --set primary.extraFlags="--max-connections=${MARIADB_MAX_CONNECTIONS}"
+        --set primary.extraFlags="--max-connections=${MARIADB_MAX_CONNECTIONS} --max-allowed-packet=${MARIADB_MAX_ALLOWED_PACKET}"
         --wait --timeout=600s
     )
 
