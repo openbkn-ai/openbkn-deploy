@@ -16,4 +16,13 @@ if rg -q '/install-status' <<<"${summary_block}"; then
     exit 1
 fi
 
+# Install output is kept and shared: it names where secrets are stored, never their values.
+for f in openbkn.sh mariadb.sh redis.sh kafka.sh opensearch.sh; do
+    if rg -n '(echo|log_[a-z]+)[^|#]*\$\{(_initial_pwd|MARIADB_PASSWORD|MARIADB_ROOT_PASSWORD|redis_password|KAFKA_CLIENT_PASSWORD|OPENSEARCH_INITIAL_ADMIN_PASSWORD)\}[^|]*$' "${script_dir}/${f}"; then
+        echo "${f} must not print secret values" >&2
+        exit 1
+    fi
+done
+rg -Fq 'password: bknSafe.initialPassword in ${CONFIG_YAML_PATH}' "${source_file}"
+
 echo 'openbkn install summary tests passed'

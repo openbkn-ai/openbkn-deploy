@@ -99,11 +99,9 @@ if [[ -z "${ONBOARD_DEFAULT_BKN_PASSWORD:-}" ]]; then
     ONBOARD_DEFAULT_BKN_PASSWORD="$(config_yaml_top_field bknSafe initialPassword 2>/dev/null || true)"
 fi
 
-# First business user  test  (after  openbkn admin user create ) — the server
-# generates a random initial password when none is given; onboard immediately
-# reset-passwords it to this value so examples/docs have a known login.
-# Override: ONBOARD_TEST_USER_PASSWORD; rename default: ONBOARD_DEFAULT_TEST_USER_PASSWORD
-: "${ONBOARD_DEFAULT_TEST_USER_PASSWORD:=111111}"
+# First business user  test  gets ONBOARD_TEST_USER_PASSWORD when set; otherwise a
+# random password kept in ~/.openbkn-ai/test-user-password (0600; override the path
+# with ONBOARD_TEST_USER_PASSWORD_FILE). It is never printed.
 
 # Same requirement as @openbkn/bkn-sdk on npm. https://www.npmjs.com/package/@openbkn/bkn-sdk
 # A full version, not a major: 22.0.0 clears a `>= 22` bar and still cannot
@@ -241,7 +239,7 @@ usage() {
     echo ""
     echo "  ADP impex / auth:  openbkn call  uses ~/.bkn from  openbkn auth login ."
     echo "    - openbkn admin / console admin handles user ops. ADP impex uses user test with all role list"
-    echo "      roles (typically three business admins), then  openbkn auth  as  test .  -y  uses password  ${ONBOARD_DEFAULT_TEST_USER_PASSWORD:-111111}  (override: ONBOARD_TEST_USER_PASSWORD) ."
+    echo "      roles (typically three business admins), then  openbkn auth  as  test .  -y  generates its password into  ~/.openbkn-ai/test-user-password  (override: ONBOARD_TEST_USER_PASSWORD) ."
     echo "  --namespace=NS           Override K8s namespace (default: NAMESPACE env, else namespace: in CONFIG_YAML_PATH, else openbkn)"
     echo "  --enable-bkn-search      Only patch bkn/ontology ConfigMaps and rollout"
     echo "  --bkn-embedding-name=X   Required with --enable-bkn-search (registered model_name)"
@@ -252,8 +250,7 @@ usage() {
     echo "                ONBOARD_SKIP_OPENBKN_INSTALL=true  never run npm -g for openbkn in onboard"
     echo "                ONBOARD_SKIP_OPENBKN_ADMIN_INSTALL=true  do not auto/offer  npm -g  openbkn admin  (also skipped with  -y )"
     echo "                ONBOARD_SKIP_TEST_USER=true  same as --skip-test-user"
-    echo "                ONBOARD_TEST_USER_PASSWORD=...  override default password for  test  (default: ONBOARD_DEFAULT_TEST_USER_PASSWORD, built-in 111111)"
-    echo "                ONBOARD_DEFAULT_TEST_USER_PASSWORD=...  first-user  test  password (default 111111;  -y  non-interactive)"
+    echo "                ONBOARD_TEST_USER_PASSWORD=...  password for  test  (default: generated and kept in ONBOARD_TEST_USER_PASSWORD_FILE, ~/.openbkn-ai/test-user-password)"
     echo "                ONBOARD_OPENBKN_IMPEX_NO_RELLOGIN=1  skip  openbkn auth  as  test  before impex (use current openbkn session)"
     echo "                ONBOARD_NO_COMPLETION_REPORT=1  do not print the English completion report at the end"
     echo "                ONBOARD_FORCE_INSECURE_LOGIN=true  always pass -k (--insecure) to openbkn auth login (even for http:// bases; default false)"
@@ -399,6 +396,56 @@ onboard_ensure_node_22() {
     fi
 }
 
+# The openbkn CLI refuses a platform whose base version (x.y.z) differs from its
+# own, so onboard installs the SDK release matching the platform rather than
+# @latest. Prints the platform's base version, or nothing when it cannot be read.
+onboard_platform_base_version() {
+    if [[ -n "${ONBOARD_PLATFORM_BASE_VERSION+set}" ]]; then
+        printf '%s' "${ONBOARD_PLATFORM_BASE_VERSION}"
+        return 0
+    fi
+    local base
+    base="$(onboard_default_access_base_url 2>/dev/null || true)"
+    ONBOARD_PLATFORM_BASE_VERSION=""
+    if [[ -n "${base}" ]]; then
+        ONBOARD_PLATFORM_BASE_VERSION="$(curl -fsSk --noproxy '*' --max-time 10 "${base%/}/api/bkn-backend/v1/health" 2>/dev/null |
+            python3 -c '
+import json, re, sys
+try:
+    body = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+data = body.get("data") if isinstance(body.get("data"), dict) else body
+match = re.match(r"v?(\d+\.\d+\.\d+)", str(data.get("ServerVersion") or data.get("serverVersion") or ""))
+print(match.group(1) if match else "")' 2>/dev/null || true)"
+    fi
+    printf '%s' "${ONBOARD_PLATFORM_BASE_VERSION}"
+}
+
+# npm spec for the SDK: the platform's version when npm has it, else @latest.
+onboard_sdk_spec() {
+    local version
+    version="$(onboard_platform_base_version)"
+    if [[ -n "${version}" && -n "$(npm view "@openbkn/bkn-sdk@${version}" version 2>/dev/null || true)" ]]; then
+        printf '@openbkn/bkn-sdk@%s' "${version}"
+    else
+        printf '@openbkn/bkn-sdk@latest'
+    fi
+}
+
+# When the installed CLI still does not match the platform (no SDK release for
+# it on npm yet, or offline), every openbkn call would fail its version check.
+# Use the SDK's documented switch for this run only, and say so.
+onboard_sdk_version_guard() {
+    command -v openbkn &>/dev/null || return 0
+    local platform cli
+    platform="$(onboard_platform_base_version)"
+    cli="$(openbkn --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    [[ -n "${platform}" && -n "${cli}" && "${platform}" != "${cli}" ]] || return 0
+    export BKN_SKIP_VERSION_CHECK=1
+    log_warn "openbkn CLI ${cli} does not match platform ${platform}, and @openbkn/bkn-sdk@${platform} is not installed (not published on npm yet, or offline). This onboard run skips the CLI version check (BKN_SKIP_VERSION_CHECK=1); install @openbkn/bkn-sdk@${platform} once it is available."
+}
+
 onboard_ensure_bkn_cli() {
     if command -v openbkn &>/dev/null; then
         return 0
@@ -428,8 +475,10 @@ onboard_ensure_bkn_cli() {
         log_error "openbkn not in PATH. In a TTY you get a Y/n prompt; without a TTY use  $0 -y  or install: npm i -g @openbkn/bkn-sdk@latest"
         exit 1
     fi
-    if ! npm i -g @openbkn/bkn-sdk@latest; then
-        log_error "npm i -g @openbkn/bkn-sdk@latest failed. Check registry/proxy, or EACCES (avoid sudo; use nvm user prefix.)"
+    local sdk_spec
+    sdk_spec="$(onboard_sdk_spec)"
+    if ! npm i -g "${sdk_spec}"; then
+        log_error "npm i -g ${sdk_spec} failed. Check registry/proxy, or EACCES (avoid sudo; use nvm user prefix.)"
         exit 1
     fi
     hash -r 2>/dev/null || true
@@ -456,8 +505,10 @@ onboard_upgrade_bkn_cli() {
     if ! command -v openbkn &>/dev/null; then
         return 0
     fi
-    if ! npm i -g @openbkn/bkn-sdk@latest; then
-        log_warn "npm i -g @openbkn/bkn-sdk@latest failed; continuing with the existing openbkn CLI."
+    local sdk_spec
+    sdk_spec="$(onboard_sdk_spec)"
+    if ! npm i -g "${sdk_spec}"; then
+        log_warn "npm i -g ${sdk_spec} failed; continuing with the existing openbkn CLI."
         return 0
     fi
     hash -r 2>/dev/null || true
@@ -481,6 +532,7 @@ onboard_ensure_node_22
 onboard_prepend_npm_global_bin_to_path
 onboard_upgrade_bkn_cli
 onboard_ensure_bkn_cli
+onboard_sdk_version_guard
 if ! command -v kubectl &>/dev/null; then
     log_error "kubectl not found"
     exit 1
@@ -745,18 +797,6 @@ onboard_probe() {
     onboard_provision_oss_default_storage "${NAMESPACE}"
 }
 
-# onboard_bkn_safe_detected — true when the bkn-safe auth stack is present
-# (helm release "bkn-safe" or a bkn-safe Deployment in any namespace). bkn-safe
-# now installs into the shared openbkn namespace, so match the release/deploy
-# name rather than a dedicated namespace.
-onboard_bkn_safe_detected() {
-    if command -v helm &>/dev/null; then
-        helm list -A 2>/dev/null | awk 'NR>1 {print $1}' | grep -qE '^bkn-safe$' && return 0
-    fi
-    kubectl get deploy -A 2>/dev/null | awk '{print $2}' | grep -qE '^bkn-safe$' && return 0
-    return 1
-}
-
 # Detect the bkn-safe auth stack and print admin guidance. bkn-safe self-seeds
 # the admin (account "admin", platform initial password — forced change on first
 # login) and the OAuth clients (client-seed Job), so no openbkn admin / test-user
@@ -817,10 +857,26 @@ if [[ -n "${CONFIG_FILE}" ]]; then
         onboard_log_err "For --config, install PyYAML: pip3 install pyyaml"
         exit 1
     fi
-    exec python3 "${SCRIPT_DIR}/scripts/lib/onboard_apply_config.py" \
+    # The report is printed here, not by the Python step, so it sees this run's
+    # state (test user, bkn-safe probe, access URL) instead of a bare subshell.
+    _ob_state="$(mktemp)"
+    _ob_rc=0
+    ONBOARD_REPORT_STATE_FILE="${_ob_state}" python3 "${SCRIPT_DIR}/scripts/lib/onboard_apply_config.py" \
         "${CONFIG_FILE}" \
         "${NAMESPACE}" \
-        "${SKIP_BKN}"
+        "${SKIP_BKN}" || _ob_rc=$?
+    if [[ "${_ob_rc}" -eq 0 && -s "${_ob_state}" ]]; then
+        while IFS=$'\t' read -r _ob_key _ob_value; do
+            case "${_ob_key}" in
+                MODELS) ONBOARD_REPORT_MODELS="${_ob_value}" ;;
+                BKN_CM) ONBOARD_REPORT_BKN_CM="${_ob_value}" ;;
+            esac
+        done <"${_ob_state}"
+        ONBOARD_REPORT_MAIN_MODE="config-yaml"
+        onboard_print_completion_report
+    fi
+    rm -f "${_ob_state}"
+    exit "${_ob_rc}"
 fi
 
 # Interactive (bash path for registration; BKN uses upsert in models.sh)

@@ -1376,7 +1376,7 @@ preflight_check_target_tools() {
             v3.*)
                 preflight_ok "helm: ${helm_bin} (${helm_ver})"
                 ;;
-            v2.*)
+            v2.*|v4.*)
                 preflight_fail "helm ${helm_ver} at ${helm_bin} is unsupported; deploy requires Helm v3. Use preflight fix helm-v3 or deploy.sh k8s install path."
                 ;;
             "")
@@ -2318,7 +2318,7 @@ preflight_apply_safe_fixes() {
         hver="$("${helm_for_fix}" version --short 2>/dev/null | awk '{print $1}' | cut -d'+' -f1 || true)"
         [[ -z "${hver}" ]] && hver="$("${helm_for_fix}" version --short --client 2>/dev/null | awk -F': ' 'NR==1{print $2}' | awk '{print $1}' | cut -d'+' -f1 || true)"
     fi
-    if [[ -z "${helm_for_fix}" ]] || [[ "${hver}" == v2.* ]]; then
+    if [[ -z "${helm_for_fix}" ]] || [[ "${hver}" == v2.* || "${hver}" == v4.* ]]; then
         if preflight_confirm_fix "helm-v3" \
             "install_helm (Helm 3 from k8s.sh)" \
             "May replace /usr/local/bin/helm. Required for v3 --timeout duration syntax."; then

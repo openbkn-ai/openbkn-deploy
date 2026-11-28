@@ -297,6 +297,11 @@ install_opensearch() {
 
     # OpenSearch password handling
     local existing_pass=$(config_yaml_dep_field opensearch password)
+    # The example configs' placeholder counts as unset on a fresh install only;
+    # an existing cluster may already run with it.
+    if [[ "${existing_pass}" == REPLACE_ME && "${fresh_install}" == "true" ]]; then
+        existing_pass=""
+    fi
     if [[ -n "${existing_pass}" ]]; then
         OPENSEARCH_INITIAL_ADMIN_PASSWORD="${existing_pass}"
         log_info "Using existing OpenSearch password from config.yaml"
@@ -504,7 +509,7 @@ EOF
     log_info "  Service: ${service_name}.${OPENSEARCH_NAMESPACE}.svc.cluster.local"
     log_info "  Port: 9200"
     log_info "  Username: admin"
-    log_info "  Password: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD}"
+    log_info "  Password: depServices.opensearch.password in ${CONFIG_YAML_PATH}"
     if [[ "${disable_security}" == "true" ]]; then
         log_warn "  Security: disabled (HTTP, no auth)"
     else

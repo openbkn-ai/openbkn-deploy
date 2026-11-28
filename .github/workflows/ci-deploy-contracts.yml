@@ -7,6 +7,8 @@ on:
       - 'conf/**'
       - 'deploy.sh'
       - 'preflight.sh'
+      - 'onboard.sh'
+      - 'dev/lib/**'
       - '.github/workflows/ci-deploy-contracts.yml'
   push:
     branches: [main]
@@ -15,6 +17,8 @@ on:
       - 'conf/**'
       - 'deploy.sh'
       - 'preflight.sh'
+      - 'onboard.sh'
+      - 'dev/lib/**'
       - '.github/workflows/ci-deploy-contracts.yml'
 
 permissions:
@@ -40,6 +44,15 @@ jobs:
           bash scripts/services/config_observability_test.sh
           bash scripts/services/openbkn_audit_consumer_test.sh
           bash scripts/services/openbkn_helm_upgrade_test.sh
+      - name: Fresh-install defaults (Helm version, secrets, accounts, storage, onboard)
+        run: |
+          bash -n scripts/lib/oss_storage.sh scripts/services/mariadb.sh dev/lib/mac_cluster.sh dev/lib/mac_common.sh onboard.sh
+          bash scripts/lib/helm_version_gate_test.sh
+          bash scripts/services/mariadb_password_test.sh
+          bash scripts/services/openbkn_bkn_project_accounts_test.sh
+          bash scripts/lib/onboard_cli_test.sh
+          bash scripts/lib/onboard_test_user_test.sh
+          python3 -m unittest scripts/lib/test_s3_bucket.py
       - name: Runtime delivery profiles and persistent keys
         run: python3 -m unittest discover -s scripts/lib -p 'test_runtime_profile*.py'
       - name: Sandbox REST gateway discovery

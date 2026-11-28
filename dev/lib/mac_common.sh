@@ -94,7 +94,7 @@ mac_doctor_hint_for_tool() {
         docker) printf '%s\n' "brew install --cask docker" ;;
         kind) printf '%s\n' "brew install kind" ;;
         kubectl) printf '%s\n' "brew install kubectl" ;;
-        helm) printf '%s\n' "brew install helm" ;;
+        helm) printf '%s\n' "brew install helm@3 && export PATH=\"\$(brew --prefix helm@3)/bin:\$PATH\"" ;;
         node) printf '%s\n' "brew install node@22" ;;
         *) printf '%s\n' "(no packaged hint)" ;;
     esac
@@ -112,6 +112,8 @@ mac_helm_client_semver() {
 mac_helm_version_ok_for_charts() {
     local cur="$1"
     [[ -n "${cur}" ]] || return 1
+    # Helm 4 is not supported by the installer (see bkn_require_supported_helm).
+    [[ "${cur%%.*}" == 3 ]] || return 1
     [[ "$(printf '%s\n' "${MAC_HELM_MIN_SEMVER}" "${cur}" | sort -V | head -1)" == "${MAC_HELM_MIN_SEMVER}" ]]
 }
 
@@ -173,7 +175,12 @@ mac_doctor_apply_fixes() {
                     if ! brew install kubectl; then ec=1; fi
                     ;;
                 helm)
-                    if ! brew install helm; then ec=1; fi
+                    # Homebrew's plain "helm" formula is Helm 4, which the installer does not support.
+                    if brew install helm@3; then
+                        mac_log_warn "helm@3 is keg-only; add it to PATH: export PATH=\"$(brew --prefix helm@3)/bin:\$PATH\""
+                    else
+                        ec=1
+                    fi
                     ;;
             esac
         fi
@@ -270,8 +277,9 @@ mac_doctor() {
                 local hv
                 hv="$(mac_helm_client_semver)"
                 if [[ -n "${hv}" ]] && ! mac_helm_version_ok_for_charts "${hv}"; then
-                    printf '%b[FAIL]%b %s (version %s; need >= %s for Kafka/Bitnami charts — e.g. %bbrew install helm%b or re-run %bget-helm-3%b with HELM_VERSION=v3.19.0)\n' \
-                        "${MAC_D_BAD}" "${MAC_D_RESET}" "${c}" "${hv}" "${MAC_HELM_MIN_SEMVER}" "${MAC_D_BOLD}" "${MAC_D_RESET}" "${MAC_D_BOLD}" "${MAC_D_RESET}"
+                    printf '%b[FAIL]%b %s (version %s; the installer needs Helm 3, %s or newer)\n' \
+                        "${MAC_D_BAD}" "${MAC_D_RESET}" "${c}" "${hv}" "${MAC_HELM_MIN_SEMVER}"
+                    printf '  %bto fix:%b %b%s%b\n' "${MAC_D_DIM}" "${MAC_D_RESET}" "${MAC_D_BOLD}" "$(mac_doctor_hint_for_tool helm)" "${MAC_D_RESET}"
                     fail=1
                 else
                     printf '%b[OK]%b %s' "${MAC_D_OK}" "${MAC_D_RESET}" "${c}"

@@ -346,7 +346,7 @@ EOF
     log_info "  Port: 9092"
     if [[ "${KAFKA_AUTH_ENABLED}" == "true" ]]; then
         log_info "  SASL enabled: true"
-        log_info "  Client Password: ${KAFKA_CLIENT_PASSWORD}"
+        log_info "  Client Password: depServices.mq.auth.password in ${CONFIG_YAML_PATH}"
     fi
 
     # Post-install health check (pods might exist but be CrashLooping; Helm can still "succeed").

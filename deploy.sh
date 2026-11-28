@@ -523,6 +523,16 @@ main() {
         return $?
     fi
 
+    # Stop before any release changes when the Helm client is not Helm 3. Host
+    # bootstrap (k8s/k3s, or a Linux host without a cluster yet) installs the
+    # pinned Helm 3 itself, so only installs that use the Helm on PATH are gated.
+    if [[ "${action}" =~ ^(install|init|upgrade)$ && ! "${module}" =~ ^(k8s|k3s|config|storage)$ ]]; then
+        if [[ "${OPENBKN_SKIP_PLATFORM_BOOTSTRAP:-false}" == "true" || "${OPENBKN_BYOK_CLUSTER:-false}" == "true" ]] ||
+            kubectl --request-timeout=5s get --raw /version >/dev/null 2>&1; then
+            bkn_require_supported_helm || exit 1
+        fi
+    fi
+
     if [[ "${module}" == "config" ]]; then
         case "${action}" in
             generate)

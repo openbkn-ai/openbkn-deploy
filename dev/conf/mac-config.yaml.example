@@ -1,6 +1,7 @@
 # Template for local kind dev. Copy once:
 #   cp deploy/dev/conf/mac-config.yaml.example deploy/dev/conf/mac-config.yaml
-# After `data-services install`, passwords are filled when AUTO_GENERATE_CONFIG is true.
+# `REPLACE_ME` counts as unset: a fresh install generates random passwords and,
+# when AUTO_GENERATE_CONFIG is true, writes them back here. Set a value only to choose it.
 # File mac-config.yaml is gitignored — do not commit secrets.
 
 namespace: openbkn

@@ -66,3 +66,36 @@ if grep -qx -- '--post-renderer' "${work}/helm-args"; then
     exit 1
 fi
 echo 'PASS: community install ignores commercial authentication artifacts'
+
+# The default small model onboard wrote into the live ConfigMap survives an
+# installer re-run. It is the first --set: above every values file, including a
+# commercial runtime values file still holding the previous release's model, and
+# below the operator's own --set values that follow it.
+SCRIPT_DIR="${ROOT}"
+kubectl() {
+    [[ "$*" == "get configmap bkn-backend-cm -n isolated -o json" ]] || { echo "unexpected kubectl $*" >&2; return 99; }
+    python3 -c 'import json; print(json.dumps({"data": {"bkn-backend-config.yaml":
+        "server:\n  defaultSmallModelEnabled: true\n  defaultSmallModelName: text-embedding-v4\n  httpPort: 13014\nlog:\n  logLevel: info\n"}}))'
+}
+helm() { printf '%s\n' "$@" >"${work}/helm-args"; }
+printf 'config:\n  server:\n    defaultSmallModelName: model-a\n    defaultSmallModelEnabled: true\n' >"${work}/bkn-backend.values.json"
+args=(upgrade --install bkn-backend chart --namespace isolated -f "${work}/config.yaml" -f "${work}/bkn-backend.values.json" --wait --set operator=value)
+_openbkn_helm_upgrade_release bkn-backend isolated "${args[@]}" >"${work}/output"
+printf '%s\n' upgrade --install bkn-backend chart \
+    --set-string config.server.defaultSmallModelName=text-embedding-v4 --set config.server.defaultSmallModelEnabled=true \
+    --namespace isolated -f "${work}/config.yaml" -f "${work}/bkn-backend.values.json" --wait --set operator=value >"${work}/expected"
+cmp "${work}/expected" "${work}/helm-args"
+if command -v helm >/dev/null 2>&1 && type -P helm >/dev/null; then
+    # Real Helm precedence: the leading --set beats the stale runtime values file.
+    mkdir -p "${work}/chart/templates"
+    printf 'apiVersion: v2\nname: c\nversion: 0.1.0\n' >"${work}/chart/Chart.yaml"
+    printf 'name: {{ .Values.config.server.defaultSmallModelName }}\n' >"${work}/chart/templates/cm.yaml"
+    rendered="$(command helm template x "${work}/chart" $(sed -n '5,8p' "${work}/helm-args" | tr '\n' ' ') -f "${work}/bkn-backend.values.json")"
+    [[ "${rendered}" == *"name: text-embedding-v4"* ]] || { echo "live model lost to the runtime values file: ${rendered}" >&2; exit 1; }
+fi
+# A Chart-rendered ConfigMap without an onboard choice adds nothing.
+kubectl() { python3 -c 'import json; print(json.dumps({"data": {"bkn-backend-config.yaml": "server:\n  defaultSmallModelName: \"\"\n  defaultSmallModelEnabled: false\n"}}))'; }
+_openbkn_helm_upgrade_release bkn-backend isolated "${args[@]}" >"${work}/output"
+printf '%s\n' "${args[@]}" >"${work}/expected"
+cmp "${work}/expected" "${work}/helm-args"
+echo 'PASS: onboard default small model is carried into upgrades above values files'

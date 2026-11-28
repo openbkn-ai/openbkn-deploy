@@ -61,8 +61,31 @@ def get_json(path: str) -> Any:
         return None
 
 
+# What this run did, for the completion report.
+REPORT = {"models": [], "bkn_cm": ""}
+
+
+def models_summary() -> str:
+    registered = [n for n, done in REPORT["models"] if done]
+    existing = [n for n, done in REPORT["models"] if not done]
+    parts = []
+    if registered:
+        parts.append("registered: " + ", ".join(registered))
+    if existing:
+        parts.append("already registered: " + ", ".join(existing))
+    return "; ".join(parts) or "none in config"
+
+
 def print_completion_report_config_yaml(namespace: str) -> None:
-    """Emit the same summary as deploy/scripts/lib/onboard_report.sh after successful --config run."""
+    """Hand the run's results to onboard.sh, which prints the completion report
+    with all of its own state (test user, platform probes). Run standalone, it
+    prints the same summary through deploy/scripts/lib/onboard_report.sh."""
+    state = os.environ.get("ONBOARD_REPORT_STATE_FILE")
+    if state:
+        with open(state, "w", encoding="utf-8") as f:
+            f.write("MODELS\t" + models_summary().replace("\n", " ") + "\n")
+            f.write("BKN_CM\t" + REPORT["bkn_cm"].replace("\n", " ") + "\n")
+        return
     here = os.path.dirname(os.path.abspath(__file__))
     rpt = os.path.join(here, "onboard_report.sh")
     if not os.path.isfile(rpt):
@@ -70,9 +93,8 @@ def print_completion_report_config_yaml(namespace: str) -> None:
     env = os.environ.copy()
     env["NAMESPACE"] = namespace
     env["ONBOARD_REPORT_MAIN_MODE"] = "config-yaml"
-    env["ONBOARD_REPORT_TEST_USER"] = (
-        "not run: --config mode has no test-user wizard"
-    )
+    env["ONBOARD_REPORT_MODELS"] = models_summary()
+    env["ONBOARD_REPORT_BKN_CM"] = REPORT["bkn_cm"]
     subprocess.run(
         [
             "bash",
@@ -132,6 +154,7 @@ def main() -> int:
         j = get_json("/api/mf-model-manager/v1/llm/list?page=1&size=500")
         if j and find_model_id(j, mname):
             print(f"[onboard] LLM already exists, skip: {mname}")
+            REPORT["models"].append((f"{mname} (LLM)", False))
             continue
         body = {
             "model_name": mname,
@@ -148,6 +171,7 @@ def main() -> int:
         if r != 0:
             return r
         print(f"[onboard] Registered LLM: {mname}")
+        REPORT["models"].append((f"{mname} (LLM)", True))
 
     def register_small(mname: str, mtype: str, e: dict) -> int:
         j = get_json(
@@ -155,6 +179,7 @@ def main() -> int:
         )
         if j and find_model_id(j, mname):
             print(f"[onboard] small model exists, skip: {mname}")
+            REPORT["models"].append((f"{mname} ({mtype})", False))
             return 0
         sm: dict = {
             "model_name": mname,
@@ -172,6 +197,7 @@ def main() -> int:
         r = jcall("/api/mf-model-manager/v1/small-model/add", sm)
         if r == 0:
             print(f"[onboard] Registered small: {mname} ({mtype})")
+            REPORT["models"].append((f"{mname} ({mtype})", True))
         return r
 
     # --- register embedding ---
@@ -223,6 +249,7 @@ def main() -> int:
         print(
             f"[onboard] skip BKN (skip_bkn={skip_bkn}, default='{bkn_default}')"
         )
+        REPORT["bkn_cm"] = "skipped (--skip-bkn)" if skip_bkn else "skipped (no default embedding in config)"
         print_completion_report_config_yaml(namespace)
         return 0
 
@@ -280,6 +307,7 @@ def patch_bkn_cms_and_rollout(namespace: str, dname: str) -> int:
             f"(defaultSmallModelEnabled=true, defaultSmallModelName={dname}). "
             "Skipping patch and bkn-backend / ontology-query restart."
         )
+        REPORT["bkn_cm"] = f"unchanged — already patched (defaultSmallModelName={dname})"
         return 0
     for cm in ("bkn-backend-cm", "ontology-query-cm"):
         r = _patch_one_cm(namespace, cm, dname)
@@ -287,6 +315,7 @@ def patch_bkn_cms_and_rollout(namespace: str, dname: str) -> int:
             return r
     for dep in ("bkn-backend", "ontology-query"):
         _rollout_restart(namespace, dep)
+    REPORT["bkn_cm"] = f"patched (defaultSmallModelName={dname}); bkn-backend & ontology-query restarted"
     return 0
 
 

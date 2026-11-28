@@ -40,19 +40,14 @@ _oss_provision_default_storage() (
         log_warn "OSS storage: OSS Gateway did not become ready"; return 1;
     }
 
-    local pf="" pf_log="" lport="" base="" i resp storage_id
+    local pf="" pf_log="" mpf="" mpf_log="" lport="" mport="" base="" resp storage_id
     pf_log="$(mktemp)" || return 1
-    trap 'if [[ -n "${pf}" ]]; then kill "${pf}" 2>/dev/null || true; wait "${pf}" 2>/dev/null || true; fi; rm -f "${pf_log}"' EXIT
+    mpf_log="$(mktemp)" || { rm -f "${pf_log}"; return 1; }
+    trap 'for p in ${pf} ${mpf}; do kill "${p}" 2>/dev/null || true; wait "${p}" 2>/dev/null || true; done; rm -f "${pf_log}" "${mpf_log}"' EXIT
     # Let kubectl choose an available loopback port rather than reserving 18080.
     kubectl port-forward --address=127.0.0.1 -n "${ns}" svc/oss-gateway-backend :8080 >"${pf_log}" 2>&1 &
     pf=$!
-    for ((i=0; i<15; i++)); do
-        lport="$(sed -n 's/.*Forwarding from 127\.0\.0\.1:\([0-9]*\) .*/\1/p' "${pf_log}" | head -n 1)"
-        [[ -n "${lport}" ]] && break
-        kill -0 "${pf}" 2>/dev/null || break
-        sleep 1
-    done
-    [[ -n "${lport}" ]] || { log_warn "OSS storage: port-forward failed to start"; return 1; }
+    lport="$(_oss_forwarded_port "${pf}" "${pf_log}")" || { log_warn "OSS storage: port-forward failed to start"; return 1; }
     base="http://127.0.0.1:${lport}/api/v1"
     resp="$(curl -fsS --max-time 15 "${base}/storages?enabled=true&is_default=true" 2>/dev/null)" || {
         log_warn "OSS storage: default-storage query failed"; return 1;
@@ -74,11 +69,16 @@ _oss_provision_default_storage() (
     muser="$(kubectl exec -n "${ns}" "${mpod}" -- printenv MINIO_ROOT_USER 2>/dev/null)" || { log_warn "OSS storage: cannot read MinIO user"; return 1; }
     mpass="$(kubectl exec -n "${ns}" "${mpod}" -- printenv MINIO_ROOT_PASSWORD 2>/dev/null)" || { log_warn "OSS storage: cannot read MinIO password"; return 1; }
     [[ -n "${muser}" && -n "${mpass}" ]] || { log_warn "OSS storage: missing MinIO credentials"; return 1; }
-    # Pass the bucket as an argument; never interpolate it into shell source.
-    # --ignore-existing makes retries safe while preserving actual failures.
-    if ! kubectl exec -n "${ns}" "${mpod}" -- sh -c \
-        'mc alias set kwoss http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1 && mc mb --ignore-existing "kwoss/$1" >/dev/null 2>&1' sh "${bucket}" >/dev/null 2>&1; then
-        log_warn "OSS storage: could not create MinIO bucket '${bucket}'; storage registration skipped"
+    # Create the bucket over the S3 API from this host rather than with `mc`
+    # inside the pod: MinIO images without the client (for example arm64 source
+    # builds) silently skipped registration. Credentials travel by environment.
+    kubectl port-forward --address=127.0.0.1 -n "${ns}" svc/minio :9000 >"${mpf_log}" 2>&1 &
+    mpf=$!
+    mport="$(_oss_forwarded_port "${mpf}" "${mpf_log}")" || { log_warn "OSS storage: MinIO port-forward failed to start"; return 1; }
+    local bucket_error
+    if ! bucket_error="$(S3_ACCESS_KEY="${muser}" S3_SECRET_KEY="${mpass}" \
+        python3 "${SCRIPT_DIR}/scripts/lib/s3_bucket.py" "http://127.0.0.1:${mport}" "${bucket}" 2>&1 >/dev/null)"; then
+        log_warn "OSS storage: could not create MinIO bucket '${bucket}' (${bucket_error:-unknown error}); storage registration skipped"
         return 1
     fi
     body="$(MUSER="${muser}" MPASS="${mpass}" SNAME="${sname}" BUCKET="${bucket}" EP="http://minio.${ns}.svc.cluster.local:9000" python3 -c '
@@ -102,6 +102,18 @@ print(json.dumps(dict(storage_name=os.environ["SNAME"], vendor_type="ECEPH",
     }
     log_info "Default OSS storage ready: '${sname}' (MinIO bucket '${bucket}')"
 )
+
+# Args: <port-forward pid> <its log>. Prints the local port kubectl chose.
+_oss_forwarded_port() {
+    local pid="$1" log="$2" port="" i
+    for ((i=0; i<15; i++)); do
+        port="$(sed -n 's/.*Forwarding from 127\.0\.0\.1:\([0-9]*\) .*/\1/p' "${log}" | head -n 1)"
+        [[ -n "${port}" ]] && break
+        kill -0 "${pid}" 2>/dev/null || break
+        sleep 1
+    done
+    [[ -n "${port}" ]] && printf '%s\n' "${port}"
+}
 
 _oss_storage_response() {
     python3 -c '

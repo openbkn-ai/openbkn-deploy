@@ -9,17 +9,38 @@
 #   ONBOARD_REPORT_MODELS         human-readable status (e.g. "skipped — N LLM, M small/embedding already registered")
 #   ONBOARD_REPORT_BKN_CM         human-readable status (e.g. "skipped — already patched (defaultSmallModelName=…)")
 
+# onboard_bkn_safe_detected — true when the bkn-safe auth stack is present
+# (helm release "bkn-safe" or a bkn-safe Deployment in any namespace). bkn-safe
+# installs into the shared openbkn namespace, so match the release/deploy name
+# rather than a dedicated namespace. Lives here so the report has it in every
+# mode. The listing is read whole first: `grep -q` closing a pipe early makes
+# the writer fail with SIGPIPE, which pipefail turns into "not detected".
+onboard_bkn_safe_detected() {
+    local _names=""
+    if command -v helm &>/dev/null; then
+        _names="$(helm list -A -q 2>/dev/null || true)"
+        grep -qx 'bkn-safe' <<<"${_names}" && return 0
+    fi
+    _names="$(kubectl get deploy -A -o custom-columns=NAME:.metadata.name --no-headers 2>/dev/null || true)"
+    grep -qx 'bkn-safe' <<<"${_names}"
+}
+
 onboard_print_completion_report() {
     if [[ "${ONBOARD_NO_COMPLETION_REPORT:-}" == "1" || "${ONBOARD_NO_COMPLETION_REPORT:-}" == "true" ]]; then
         return 0
     fi
 
-    local _isfu _line _kwh _kctx _bd _acurl _isf _isf_styled _adm_pwd _tpw
+    local _isfu _line _kwh _kctx _acurl _isf _isf_styled _adm_pwd _tpw
     _isfu="${ONBOARD_REPORT_TEST_USER:-}"
     _line="--------------------------------------------"
-    # Platform account credentials (NOT database passwords) for the summary.
+    # Platform account credentials (NOT database passwords): only where they are
+    # kept. The report ends up in logs, so it never carries a password.
     _adm_pwd="$(config_yaml_top_field bknSafe initialPassword 2>/dev/null || true)"
-    _tpw="${ONBOARD_TEST_USER_PASSWORD:-${ONBOARD_DEFAULT_TEST_USER_PASSWORD:-111111}}"
+    if type onboard_test_user_password_hint &>/dev/null; then
+        _tpw="$(onboard_test_user_password_hint)"
+    else
+        _tpw="see ONBOARD_TEST_USER_PASSWORD_FILE"
+    fi
 
     if type onboard_bkn_safe_detected &>/dev/null && onboard_bkn_safe_detected 2>/dev/null; then
         _isf="bkn-safe"
@@ -77,13 +98,13 @@ onboard_print_completion_report() {
         esac
         echo "  Platform accounts (initial passwords, NOT database credentials)"
         if [[ -n "${_adm_pwd}" ]]; then
-            echo -e "   • admin:  ${YELLOW}admin / ${_adm_pwd}${NC}  (initial — a change is forced on first login)"
+            echo "   • admin:  initial password is bknSafe.initialPassword in ${CONFIG_YAML_PATH:-config.yaml} (a change is forced on first login)"
         else
             echo "   • admin:  initial password not recorded here; see bknSafe.initialPassword in ${CONFIG_YAML_PATH:-config.yaml}"
         fi
         case "${_isfu}" in
             created*)
-                echo -e "   • test:   ${YELLOW}test / ${_tpw}${NC}  (business user created by onboard)"
+                echo "   • test:   password ${_tpw}  (business user created by onboard)"
                 ;;
             ready*)
                 echo "   • test:   already existed — password unchanged"
@@ -93,13 +114,15 @@ onboard_print_completion_report() {
         echo "  Next steps"
         case "${_isfu}" in
             created*)
-                echo "   • User test:  sign-in:  openbkn auth login ${_acurl} -u test -p '${_tpw}' -k"
+                echo "   • User test:  sign-in:  openbkn auth login ${_acurl} -u test -p '<password>' -k"
                 ;;
             ready*)
                 echo "   • User test:  sign-in:  openbkn auth login ${_acurl} -u test -p '<password>' -k"
                 ;;
         esac
-        echo "   • Verify:    openbkn bkn list -bd ${_bd} --pretty"
+        # (no business-domain flag: the old ${_bd} was never set, which under
+        # onboard.sh's set -u cut the report short.)
+        echo "   • Verify:    openbkn bkn list"
         echo "   • Tools:     openbkn context info   (Context Loader tool catalog, served over MCP)"
         echo "   • Docs:      https://github.com/openbkn-ai/bkn-foundry/blob/main/help/README.md"
         echo "                https://github.com/openbkn-ai/bkn-foundry/blob/main/help/en/README.md  (EN)"
