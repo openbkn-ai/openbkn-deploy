@@ -1017,15 +1017,19 @@ _openbkn_helm_upgrade_release() {
     fi
 
     # onboard.sh records the default small model in the live ConfigMap; carry it
-    # into this upgrade at the lowest precedence instead of rendering it away.
-    local model_values=""
+    # into this upgrade instead of rendering the Chart default back. As the
+    # first --set it beats every values file (the commercial runtime values hold
+    # the previous release's value), while an operator's own --set still wins.
     if [[ "${release_name}" == bkn-backend || "${release_name}" == ontology-query ]]; then
-        model_values="$(mktemp)"
-        kubectl get configmap "${release_name}-cm" -n "${namespace}" -o json 2>/dev/null |
-            python3 "${SCRIPT_DIR}/scripts/lib/model_defaults.py" >"${model_values}" || printf '{}\n' >"${model_values}"
-        if [[ "$(cat "${model_values}")" != "{}" ]]; then
-            log_info "Keeping the default small model chosen by onboard for ${release_name}"
-            helm_args=("${helm_args[@]:0:4}" -f "${model_values}" "${helm_args[@]:4}")
+        local small_model
+        small_model="$(kubectl get configmap "${release_name}-cm" -n "${namespace}" -o json 2>/dev/null |
+            python3 "${SCRIPT_DIR}/scripts/lib/model_defaults.py" --name 2>/dev/null || true)"
+        if [[ -n "${small_model}" ]]; then
+            log_info "Keeping the default small model chosen by onboard for ${release_name}: ${small_model}"
+            small_model="${small_model//\\/\\\\}"
+            small_model="${small_model//,/\\,}"
+            helm_args=("${helm_args[@]:0:4}" --set-string "config.server.defaultSmallModelName=${small_model}"
+                --set config.server.defaultSmallModelEnabled=true "${helm_args[@]:4}")
         fi
     fi
 
@@ -1071,7 +1075,6 @@ _openbkn_helm_upgrade_release() {
     fi
     rm -f "${helm_log}"
     [[ -z "${gateway_dir}" ]] || rm -rf "${gateway_dir}"
-    [[ -z "${model_values}" ]] || rm -f "${model_values}"
     if [[ "${bkn_project_accounts}" == true ]] && ! _openbkn_narrow_bkn_project_service_account; then
         helm_status=1
     fi

@@ -9,8 +9,10 @@ onboard.sh writes `server.defaultSmallModelName` / `defaultSmallModelEnabled`
 into the live bkn-backend-cm / ontology-query-cm. Those keys are Chart values
 (`config.server.*`), so a later `helm upgrade` renders the Chart default back.
 Reads the live ConfigMap JSON on stdin and prints Helm values restoring the
-choice, or `{}` when none was made. The caller passes them at the lowest
-precedence, so an explicit config.yaml value or --set still wins.
+choice, or `{}` when none was made; with --name, only the model name (or
+nothing). The installer passes the choice as --set ahead of every other --set:
+it wins over values files (config.yaml and the commercial runtime values, which
+carry the value of the previous release), and an operator's --set still wins.
 
 Standard library only: the install host need not have PyYAML.
 """
@@ -54,7 +56,11 @@ def main():
         configmap = json.loads(raw) if raw.strip() else {}
     except ValueError:
         configmap = {}
-    print(json.dumps(preserved(configmap)))
+    values = preserved(configmap)
+    if sys.argv[1:] == ["--name"]:
+        print(values["config"]["server"]["defaultSmallModelName"] if values else "")
+    else:
+        print(json.dumps(values))
     return 0
 
 

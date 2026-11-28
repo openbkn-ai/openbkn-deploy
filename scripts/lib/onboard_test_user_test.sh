@@ -57,7 +57,7 @@ onboard_provision_bkn_safe_test_user
 [[ "${ONBOARD_REPORT_TEST_USER}" == created* ]] || fail "test user not created: ${ONBOARD_REPORT_TEST_USER}"
 password="$(cat "${ONBOARD_TEST_USER_PASSWORD_FILE}")"
 [[ ${#password} -ge 12 && "${password}" != 111111 ]] || fail "a random password must be generated"
-[[ "$(stat -f '%Lp' "${ONBOARD_TEST_USER_PASSWORD_FILE}" 2>/dev/null || stat -c '%a' "${ONBOARD_TEST_USER_PASSWORD_FILE}")" == 600 ]] || fail "password file must be 0600"
+[[ "$(python3 -c 'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])' "${ONBOARD_TEST_USER_PASSWORD_FILE}")" == 600 ]] || fail "password file must be 0600"
 [[ "$(cat "${work}/initial")" == "${password}.init" ]] || fail "user create must get the initial password"
 python3 - "${work}/change-password-body" "${password}" <<'PY'
 import json, sys

@@ -38,4 +38,19 @@ OPENBKN_SKIP_PLATFORM_BOOTSTRAP=true
 if ensure_helm_available; then fail "bring-your-own cluster must not continue on Helm 4"; fi
 [[ ! -e "${work}/installs" ]] || fail "the operator's Helm must not be replaced on a bring-your-own cluster"
 
+# The real entry point stops before any release work on a bring-your-own cluster.
+printf '#!/usr/bin/env bash\necho "$*" >>"%s/helm-calls"\necho "v4.3.0+gabc"; echo "version.BuildInfo{Version:\\"v4.3.0\\"}"\n' "${work}" >"${work}/helm"
+chmod +x "${work}/helm"
+printf '#!/usr/bin/env bash\necho "$*" >>"%s/kubectl-calls"\nexit 1\n' "${work}" >"${work}/kubectl"
+chmod +x "${work}/kubectl"
+: >"${work}/kubeconfig"
+set +e
+KUBECONFIG="${work}/kubeconfig" OPENBKN_SKIP_PLATFORM_BOOTSTRAP=true CONFIG_YAML_PATH="${work}/none.yaml" \
+    bash "${SCRIPT_DIR}/deploy.sh" data-services install >"${work}/deploy-out" 2>&1
+rc=$?
+set -e
+[[ "${rc}" -ne 0 ]] || fail "deploy.sh must refuse Helm 4"
+grep -q 'Helm 4.3.0 is not supported' "${work}/deploy-out" || fail "deploy.sh must say why: $(tail -3 "${work}/deploy-out")"
+if grep -qv '^version' "${work}/helm-calls"; then fail "only 'helm version' may run before the refusal: $(cat "${work}/helm-calls")"; fi
+
 echo "helm_version_gate_test: passed"

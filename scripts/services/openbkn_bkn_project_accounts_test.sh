@@ -83,6 +83,27 @@ tables_exist=false
 if _openbkn_narrow_bkn_project_service_account; then fail "narrowing without tables must fail"; fi
 if grep -q REVOKE "${work}/sql"; then fail "must not revoke before per-table grants exist"; fi
 
+# Through the production call site: accounts before Helm, narrowing after it,
+# and a failed narrowing fails the release.
+tables_exist=true
+_openbkn_drop_literal_env_now_from_secret() { :; }
+_openbkn_adopt_unowned_resources() { return 1; }
+_openbkn_has_runtime_values() { return 1; }
+helm() { echo "HELM $*" >>"${work}/sql"; }
+: >"${work}/sql"
+_openbkn_helm_upgrade_release bkn-project openbkn upgrade --install bkn-project chart --namespace openbkn --wait >/dev/null
+python3 - "${work}/sql" <<'PY'
+import sys
+log = open(sys.argv[1]).read()
+create, helm, revoke = log.index("CREATE USER IF NOT EXISTS 'bkn_project'"), log.index("HELM upgrade --install bkn-project"), log.index("REVOKE")
+assert create < helm < revoke, (create, helm, revoke)
+PY
+tables_exist=false
+if _openbkn_helm_upgrade_release bkn-project openbkn upgrade --install bkn-project chart --namespace openbkn --wait >/dev/null; then
+    fail "a release whose service account cannot be narrowed must fail"
+fi
+tables_exist=true
+
 # Operator choices and external databases are left alone.
 printf '{"migration": {"existingSecret": "my-migration"}}' >"${work}/bkn-project.values.json"
 if _openbkn_bkn_project_accounts_managed; then fail "an operator migration Secret must win"; fi
