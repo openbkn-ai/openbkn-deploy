@@ -1371,7 +1371,7 @@ MARIADB_STORAGE_SIZE="${MARIADB_STORAGE_SIZE:-10Gi}"
 MARIADB_MAX_CONNECTIONS="${MARIADB_MAX_CONNECTIONS:-5000}"
 # Largest statement or row the server takes: a knowledge-base selection of tens of thousands of
 # files is one row of more than the server's own 16 MB.
-MARIADB_MAX_ALLOWED_PACKET="${MARIADB_MAX_ALLOWED_PACKET:-128M}"
+MARIADB_MAX_ALLOWED_PACKET="${MARIADB_MAX_ALLOWED_PACKET:-64M}"
 # Container resource requests are optional.  Do not configure limits here: the
 # installer deliberately clears them on both installs and upgrades.
 MARIADB_MEMORY_REQUEST="${MARIADB_MEMORY_REQUEST:-}"
